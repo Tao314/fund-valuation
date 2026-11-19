@@ -9,15 +9,15 @@
   body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F7F8FA; color: #1F2329; font-variant-numeric: tabular-nums; }
   header { background: #fff; color: #1F2329; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EBEDF0; }
   header h1 { font-size: 16px; font-weight: 600; margin: 0; }
-  main { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
-  .card { background: #FFFFFF; border-radius: 10px; padding: 14px; margin-bottom: 12px; border: 1px solid #EBEDF0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 12px; }
+  .card { background: #FFFFFF; border-radius: 10px; padding: 12px; margin-bottom: 12px; border: 1px solid #EBEDF0; }
   .card h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
   .card h4 { margin: 14px 0 8px; font-size: 14px; font-weight: 600; color: #646A73; }
   input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #EBEDF0; border-radius: 8px; font-size: 15px; min-height: 42px; }
   button { padding: 9px 16px; border: 0; border-radius: 8px; background: #1677FF; color: #fff; font-size: 14px; cursor: pointer; min-height: 42px; }
   button:active { background: #0958D9; }
   button.secondary { background: #F2F3F5; color: #1F2329; }
-  button.danger { background: #CF1322; padding: 5px 10px; font-size: 13px; min-height: 36px; }
+  button.danger { background: #CF1322; padding: 5px 10px; font-size: 13px; min-height: 40px; }
   button:disabled { opacity: .45; cursor: default; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row input { flex: 1; min-width: 160px; }
@@ -32,10 +32,10 @@
   .search-results button.remove-btn { background: #FFF1F0; color: #CF1322; border-color: #FFCCC7; }
   .badge { display: inline-block; background: #FFE58F; color: #AD6800; font-size: 11px; border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; transition: opacity 1s; }
   tr.group-row td { background: #F2F3F5; color: #1F2329; font-weight: 600; text-align: left; font-size: 14px; }
-  button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #1F2329; margin-right: 4px; min-height: 36px; }
+  button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #1F2329; margin-right: 4px; min-height: 40px; }
   button.mini:disabled { opacity: .35; cursor: default; }
   select.cat { padding: 5px; border: 1px solid #EBEDF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
-  .legend { color: #646A73; font-size: 12px; margin-bottom: 8px; }
+  .legend { color: #646A73; font-size: 11px; margin-bottom: 8px; }
   #countdown, #market-status { color: #646A73; font-size: 13px; }
   .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EBEDF0; flex-wrap: wrap; }
   .cat-item .cat-name { flex: 1; font-weight: 600; font-size: 14px; min-width: 80px; }
@@ -43,16 +43,16 @@
   /* main view: compact two-line fund cards */
   .group-title { font-size: 14px; font-weight: 600; margin: 14px 0 8px; }
   .group-title:first-child { margin-top: 0; }
-  .fund-card { background: #FFFFFF; border: 1px solid #EBEDF0; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; transition: background 1s; overflow: hidden; }
+  .fund-card { background: #FFFFFF; border: 1px solid #EBEDF0; border-radius: 10px; padding: 12px; margin-bottom: 10px; transition: background 1s; overflow: hidden; }
   .fund-card.changed { background: #FFFBE6; border-color: #FFE58F; }
   .fund-card .fc-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-  .fund-card .fc-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; }
-  .fund-card .fc-chg { font-size: 15px; font-weight: 600; white-space: nowrap; }
+  .fund-card .fc-name { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; line-height: 1.35; word-break: normal; overflow-wrap: break-word; }
+  .fund-card .fc-chg { font-size: 17px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
   .fund-card .fc-meta { font-size: 11px; color: #8F959E; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 12px; color: #646A73; }
+  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #646A73; }
   .fund-card .fc-row .fc-label { white-space: nowrap; }
   .fund-card .fc-row .fc-val { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .fund-card .fc-row .fc-val b { font-size: 14px; color: #1F2329; }
+  .fund-card .fc-row .fc-val b { font-size: 13px; color: #1F2329; }
   .fund-card .fc-status { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 6px; white-space: nowrap; }
   .fund-card .fc-state { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-pub { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
@@ -60,6 +60,10 @@
   .sort-toggle button { min-height: 40px; }
   .sort-toggle button.active { background: #1677FF; color: #fff; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
+  /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
+  @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } }
+  @media (min-width: 360px) and (max-width: 389px) { .fund-card { padding: 10px 12px; } }
+  @media (min-width: 390px) and (max-width: 429px) { .fund-card { padding: 12px; } .fund-card .fc-chg { font-size: 17px; } .fund-card .fc-row { font-size: 13px; } }
 </style>
 </head>
 <body>
@@ -157,7 +161,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.9.2 · 更新于 2026-11-20 00:53</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.9.3 · 更新于 2026-11-20 01:00</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
