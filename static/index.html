@@ -6,64 +6,73 @@
 <title>基金自算估值</title>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F7F8FA; color: #1F2329; font-variant-numeric: tabular-nums; }
-  header { background: #fff; color: #1F2329; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EBEDF0; }
+  body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F5F6F8; color: #202939; font-variant-numeric: tabular-nums; }
+  header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EAECF0; }
   header h1 { font-size: 16px; font-weight: 600; margin: 0; }
   main { max-width: 1100px; margin: 0 auto; padding: 12px; }
-  .card { background: #FFFFFF; border-radius: 10px; padding: 12px; margin-bottom: 12px; border: 1px solid #EBEDF0; }
-  .card h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
-  .card h4 { margin: 14px 0 8px; font-size: 14px; font-weight: 600; color: #646A73; }
-  input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #EBEDF0; border-radius: 8px; font-size: 15px; min-height: 42px; }
-  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #1677FF; color: #fff; font-size: 14px; cursor: pointer; min-height: 42px; }
-  button:active { background: #0958D9; }
-  button.secondary { background: #F2F3F5; color: #1F2329; }
-  button.danger { background: #CF1322; padding: 5px 10px; font-size: 13px; min-height: 40px; }
+  .card { background: #FFFFFF; border-radius: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid #EAECF0; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+  .card h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #202939; }
+  .card h4 { margin: 14px 0 8px; font-size: 14px; font-weight: 600; color: #667085; }
+  input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #EAECF0; border-radius: 8px; font-size: 15px; min-height: 42px; }
+  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #2563EB; color: #fff; font-size: 14px; cursor: pointer; min-height: 42px; }
+  button:active { background: #1D4ED8; }
+  button.secondary { background: #F2F3F5; color: #202939; }
+  button.danger { background: #FFFFFF; color: #C9362B; border: 1px solid #C9362B; padding: 5px 10px; font-size: 13px; min-height: 40px; }
   button:disabled { opacity: .45; cursor: default; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row input { flex: 1; min-width: 160px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { padding: 9px 6px; border-bottom: 1px solid #EBEDF0; text-align: right; white-space: nowrap; }
+  th, td { padding: 9px 6px; border-bottom: 1px solid #EAECF0; text-align: right; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
-  .up { color: #CF1322; font-weight: 600; } .down { color: #389E0D; font-weight: 600; } .flat { color: #646A73; font-weight: 600; }
-  .muted { color: #8F959E; font-size: 12px; }
-  .sub { color: #646A73; font-size: 12px; }
-  .err { color: #CF1322; font-size: 13px; min-height: 18px; }
-  .search-results button { margin: 4px 4px 0 0; background: #F2F3F5; color: #1F2329; border: 1px solid #EBEDF0; }
-  .search-results button.remove-btn { background: #FFF1F0; color: #CF1322; border-color: #FFCCC7; }
-  .badge { display: inline-block; background: #FFE58F; color: #AD6800; font-size: 11px; border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; transition: opacity 1s; }
-  tr.group-row td { background: #F2F3F5; color: #1F2329; font-weight: 600; text-align: left; font-size: 14px; }
-  button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #1F2329; margin-right: 4px; min-height: 40px; }
+  .up { color: #C9362B; font-weight: 600; } .down { color: #07845B; font-weight: 600; } .flat { color: #667085; font-weight: 600; }
+  .muted { color: #98A2B3; font-size: 12px; }
+  .sub { color: #667085; font-size: 12px; }
+  .err { color: #C9362B; font-size: 13px; min-height: 18px; }
+  .search-results button { margin: 4px 4px 0 0; background: #F2F3F5; color: #202939; border: 1px solid #EAECF0; }
+  .search-results button:disabled { background: #E8F3FF; color: #2563EB; border-color: #E8F3FF; }
+  .search-results button.remove-btn { background: #FFFFFF; color: #C9362B; border-color: #C9362B; }
+  .badge { display: inline-block; background: #FEF3C7; color: #B45309; font-size: 10px; border-radius: 6px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; transition: opacity 1s; }
+  tr.group-row td { background: #F5F6F8; color: #202939; font-weight: 600; text-align: left; font-size: 14px; }
+  button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #202939; margin-right: 4px; min-height: 40px; }
   button.mini:disabled { opacity: .35; cursor: default; }
-  select.cat { padding: 5px; border: 1px solid #EBEDF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
-  .legend { color: #646A73; font-size: 11px; margin-bottom: 8px; }
-  #countdown, #market-status { color: #646A73; font-size: 13px; }
-  .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EBEDF0; flex-wrap: wrap; }
+  select.cat { padding: 5px; border: 1px solid #EAECF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
+  .legend { color: #667085; font-size: 11px; margin-bottom: 8px; }
+  #countdown { color: #667085; font-size: 13px; }
+  .ms-pill { display: inline-flex; align-items: center; gap: 6px; background: #FFFFFF; border: 1px solid #EAECF0; border-radius: 999px; padding: 6px 12px; font-size: 12px; color: #667085; white-space: nowrap; }
+  .ms-dot { width: 6px; height: 6px; border-radius: 50%; background: #98A2B3; flex: none; }
+  .ms-dot.on { background: #07845B; }
+  .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EAECF0; flex-wrap: wrap; }
   .cat-item .cat-name { flex: 1; font-weight: 600; font-size: 14px; min-width: 80px; }
-  footer { text-align: center; color: #8F959E; font-size: 12px; padding: 16px; }
+  footer { text-align: center; color: #98A2B3; font-size: 11px; padding: 16px; }
   /* main view: compact two-line fund cards */
-  .group-title { font-size: 14px; font-weight: 600; margin: 14px 0 8px; }
+  .group-title { font-size: 13px; font-weight: 600; color: #202939; letter-spacing: .5px; margin: 14px 0 8px; }
   .group-title:first-child { margin-top: 0; }
-  .fund-card { background: #FFFFFF; border: 1px solid #EBEDF0; border-radius: 10px; padding: 12px; margin-bottom: 10px; transition: background 1s; overflow: hidden; }
-  .fund-card.changed { background: #FFFBE6; border-color: #FFE58F; }
+  .fund-card { background: #FFFFFF; border: 1px solid #EAECF0; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.04); padding: 12px; margin-bottom: 10px; transition: box-shadow 1s; overflow: hidden; }
+  .fund-card.changed { box-shadow: inset 3px 0 0 #F59E0B, 0 1px 2px rgba(16,24,40,.04); }
   .fund-card .fc-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .fund-card .fc-name { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; line-height: 1.35; word-break: normal; overflow-wrap: break-word; }
-  .fund-card .fc-chg { font-size: 17px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
-  .fund-card .fc-meta { font-size: 11px; color: #8F959E; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #646A73; }
-  .fund-card .fc-row .fc-label { white-space: nowrap; }
+  .fund-card .fc-chg { font-size: 20px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+  .fund-card .fc-chg .up, .fund-card .fc-chg .down, .fund-card .fc-chg .flat { font-weight: 700; }
+  .fund-card .fc-meta { font-size: 11px; color: #98A2B3; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #667085; }
+  .fund-card .fc-row .fc-label { white-space: nowrap; font-size: 12px; font-weight: 400; color: #667085; }
   .fund-card .fc-row .fc-val { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .fund-card .fc-row .fc-val b { font-size: 13px; color: #1F2329; }
-  .fund-card .fc-status { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 6px; white-space: nowrap; }
-  .fund-card .fc-state { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
-  .fund-card .fc-pub { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
-  .fund-card .fc-diff { font-size: 11px; color: #8F959E; }
+  .fund-card .fc-row .fc-val b { font-size: 15px; font-weight: 600; color: #202939; }
+  .fund-card .fc-row .up, .fund-card .fc-row .down, .fund-card .fc-row .flat { font-size: 13px; font-weight: 500; }
+  .fund-card .fc-row-prev .fc-val { font-size: 13px; font-weight: 400; color: #344054; }
+  .fund-card .fc-row-diff { border-top: 1px solid #F0F2F5; padding-top: 6px; font-size: 12px; }
+  .fund-card .fc-row-diff .fc-diff { font-size: 12px; font-weight: 500; color: #344054; }
+  .fund-card .fc-status { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 6px; white-space: nowrap; }
+  .fund-card .fc-state { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
+  .fund-card .fc-pub { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
+  .fund-card .fc-diff { font-size: 11px; color: #98A2B3; }
   .sort-toggle button { min-height: 40px; }
-  .sort-toggle button.active { background: #1677FF; color: #fff; }
+  .sort-toggle button.active { background: #2563EB; color: #fff; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
-  @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } }
+  @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
   @media (min-width: 360px) and (max-width: 389px) { .fund-card { padding: 10px 12px; } }
-  @media (min-width: 390px) and (max-width: 429px) { .fund-card { padding: 12px; } .fund-card .fc-chg { font-size: 17px; } .fund-card .fc-row { font-size: 13px; } }
+  @media (min-width: 390px) and (max-width: 429px) { .fund-card { padding: 12px; } .fund-card .fc-chg { font-size: 20px; } .fund-card .fc-row { font-size: 13px; } }
 </style>
 </head>
 <body>
@@ -96,9 +105,9 @@
     <div id="view-main">
       <div class="card">
         <div class="row">
-          <button class="secondary" id="refresh-btn">刷新估值</button>
+          <button id="refresh-btn">刷新估值</button>
           <span id="countdown">下次自动刷新：60s</span>
-          <span id="market-status"></span>
+          <span id="market-status" class="ms-pill"><span class="ms-dot" id="ms-dot"></span><span id="ms-text"></span></span>
         </div>
         <div class="row sort-toggle" style="margin-top:10px">
           <button class="secondary active" id="sort-default">默认顺序</button>
@@ -107,7 +116,7 @@
         <div class="err" id="dash-err"></div>
       </div>
       <div class="card">
-        <div class="legend">黄色高亮＋「更新」标记 = 相对上一次刷新有变化，几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。估值偏差＝自算估算涨幅－公布涨幅，越接近 0 越准。</div>
+        <div class="legend">卡片左侧琥珀竖条＝刚更新（相对上一次刷新有变化），几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。估值偏差＝自算估算涨幅－公布涨幅，越接近 0 越准。</div>
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
       </div>
@@ -161,7 +170,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.9.3 · 更新于 2026-11-20 01:00</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.0 · 更新于 2026-11-20 01:07</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -205,7 +214,12 @@ function marketStatusText() {
     : usSess === "preopen" ? "未开盘" : "休市";
   return "A股" + a + " · 港股" + hk + " · 美股" + us;
 }
-function updateMarketStatus() { const el = $("market-status"); if (el) el.textContent = marketStatusText(); updateFundStatuses(); }
+function updateMarketStatus() {
+  const t = marketStatusText();
+  const el = $("ms-text"); if (el) el.textContent = t;
+  const dot = $("ms-dot"); if (dot) dot.classList.toggle("on", /盘中/.test(t));
+  updateFundStatuses();
+}
 setInterval(updateMarketStatus, 60000);
 // Per-fund market status from holdings codes: 6-digit=A股, 5-digit=港股, alphabetic=美股.
 // Sessions by browser local time, Mon-Fri only, holidays ignored, US DST ignored.
@@ -408,17 +422,17 @@ function renderFunds(data) {
       const published = f.nav_date === lastTradingDay() && ["closed", "preopen", "lunch"].includes(st.session);
       const rows = published
         ? `<div class="fc-row"><span class="fc-label">今日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b><span class="fc-pub">已公布</span></span></div>
-        ${f.prev_dwjz != null ? `<div class="fc-row"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : ""}
-        <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val">${estNavFromPrev(f)} ${fmtPct(f.est_change_pct)}</span></div>
-        <div class="fc-row"><span class="fc-label">估值偏差</span><span class="fc-val fc-diff">${fmtDiff(estDiff(f))}</span></div>`
-        : `<div class="fc-row"><span class="fc-label">昨日净值（${f.nav_date ?? ""}）</span><span class="fc-val">${f.dwjz ?? "-"}</span></div>
+        ${f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : ""}
+        <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val"><b>${estNavFromPrev(f)}</b> ${fmtPct(f.est_change_pct)}</span></div>
+        <div class="fc-row fc-row-diff"><span class="fc-label">估值偏差</span><span class="fc-val fc-diff">${fmtDiff(estDiff(f))}</span></div>`
+        : `<div class="fc-row"><span class="fc-label">昨日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b></span></div>
         <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val"><b>${f.est_nav ?? "-"}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state" data-code="${f.fund_code}">${st.state}</span></span></div>`;
       html += `<div class="fund-card${ch ? " changed" : ""}">
       <div class="fc-head">
-        <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span>${ch ? '<span class="badge">更新</span>' : ""}</div>
+        <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         <div class="fc-chg">${published ? fmtPct(f.jzzzl) : fmtPct(f.est_change_pct)}</div>
       </div>
-      <div class="fc-meta">${f.fund_code} · 覆盖 ${f.coverage_pct}% · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}% · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       </div>`;
     });
