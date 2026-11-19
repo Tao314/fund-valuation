@@ -102,11 +102,14 @@ rm -rf /opt/fund-valuation
 | GET | /api/watchlist | 我的基金列表 |
 | POST | /api/watchlist | 添加基金 {fund_code}，代码须 6 位数字 |
 | DELETE | /api/watchlist/{id} | 删除（仅本人记录） |
-| POST | /api/watchlist/reorder | 按给定顺序重排 {ids: [id, ...]}，仅本人记录生效 |
-| POST | /api/watchlist/{id}/category | 设置分类 {category}，最长 20 字，空 = 未分类 |
-| GET | /api/estimates | 列表 + 自算估值（含 category 字段） |
+| POST | /api/watchlist/reorder | 在单个分类内重排 {category, ids: [id, ...]}，ids 须与该分类全部基金一致，否则 400；不影响分类顺序 |
+| POST | /api/categories/reorder | 重排分类顺序 {names: [分类名, ...]}，基金随分类整组移动 |
+| POST | /api/watchlist/{id}/category | 设置分类 {category}，最长 20 字，空 = 未分类；新分类自动登记到分类顺序末尾，基金移到该分类末尾 |
+| GET | /api/estimates | 列表 + 自算估值（含 category 字段和 categories 分类顺序数组） |
 
-前端功能：每行 ↑/↓ 调整顺序；下拉框给基金设分类（可新建），列表按分类分组显示；自动刷新带 60 秒倒计时；本次刷新有变化的基金行黄底高亮并带「更新」标记，无变化时标记自动消失。
+排序规则：先按分类顺序（user_categories 表，未分类永远最后），分类内按基金 sort_order。调基金顺序只在所属分类内生效，不动分类顺序；调分类顺序整组移动，组内基金顺序不变。
+
+前端功能：每行 ↑/↓ 在所属分类内调整顺序；分类标题行 ↑/↓ 调整分类顺序；下拉框给基金设分类（可新建），列表按分类分组显示；自动刷新带 60 秒倒计时；本次刷新有变化的基金行黄底高亮并带「更新」标记，无变化时标记自动消失。
 
 所有自选列表操作都按会话中的 user_id 过滤，不信任前端传入的用户 ID。
 

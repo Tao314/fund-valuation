@@ -85,6 +85,24 @@ def init_db():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(user_funds)").fetchall()]
     if "category" not in cols:
         conn.execute("ALTER TABLE user_funds ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    # Category ordering table + backfill from existing fund categories (idempotent)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_categories("
+        "user_id INTEGER NOT NULL, name TEXT NOT NULL, "
+        "sort_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, name))"
+    )
+    cat_rows = conn.execute(
+        "SELECT user_id, category, MIN(sort_order) AS m FROM user_funds "
+        "WHERE category <> '' GROUP BY user_id, category ORDER BY user_id, m, category"
+    ).fetchall()
+    for c_uid, c_name, _m in cat_rows:
+        nxt = conn.execute(
+            "SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_categories WHERE user_id=?", (c_uid,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO user_categories(user_id, name, sort_order) VALUES(?,?,?)",
+            (c_uid, c_name, nxt),
+        )
     conn.commit()
     conn.close()
 
@@ -141,6 +159,11 @@ class AddFundBody(BaseModel):
 
 class ReorderBody(BaseModel):
     ids: list
+    category: str = ""
+
+
+class CategoryReorderBody(BaseModel):
+    names: list
 
 
 class CategoryBody(BaseModel):
@@ -206,6 +229,14 @@ async def upstream_get(url: str, referer: Optional[str] = None) -> httpx.Respons
         return resp
 
 
+def _is_fund_entry(d: dict) -> bool:
+    """FundSearchAPI also returns stocks; funds have CATEGORY 700 (verified 2026-11-19)."""
+    cat = d.get("CATEGORY")
+    if cat is not None:
+        return str(cat) == "700"
+    return d.get("FundBaseInfo") is not None
+
+
 @app.get("/api/search")
 async def search(q: str, session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
@@ -215,7 +246,7 @@ async def search(q: str, session: Optional[str] = Cookie(default=None)):
     from urllib.parse import quote
     resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={quote(q)}")
     data = resp.json()
-    results = [{"code": d.get("CODE"), "name": d.get("NAME")} for d in data.get("Datas", []) if d.get("CODE")]
+    results = [{"code": d.get("CODE"), "name": d.get("NAME")} for d in data.get("Datas", []) if d.get("CODE") and _is_fund_entry(d)]
     return {"results": results[:20]}
 
 
@@ -384,6 +415,26 @@ async def fetch_quotes(symbols: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------- watchlist
+def category_order(conn, uid) -> list:
+    return [r["name"] for r in conn.execute(
+        "SELECT name FROM user_categories WHERE user_id=? ORDER BY sort_order, name", (uid,)
+    ).fetchall()]
+
+
+def sort_funds(rows, cat_order) -> list:
+    """Order: named categories by category sort_order, uncategorized last,
+    then fund sort_order, then id."""
+    idx = {name: i for i, name in enumerate(cat_order)}
+
+    def key(r):
+        cat = r["category"] or ""
+        if not cat:
+            return (1, 0, r["sort_order"], r["id"])
+        return (0, idx.get(cat, len(idx)), r["sort_order"], r["id"])
+
+    return sorted(rows, key=key)
+
+
 @app.get("/api/watchlist")
 def get_watchlist(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
@@ -391,7 +442,8 @@ def get_watchlist(session: Optional[str] = Cookie(default=None)):
         rows = conn.execute(
             "SELECT id, fund_code, fund_name, sort_order, category FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
-    return {"funds": [dict(r) for r in rows]}
+        cats = category_order(conn, uid)
+    return {"funds": [dict(r) for r in sort_funds(rows, cats)]}
 
 
 @app.post("/api/watchlist")
@@ -402,7 +454,7 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
         raise HTTPException(400, "基金代码需为 6 位数字")
     # Resolve fund name via search API (also validates the code exists)
     resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={code}")
-    name = next((d["NAME"] for d in resp.json().get("Datas", []) if d.get("CODE") == code), None)
+    name = next((d["NAME"] for d in resp.json().get("Datas", []) if d.get("CODE") == code and _is_fund_entry(d)), None)
     if not name:
         raise HTTPException(404, "未找到该基金代码")
     with db() as conn:
@@ -429,20 +481,47 @@ def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)
 
 @app.post("/api/watchlist/reorder")
 def reorder_watchlist(body: ReorderBody, session: Optional[str] = Cookie(default=None)):
+    """Reorder funds within ONE category only; never affects category order."""
     uid = current_user_id(session)
-    ids = []
-    for v in body.ids:
-        try:
-            ids.append(int(v))
-        except (TypeError, ValueError):
-            continue
+    category = (body.category or "").strip()
+    try:
+        ids = [int(v) for v in body.ids]
+    except (TypeError, ValueError):
+        raise HTTPException(400, "基金列表不匹配，请刷新后重试")
     with db() as conn:
-        owned = {r["id"] for r in conn.execute("SELECT id FROM user_funds WHERE user_id=?", (uid,)).fetchall()}
+        existing = [r["id"] for r in conn.execute(
+            "SELECT id FROM user_funds WHERE user_id=? AND category=?", (uid, category)
+        ).fetchall()]
+        if len(ids) != len(existing) or set(ids) != set(existing):
+            raise HTTPException(400, "基金列表不匹配，请刷新后重试")
         updated = 0
         for pos, item_id in enumerate(ids):
-            if item_id in owned:  # foreign ids are ignored, never touched
-                conn.execute("UPDATE user_funds SET sort_order=? WHERE id=? AND user_id=?", (pos, item_id, uid))
-                updated += 1
+            conn.execute(
+                "UPDATE user_funds SET sort_order=? WHERE id=? AND user_id=? AND category=?",
+                (pos, item_id, uid, category),
+            )
+            updated += 1
+    return {"ok": True, "updated": updated}
+
+
+@app.post("/api/categories/reorder")
+def reorder_categories(body: CategoryReorderBody, session: Optional[str] = Cookie(default=None)):
+    """Reorder whole categories; funds move with their category."""
+    uid = current_user_id(session)
+    names = []
+    for v in body.names:
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(400, "分类名不能为空")
+        names.append(v.strip())
+    if len(names) != len(set(names)):
+        raise HTTPException(400, "分类名不能重复")
+    with db() as conn:
+        updated = 0
+        for pos, name in enumerate(names):
+            cur = conn.execute(
+                "UPDATE user_categories SET sort_order=? WHERE user_id=? AND name=?", (pos, uid, name)
+            )
+            updated += cur.rowcount
     return {"ok": True, "updated": updated}
 
 
@@ -456,8 +535,20 @@ def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cook
         cur = conn.execute(
             "UPDATE user_funds SET category=? WHERE id=? AND user_id=?", (category, item_id, uid)
         )
-    if cur.rowcount == 0:
-        raise HTTPException(404, "记录不存在")
+        if cur.rowcount == 0:
+            raise HTTPException(404, "记录不存在")
+        if category:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_categories(user_id, name, sort_order) VALUES(?,?,"
+                "(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_categories WHERE user_id=?))",
+                (uid, category, uid),
+            )
+        # Move fund to the end of its (new) category
+        conn.execute(
+            "UPDATE user_funds SET sort_order=(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_funds "
+            "WHERE user_id=? AND category=? AND id<>?) WHERE id=? AND user_id=?",
+            (uid, category, item_id, item_id, uid),
+        )
     return {"ok": True, "category": category}
 
 
@@ -466,8 +557,10 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, fund_code, fund_name, category FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
+            "SELECT id, fund_code, fund_name, category, sort_order FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
+        cats = category_order(conn, uid)
+    rows = sort_funds(rows, cats)
     # Fetch NAV + holdings per fund, collect all symbols, one batch quote call
     per_fund, all_symbols = [], []
     for r in rows:
@@ -504,7 +597,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "quote_time": quote_time, "stale": nav["stale"] or hold["stale"],
             "skipped_holdings": skipped, "holdings": detail,
         })
-    return {"funds": out, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
+    return {"funds": out, "categories": cats, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
 
 
 @app.get("/")

@@ -145,7 +145,7 @@ async function delFund(id) {
   catch (e) { $("dash-err").textContent = e.message; }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${s}</span>`; }
-let refreshing = false, prevSnapshot = null, currentFunds = [];
+let refreshing = false, prevSnapshot = null, currentFunds = [], currentGroups = [];
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function catOptions(current, allCats) {
   const opts = ['<option value=""' + (current ? "" : " selected") + ">未分类</option>"];
@@ -153,7 +153,9 @@ function catOptions(current, allCats) {
   opts.push('<option value="__new__">＋新分类</option>');
   return opts.join("");
 }
-function renderFunds(funds) {
+function renderFunds(data) {
+  const funds = data.funds || [];
+  const cats = data.categories || [...new Set(funds.map(f => f.category || "").filter(Boolean))];
   currentFunds = funds;
   const changed = new Set();
   if (prevSnapshot) {
@@ -162,40 +164,56 @@ function renderFunds(funds) {
       if (p && (p.est_nav !== f.est_nav || p.est_change_pct !== f.est_change_pct || p.dwjz !== f.dwjz)) changed.add(f.fund_code);
     });
   }
-  const allCats = [...new Set(funds.map(f => f.category || "").filter(Boolean))];
-  const groups = new Map();
-  funds.forEach((f, i) => {
-    const key = f.category || "";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ f, i });
+  // Groups follow category order; uncategorized always last
+  currentGroups = [];
+  cats.forEach(cat => {
+    const items = funds.filter(f => (f.category || "") === cat);
+    if (items.length) currentGroups.push({ category: cat, items });
   });
+  const uncat = funds.filter(f => !(f.category || ""));
+  if (uncat.length) currentGroups.push({ category: "", items: uncat });
   let html = "";
-  groups.forEach((items, cat) => {
-    html += `<tr class="group-row"><td colspan="9">${esc(cat || "未分类")}</td></tr>`;
-    items.forEach(({ f, i }) => {
+  currentGroups.forEach((g, gi) => {
+    const cat = g.category;
+    let header = esc(cat || "未分类");
+    if (cat) {
+      const ci = cats.indexOf(cat);
+      header += ` <button class="mini" onclick="moveCategory(${ci}, -1)" ${ci === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveCategory(${ci}, 1)" ${ci === cats.length - 1 ? "disabled" : ""}>↓</button>`;
+    }
+    html += `<tr class="group-row"><td colspan="9">${header}</td></tr>`;
+    g.items.forEach((f, ii) => {
       const ch = changed.has(f.fund_code);
       html += `<tr${ch ? ' class="changed"' : ""}>
       <td>${esc(f.fund_name)}${ch ? '<span class="badge">更新</span>' : ""}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
       <td>${f.dwjz ?? "-"}<div class="muted">${f.nav_date ?? ""}</div></td>
       <td>${f.est_nav ?? "-"}</td><td>${fmtPct(f.est_change_pct)}</td>
-      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", allCats)}</select></td>
+      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", cats)}</select></td>
       <td class="hide-m">${f.coverage_pct}%</td>
       <td class="hide-m">${f.report_label ?? "-"}<div class="muted">${f.report_date ?? ""}</div></td>
       <td class="hide-m">${f.quote_time ?? "-"}</td>
-      <td><button class="mini" onclick="moveFund(${f.id}, -1)" ${i === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(${f.id}, 1)" ${i === funds.length - 1 ? "disabled" : ""}>↓</button><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`;
+      <td><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, -1)" ${ii === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, 1)" ${ii === g.items.length - 1 ? "disabled" : ""}>↓</button><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`;
     });
   });
   $("tbody").innerHTML = html;
   prevSnapshot = {};
   funds.forEach(f => { prevSnapshot[f.fund_code] = { est_nav: f.est_nav, est_change_pct: f.est_change_pct, dwjz: f.dwjz }; });
 }
-async function moveFund(id, dir) {
-  const idx = currentFunds.findIndex(f => f.id === id);
+async function moveFund(category, indexInGroup, dir) {
+  const g = currentGroups.find(x => x.category === category);
+  if (!g) return;
+  const j = indexInGroup + dir;
+  if (j < 0 || j >= g.items.length) return;
+  const ids = g.items.map(f => f.id);
+  [ids[indexInGroup], ids[j]] = [ids[j], ids[indexInGroup]];
+  try { await api("/api/watchlist/reorder", { method: "POST", body: JSON.stringify({ category, ids }) }); await loadEstimates(); }
+  catch (e) { $("dash-err").textContent = e.message; }
+}
+async function moveCategory(idx, dir) {
+  const names = [...((window.estimateData || {}).categories || [])];
   const j = idx + dir;
-  if (idx < 0 || j < 0 || j >= currentFunds.length) return;
-  const ids = currentFunds.map(f => f.id);
-  [ids[idx], ids[j]] = [ids[j], ids[idx]];
-  try { await api("/api/watchlist/reorder", { method: "POST", body: JSON.stringify({ ids }) }); await loadEstimates(); }
+  if (j < 0 || j >= names.length) return;
+  [names[idx], names[j]] = [names[j], names[idx]];
+  try { await api("/api/categories/reorder", { method: "POST", body: JSON.stringify({ names }) }); await loadEstimates(); }
   catch (e) { $("dash-err").textContent = e.message; }
 }
 async function setCategory(id, sel) {
@@ -214,10 +232,12 @@ async function loadEstimates() {
   const rb = $("refresh-btn");
   rb.disabled = true; rb.textContent = "刷新中…";
   try {
-    const { funds } = await api("/api/estimates");
+    const data = await api("/api/estimates");
+    window.estimateData = data;
+    const funds = data.funds || [];
     addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
-    renderFunds(funds);
+    renderFunds(data);
     $("dash-err").textContent = "";
   } catch (e) { if (String(e.message).includes("登录")) showAuth(); else $("dash-err").textContent = e.message; }
   finally { refreshing = false; rb.disabled = false; rb.textContent = "刷新估值"; }
