@@ -15,6 +15,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
+from typing import Optional
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -115,7 +116,7 @@ def check_password(password: str, stored: str) -> bool:
         return False
 
 
-def current_user_id(session: str | None) -> int:
+def current_user_id(session: Optional[str]) -> int:
     if not session:
         raise HTTPException(401, "未登录")
     with db() as conn:
@@ -166,7 +167,7 @@ def login(body: AuthBody, response: Response):
 
 
 @app.post("/api/logout")
-def logout(response: Response, session: str | None = Cookie(default=None)):
+def logout(response: Response, session: Optional[str] = Cookie(default=None)):
     if session:
         with db() as conn:
             conn.execute("DELETE FROM sessions WHERE token=?", (session,))
@@ -175,7 +176,7 @@ def logout(response: Response, session: str | None = Cookie(default=None)):
 
 
 @app.get("/api/me")
-def me(session: str | None = Cookie(default=None)):
+def me(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         row = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
@@ -183,7 +184,7 @@ def me(session: str | None = Cookie(default=None)):
 
 
 # ---------------------------------------------------------------- upstream
-async def upstream_get(url: str, referer: str | None = None) -> httpx.Response:
+async def upstream_get(url: str, referer: Optional[str] = None) -> httpx.Response:
     headers = {"User-Agent": UA}
     if referer:
         headers["Referer"] = referer
@@ -194,7 +195,7 @@ async def upstream_get(url: str, referer: str | None = None) -> httpx.Response:
 
 
 @app.get("/api/search")
-async def search(q: str, session: str | None = Cookie(default=None)):
+async def search(q: str, session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
     q = q.strip()
     if not q:
@@ -309,7 +310,7 @@ async def fetch_holdings(code: str) -> dict:
         return {"holdings": [], "report_label": None, "report_date": None, "stale": True}
 
 
-def to_sina_symbol(code: str) -> str | None:
+def to_sina_symbol(code: str) -> Optional[str]:
     code = code.strip()
     if re.fullmatch(r"\d{6}", code):
         return ("sh" if code[0] in "69" else "sz") + code
@@ -363,7 +364,7 @@ async def fetch_quotes(symbols: list[str]) -> dict:
 
 # ---------------------------------------------------------------- watchlist
 @app.get("/api/watchlist")
-def get_watchlist(session: str | None = Cookie(default=None)):
+def get_watchlist(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         rows = conn.execute(
@@ -373,7 +374,7 @@ def get_watchlist(session: str | None = Cookie(default=None)):
 
 
 @app.post("/api/watchlist")
-async def add_watchlist(body: AddFundBody, session: str | None = Cookie(default=None)):
+async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     code = body.fund_code.strip()
     if not FUND_CODE_RE.fullmatch(code):
@@ -395,7 +396,7 @@ async def add_watchlist(body: AddFundBody, session: str | None = Cookie(default=
 
 
 @app.delete("/api/watchlist/{item_id}")
-def delete_watchlist(item_id: int, session: str | None = Cookie(default=None)):
+def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         cur = conn.execute("DELETE FROM user_funds WHERE id=? AND user_id=?", (item_id, uid))
@@ -405,7 +406,7 @@ def delete_watchlist(item_id: int, session: str | None = Cookie(default=None)):
 
 
 @app.get("/api/estimates")
-async def estimates(session: str | None = Cookie(default=None)):
+async def estimates(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         rows = conn.execute(
