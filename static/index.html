@@ -101,25 +101,33 @@ $("auth-btn").onclick = async () => {
   } catch (e) { $("auth-err").textContent = e.message; }
 };
 $("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); $("userbox").textContent = ""; showAuth(); };
+let addedCodes = new Set();
 $("search-btn").onclick = async () => {
   try {
     const { results } = await api("/api/search?q=" + encodeURIComponent($("q").value.trim()));
-    $("results").innerHTML = results.map(r =>
-      `<button onclick="addFund('${r.code}')">${r.code} ${r.name} ＋</button>`).join("") || '<span class="muted">无结果</span>';
+    $("results").innerHTML = results.map(r => addedCodes.has(r.code)
+      ? `<button disabled>${r.code} ${r.name} 已添加</button>`
+      : `<button onclick="addFund('${r.code}', this)">${r.code} ${r.name} ＋</button>`).join("") || '<span class="muted">无结果</span>';
   } catch (e) { $("dash-err").textContent = e.message; }
 };
-async function addFund(code) {
-  try { await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code }) }); $("results").innerHTML = ""; loadEstimates(); }
-  catch (e) { $("dash-err").textContent = e.message; }
+async function addFund(code, btn) {
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = "添加中…"; }
+    await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code }) });
+    await loadEstimates();
+    if (!addedCodes.has(code)) { await new Promise(r => setTimeout(r, 1500)); await loadEstimates(); }
+    if (btn) btn.textContent = btn.textContent.replace("添加中…", "已添加");
+  } catch (e) { $("dash-err").textContent = e.message; if (btn) { btn.disabled = false; } }
 }
 async function delFund(id) {
-  try { await api("/api/watchlist/" + id, { method: "DELETE" }); loadEstimates(); }
+  try { await api("/api/watchlist/" + id, { method: "DELETE" }); await loadEstimates(); }
   catch (e) { $("dash-err").textContent = e.message; }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${s}</span>`; }
 async function loadEstimates() {
   try {
     const { funds } = await api("/api/estimates");
+    addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
     $("tbody").innerHTML = funds.map(f => `<tr>
       <td>${f.fund_name}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
