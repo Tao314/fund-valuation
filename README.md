@@ -42,14 +42,16 @@ python3 -m venv venv
 # 浏览器打开 http://127.0.0.1:8000
 ```
 
-## VPS 部署（Debian 13）
+## 安装（VPS，Debian 13）
 
 ```bash
-# 把整个 fund-valuation 目录传到 VPS 后：
-cd fund-valuation
+git clone https://github.com/Tao314/fund-valuation.git /opt/fund-valuation
+cd /opt/fund-valuation
 sudo bash install.sh
-curl -s http://127.0.0.1:8000/api/me   # 应返回未登录提示
+curl -s http://127.0.0.1:8000/api/me   # 应返回 {"detail":"未登录"}
 ```
+
+install.sh 会做：装 python3/venv、建虚拟环境装依赖、写 systemd 服务 `fund-valuation`（监听 127.0.0.1:8000）并启动。脚本可重复执行（幂等）。
 
 服务只监听 127.0.0.1:8000。对外访问请在前面加 Nginx 或 Caddy 反代并配 HTTPS，例如 Caddyfile：
 
@@ -59,7 +61,33 @@ your.domain {
 }
 ```
 
+更新到新版：
+
+```bash
+cd /opt/fund-valuation
+git pull
+systemctl restart fund-valuation
+```
+
+常用运维命令：
+
+```bash
+systemctl status fund-valuation        # 看状态
+journalctl -u fund-valuation -n 30 -l  # 看日志
+```
+
 备份只需复制 `fund.db` 文件。
+
+## 卸载
+
+```bash
+systemctl disable --now fund-valuation
+rm -f /etc/systemd/system/fund-valuation.service
+systemctl daemon-reload
+rm -rf /opt/fund-valuation
+```
+
+删完即干净。install.sh 装的 python3、python3-venv 等系统包可保留，不影响其他服务；反代（Nginx/Caddy）里的站点配置需自行删除。
 
 ## API
 
