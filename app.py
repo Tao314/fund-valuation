@@ -85,6 +85,10 @@ def init_db():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(user_funds)").fetchall()]
     if "category" not in cols:
         conn.execute("ALTER TABLE user_funds ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    # Migration: users.refresh_seconds (added 2026-11-20)
+    ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "refresh_seconds" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 60")
     # Category ordering table + backfill from existing fund categories (idempotent)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS user_categories("
@@ -170,6 +174,28 @@ class CategoryBody(BaseModel):
     category: str
 
 
+class SettingsBody(BaseModel):
+    refresh_seconds: int
+
+
+class CategoryCreateBody(BaseModel):
+    name: str
+
+
+class CategoryRenameBody(BaseModel):
+    old: str
+    new: str
+
+
+class CategoryDeleteBody(BaseModel):
+    name: str
+
+
+class ChangePasswordBody(BaseModel):
+    old_password: str
+    new_password: str
+
+
 @app.post("/api/register")
 def register(body: AuthBody):
     username = body.username.strip()
@@ -216,6 +242,40 @@ def me(session: Optional[str] = Cookie(default=None)):
     with db() as conn:
         row = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
     return {"user_id": uid, "username": row["username"]}
+
+
+@app.get("/api/settings")
+def get_settings(session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    with db() as conn:
+        row = conn.execute("SELECT refresh_seconds FROM users WHERE id=?", (uid,)).fetchone()
+    return {"refresh_seconds": row["refresh_seconds"] if row else 60}
+
+
+@app.post("/api/settings")
+def save_settings(body: SettingsBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    n = body.refresh_seconds
+    if n < 10 or n > 600:
+        raise HTTPException(400, "自动刷新时间需 10-600 秒")
+    with db() as conn:
+        conn.execute("UPDATE users SET refresh_seconds=? WHERE id=?", (n, uid))
+    return {"ok": True, "refresh_seconds": n}
+
+
+@app.post("/api/change-password")
+def change_password(body: ChangePasswordBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    if len(body.new_password) < 6:  # same rule as register
+        raise HTTPException(400, "密码至少 6 位")
+    with db() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id=?", (uid,)).fetchone()
+        if not row or not check_password(body.old_password, row["password_hash"]):
+            raise HTTPException(400, "旧密码不正确")
+        conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.new_password), uid))
+        # Invalidate all other sessions, keep the current one
+        conn.execute("DELETE FROM sessions WHERE user_id=? AND token<>?", (uid, session))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- upstream
@@ -525,6 +585,52 @@ def reorder_categories(body: CategoryReorderBody, session: Optional[str] = Cooki
     return {"ok": True, "updated": updated}
 
 
+@app.post("/api/categories")
+def create_category(body: CategoryCreateBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    name = (body.name or "").strip()
+    if not name or len(name) > 20:
+        raise HTTPException(400, "分类名需 1-20 个字符")
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, name)).fetchone():
+            raise HTTPException(400, "分类已存在")
+        conn.execute(
+            "INSERT INTO user_categories(user_id, name, sort_order) VALUES(?,?,"
+            "(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_categories WHERE user_id=?))",
+            (uid, name, uid),
+        )
+    return {"ok": True, "name": name}
+
+
+@app.post("/api/categories/rename")
+def rename_category(body: CategoryRenameBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    old = (body.old or "").strip()
+    new = (body.new or "").strip()
+    if not new or len(new) > 20:
+        raise HTTPException(400, "分类名需 1-20 个字符")
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, old)).fetchone():
+            raise HTTPException(404, "分类不存在")
+        if new != old and conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, new)).fetchone():
+            raise HTTPException(400, "分类已存在")
+        conn.execute("UPDATE user_categories SET name=? WHERE user_id=? AND name=?", (new, uid, old))
+        conn.execute("UPDATE user_funds SET category=? WHERE user_id=? AND category=?", (new, uid, old))
+    return {"ok": True, "name": new}
+
+
+@app.post("/api/categories/delete")
+def delete_category(body: CategoryDeleteBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    name = (body.name or "").strip()
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, name)).fetchone():
+            raise HTTPException(404, "分类不存在")
+        conn.execute("UPDATE user_funds SET category='' WHERE user_id=? AND category=?", (uid, name))
+        conn.execute("DELETE FROM user_categories WHERE user_id=? AND name=?", (uid, name))
+    return {"ok": True}
+
+
 @app.post("/api/watchlist/{item_id}/category")
 def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
@@ -560,6 +666,8 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "SELECT id, fund_code, fund_name, category, sort_order FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
         cats = category_order(conn, uid)
+        urow = conn.execute("SELECT refresh_seconds FROM users WHERE id=?", (uid,)).fetchone()
+        refresh_seconds = urow["refresh_seconds"] if urow else 60
     rows = sort_funds(rows, cats)
     # Fetch NAV + holdings per fund, collect all symbols, one batch quote call
     per_fund, all_symbols = [], []
@@ -597,7 +705,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "quote_time": quote_time, "stale": nav["stale"] or hold["stale"],
             "skipped_holdings": skipped, "holdings": detail,
         })
-    return {"funds": out, "categories": cats, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
+    return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
 
 
 @app.get("/")

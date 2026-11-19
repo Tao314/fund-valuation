@@ -11,6 +11,7 @@
   header h1 { font-size: 17px; margin: 0; }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   .card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card h3 { margin: 0 0 10px; font-size: 15px; }
   input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; }
   button { padding: 9px 16px; border: 0; border-radius: 8px; background: #1f6feb; color: #fff; font-size: 14px; cursor: pointer; }
   button.secondary { background: #e8ebef; color: #333; }
@@ -32,6 +33,8 @@
   select.cat { padding: 5px; border: 1px solid #ccc; border-radius: 8px; font-size: 13px; max-width: 130px; }
   .legend { color: #888; font-size: 12px; margin-bottom: 8px; }
   #countdown { color: #888; font-size: 13px; }
+  .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #eee; }
+  .cat-item .cat-name { flex: 1; font-weight: 600; }
   footer { text-align: center; color: #999; font-size: 12px; padding: 16px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
 </style>
@@ -56,41 +59,97 @@
   <div id="dash" style="display:none">
     <div class="card">
       <div class="row">
-        <input id="q" placeholder="搜索基金代码或名称，如 005827">
-        <button id="search-btn">搜索</button>
-        <button class="secondary" id="refresh-btn">刷新估值</button>
-        <span id="countdown">下次自动刷新：60s</span>
+        <button id="nav-main">估值</button>
+        <button class="secondary" id="nav-settings">设置</button>
+        <span style="flex:1"></span>
         <button class="secondary" id="logout-btn">退出</button>
       </div>
-      <div class="search-results" id="results"></div>
-      <div class="err" id="dash-err"></div>
     </div>
-    <div class="card" style="overflow-x:auto">
-      <div class="legend">黄色高亮＋「更新」标记 = 本次刷新数据有变化；无变化时标记自动消失。</div>
-      <table>
-        <thead><tr>
-          <th>基金</th><th>昨日净值</th><th>自算估值</th><th>估算涨跌</th><th>分类</th>
-          <th class="hide-m">持仓覆盖</th><th class="hide-m">持仓报告期</th><th class="hide-m">行情时间</th><th>顺序/操作</th>
-        </tr></thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <div class="muted" id="empty-tip">列表为空，先搜索添加基金。估值每 60 秒自动刷新。</div>
+
+    <div id="view-main">
+      <div class="card">
+        <div class="row">
+          <button class="secondary" id="refresh-btn">刷新估值</button>
+          <span id="countdown">下次自动刷新：60s</span>
+        </div>
+        <div class="err" id="dash-err"></div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <div class="legend">黄色高亮＋「更新」标记 = 本次刷新数据有变化；无变化时标记自动消失。</div>
+        <table>
+          <thead><tr>
+            <th>基金</th><th>昨日净值</th><th>自算估值</th><th>估算涨跌</th>
+            <th class="hide-m">持仓覆盖</th><th class="hide-m">持仓报告期</th><th class="hide-m">行情时间</th>
+          </tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
+      </div>
+    </div>
+
+    <div id="view-settings" style="display:none">
+      <div class="err" id="settings-err"></div>
+      <div class="card">
+        <h3>自动刷新</h3>
+        <div class="row">
+          <input id="refresh-seconds" type="number" min="10" max="600" step="1" style="max-width:140px; flex:none">
+          <span class="muted">秒（10–600）</span>
+          <button id="save-refresh-btn">保存</button>
+          <span class="muted" id="refresh-saved"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>分类管理</h3>
+        <div id="cat-list"></div>
+        <div class="row" style="margin-top:10px">
+          <input id="new-cat-name" placeholder="新分类名（最多 20 字）">
+          <button id="add-cat-btn">添加分类</button>
+        </div>
+        <div class="muted">删除分类后，该分类下的基金变为未分类。</div>
+      </div>
+      <div class="card">
+        <h3>自选基金</h3>
+        <div class="row">
+          <input id="search-q" placeholder="搜索基金代码或名称，如 005827">
+          <button id="search-btn">搜索</button>
+        </div>
+        <div class="search-results" id="results"></div>
+        <div style="overflow-x:auto; margin-top:10px">
+          <table>
+            <thead><tr><th>基金</th><th>分类</th><th>顺序/操作</th></tr></thead>
+            <tbody id="settings-tbody"></tbody>
+          </table>
+          <div class="muted" id="settings-empty-tip">暂无自选基金，先搜索添加。</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>账户</h3>
+        <input id="old-password" type="password" placeholder="旧密码" autocomplete="current-password">
+        <input id="new-password" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password">
+        <input id="confirm-password" type="password" placeholder="确认新密码" autocomplete="new-password">
+        <div class="row">
+          <button id="change-password-btn">修改密码</button>
+          <span class="muted" id="password-saved"></span>
+        </div>
+        <div class="muted">修改后其他设备上的登录会失效，当前设备保持登录。</div>
+      </div>
     </div>
   </div>
 </main>
 <footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。</footer>
 <script>
 const $ = id => document.getElementById(id);
-let mode = "login", timer = null;
+let mode = "login", timer = null, refreshSeconds = 60;
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ("请求失败 " + r.status));
   return data;
 }
+function setErr(msg) { const a = $("dash-err"), b = $("settings-err"); if (a) a.textContent = msg; if (b) b.textContent = msg; }
 let countdownTimer = null, countdownLeft = 60;
 function resetCountdown() {
-  countdownLeft = 60;
+  countdownLeft = refreshSeconds;
   const el = $("countdown"); if (el) el.textContent = "下次自动刷新：" + countdownLeft + "s";
   clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
@@ -98,13 +157,23 @@ function resetCountdown() {
     const e2 = $("countdown"); if (e2) e2.textContent = "下次自动刷新：" + countdownLeft + "s";
   }, 1000);
 }
+function startAutoRefresh() { clearInterval(timer); timer = setInterval(loadEstimates, refreshSeconds * 1000); }
+function showView(name) {
+  $("view-main").style.display = name === "main" ? "" : "none";
+  $("view-settings").style.display = name === "settings" ? "" : "none";
+  $("nav-main").className = name === "main" ? "" : "secondary";
+  $("nav-settings").className = name === "settings" ? "" : "secondary";
+}
+$("nav-main").onclick = () => showView("main");
+$("nav-settings").onclick = () => showView("settings");
 function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); prevSnapshot = null; }
 function showDash(user) {
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
   prevSnapshot = null;
+  showView("main");
   loadEstimates();
-  clearInterval(timer); timer = setInterval(loadEstimates, 60000);
+  startAutoRefresh();
 }
 $("auth-switch").onclick = () => {
   mode = mode === "login" ? "register" : "login";
@@ -125,11 +194,11 @@ $("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST
 let addedCodes = new Set();
 $("search-btn").onclick = async () => {
   try {
-    const { results } = await api("/api/search?q=" + encodeURIComponent($("q").value.trim()));
+    const { results } = await api("/api/search?q=" + encodeURIComponent($("search-q").value.trim()));
     $("results").innerHTML = results.map(r => addedCodes.has(r.code)
       ? `<button disabled>${r.code} ${r.name} 已添加</button>`
       : `<button onclick="addFund('${r.code}', this)">${r.code} ${r.name} ＋</button>`).join("") || '<span class="muted">无结果</span>';
-  } catch (e) { $("dash-err").textContent = e.message; }
+  } catch (e) { setErr(e.message); }
 };
 async function addFund(code, btn) {
   try {
@@ -138,11 +207,12 @@ async function addFund(code, btn) {
     await loadEstimates();
     if (!addedCodes.has(code)) { await new Promise(r => setTimeout(r, 1500)); await loadEstimates(); }
     if (btn) btn.textContent = btn.textContent.replace("添加中…", "已添加");
-  } catch (e) { $("dash-err").textContent = e.message; if (btn) { btn.disabled = false; } }
+  } catch (e) { setErr(e.message); if (btn) { btn.disabled = false; } }
 }
-async function delFund(id) {
+async function delFund(id, name) {
+  if (!confirm("删除基金「" + name + "」？")) return;
   try { await api("/api/watchlist/" + id, { method: "DELETE" }); await loadEstimates(); }
-  catch (e) { $("dash-err").textContent = e.message; }
+  catch (e) { setErr(e.message); }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${s}</span>`; }
 let refreshing = false, prevSnapshot = null, currentFunds = [], currentGroups = [];
@@ -153,17 +223,10 @@ function catOptions(current, allCats) {
   opts.push('<option value="__new__">＋新分类</option>');
   return opts.join("");
 }
-function renderFunds(data) {
+function buildGroups(data) {
   const funds = data.funds || [];
   const cats = data.categories || [...new Set(funds.map(f => f.category || "").filter(Boolean))];
   currentFunds = funds;
-  const changed = new Set();
-  if (prevSnapshot) {
-    funds.forEach(f => {
-      const p = prevSnapshot[f.fund_code];
-      if (p && (p.est_nav !== f.est_nav || p.est_change_pct !== f.est_change_pct || p.dwjz !== f.dwjz)) changed.add(f.fund_code);
-    });
-  }
   // Groups follow category order; uncategorized always last
   currentGroups = [];
   cats.forEach(cat => {
@@ -172,31 +235,63 @@ function renderFunds(data) {
   });
   const uncat = funds.filter(f => !(f.category || ""));
   if (uncat.length) currentGroups.push({ category: "", items: uncat });
+  return cats;
+}
+function renderFunds(data) {
+  const funds = data.funds || [];
+  buildGroups(data);
+  const changed = new Set();
+  if (prevSnapshot) {
+    funds.forEach(f => {
+      const p = prevSnapshot[f.fund_code];
+      if (p && (p.est_nav !== f.est_nav || p.est_change_pct !== f.est_change_pct || p.dwjz !== f.dwjz)) changed.add(f.fund_code);
+    });
+  }
   let html = "";
-  currentGroups.forEach((g, gi) => {
-    const cat = g.category;
-    let header = esc(cat || "未分类");
-    if (cat) {
-      const ci = cats.indexOf(cat);
-      header += ` <button class="mini" onclick="moveCategory(${ci}, -1)" ${ci === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveCategory(${ci}, 1)" ${ci === cats.length - 1 ? "disabled" : ""}>↓</button>`;
-    }
-    html += `<tr class="group-row"><td colspan="9">${header}</td></tr>`;
-    g.items.forEach((f, ii) => {
+  currentGroups.forEach(g => {
+    html += `<tr class="group-row"><td colspan="7">${esc(g.category || "未分类")}</td></tr>`;
+    g.items.forEach(f => {
       const ch = changed.has(f.fund_code);
       html += `<tr${ch ? ' class="changed"' : ""}>
       <td>${esc(f.fund_name)}${ch ? '<span class="badge">更新</span>' : ""}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
       <td>${f.dwjz ?? "-"}<div class="muted">${f.nav_date ?? ""}</div></td>
       <td>${f.est_nav ?? "-"}</td><td>${fmtPct(f.est_change_pct)}</td>
-      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", cats)}</select></td>
       <td class="hide-m">${f.coverage_pct}%</td>
       <td class="hide-m">${f.report_label ?? "-"}<div class="muted">${f.report_date ?? ""}</div></td>
-      <td class="hide-m">${f.quote_time ?? "-"}</td>
-      <td><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, -1)" ${ii === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, 1)" ${ii === g.items.length - 1 ? "disabled" : ""}>↓</button><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`;
+      <td class="hide-m">${f.quote_time ?? "-"}</td></tr>`;
     });
   });
   $("tbody").innerHTML = html;
   prevSnapshot = {};
   funds.forEach(f => { prevSnapshot[f.fund_code] = { est_nav: f.est_nav, est_change_pct: f.est_change_pct, dwjz: f.dwjz }; });
+}
+function renderSettings(data) {
+  const cats = buildGroups(data);
+  const funds = data.funds || [];
+  // refresh-seconds input: don't clobber while user is editing it
+  const inp = $("refresh-seconds");
+  if (document.activeElement !== inp) inp.value = refreshSeconds;
+  // category list
+  $("cat-list").innerHTML = cats.length ? cats.map((c, i) =>
+    `<div class="cat-item"><span class="cat-name">${esc(c)}</span>
+     <button class="mini" onclick="moveCategory(${i}, -1)" ${i === 0 ? "disabled" : ""}>↑</button>
+     <button class="mini" onclick="moveCategory(${i}, 1)" ${i === cats.length - 1 ? "disabled" : ""}>↓</button>
+     <button class="mini" onclick="renameCategory('${esc(c)}')">重命名</button>
+     <button class="danger" onclick="deleteCategory('${esc(c)}')">删除</button></div>`).join("")
+    : '<div class="muted">暂无分类，在下方添加。</div>';
+  // watchlist grouped, with management controls
+  let html = "";
+  currentGroups.forEach((g, gi) => {
+    html += `<tr class="group-row"><td colspan="3">${esc(g.category || "未分类")}</td></tr>`;
+    g.items.forEach((f, ii) => {
+      html += `<tr>
+      <td>${esc(f.fund_name)}<div class="muted">${f.fund_code}</div></td>
+      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", cats)}</select></td>
+      <td><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, -1)" ${ii === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, 1)" ${ii === g.items.length - 1 ? "disabled" : ""}>↓</button><button class="danger" onclick="delFund(${f.id}, '${esc(f.fund_name)}')">删除</button></td></tr>`;
+    });
+  });
+  $("settings-tbody").innerHTML = html;
+  $("settings-empty-tip").style.display = funds.length ? "none" : "";
 }
 async function moveFund(category, indexInGroup, dir) {
   const g = currentGroups.find(x => x.category === category);
@@ -206,7 +301,7 @@ async function moveFund(category, indexInGroup, dir) {
   const ids = g.items.map(f => f.id);
   [ids[indexInGroup], ids[j]] = [ids[j], ids[indexInGroup]];
   try { await api("/api/watchlist/reorder", { method: "POST", body: JSON.stringify({ category, ids }) }); await loadEstimates(); }
-  catch (e) { $("dash-err").textContent = e.message; }
+  catch (e) { setErr(e.message); }
 }
 async function moveCategory(idx, dir) {
   const names = [...((window.estimateData || {}).categories || [])];
@@ -214,7 +309,7 @@ async function moveCategory(idx, dir) {
   if (j < 0 || j >= names.length) return;
   [names[idx], names[j]] = [names[j], names[idx]];
   try { await api("/api/categories/reorder", { method: "POST", body: JSON.stringify({ names }) }); await loadEstimates(); }
-  catch (e) { $("dash-err").textContent = e.message; }
+  catch (e) { setErr(e.message); }
 }
 async function setCategory(id, sel) {
   let cat = sel.value;
@@ -223,8 +318,50 @@ async function setCategory(id, sel) {
     if (!cat) { await loadEstimates(); return; }
   }
   try { await api("/api/watchlist/" + id + "/category", { method: "POST", body: JSON.stringify({ category: cat }) }); await loadEstimates(); }
-  catch (e) { $("dash-err").textContent = e.message; }
+  catch (e) { setErr(e.message); }
 }
+$("add-cat-btn").onclick = async () => {
+  const name = $("new-cat-name").value.trim();
+  if (!name) { setErr("分类名不能为空"); return; }
+  try {
+    await api("/api/categories", { method: "POST", body: JSON.stringify({ name }) });
+    $("new-cat-name").value = "";
+    await loadEstimates();
+  } catch (e) { setErr(e.message); }
+};
+async function renameCategory(oldName) {
+  const newName = (prompt("输入新分类名（最多 20 字）", oldName) || "").trim();
+  if (!newName || newName === oldName) return;
+  try { await api("/api/categories/rename", { method: "POST", body: JSON.stringify({ old: oldName, new: newName }) }); await loadEstimates(); }
+  catch (e) { setErr(e.message); }
+}
+async function deleteCategory(name) {
+  if (!confirm("删除分类「" + name + "」？该分类下的基金将变为未分类。")) return;
+  try { await api("/api/categories/delete", { method: "POST", body: JSON.stringify({ name }) }); await loadEstimates(); }
+  catch (e) { setErr(e.message); }
+}
+$("save-refresh-btn").onclick = async () => {
+  const n = parseInt($("refresh-seconds").value, 10);
+  if (!Number.isInteger(n) || n < 10 || n > 600) { setErr("自动刷新时间需 10-600 秒"); return; }
+  try {
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ refresh_seconds: n }) });
+    refreshSeconds = n;
+    startAutoRefresh(); resetCountdown();
+    $("refresh-saved").textContent = "已保存";
+    setErr("");
+  } catch (e) { setErr(e.message); }
+};
+$("change-password-btn").onclick = async () => {
+  const oldPw = $("old-password").value, newPw = $("new-password").value, confirmPw = $("confirm-password").value;
+  if (!oldPw || !newPw) { setErr("旧密码和新密码不能为空"); return; }
+  if (newPw !== confirmPw) { setErr("两次输入的新密码不一致"); return; }
+  try {
+    await api("/api/change-password", { method: "POST", body: JSON.stringify({ old_password: oldPw, new_password: newPw }) });
+    $("old-password").value = ""; $("new-password").value = ""; $("confirm-password").value = "";
+    $("password-saved").textContent = "密码已修改";
+    setErr("");
+  } catch (e) { setErr(e.message); }
+};
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
@@ -234,12 +371,17 @@ async function loadEstimates() {
   try {
     const data = await api("/api/estimates");
     window.estimateData = data;
+    if (data.refresh_seconds && data.refresh_seconds !== refreshSeconds) {
+      refreshSeconds = data.refresh_seconds;
+      startAutoRefresh(); resetCountdown();
+    }
     const funds = data.funds || [];
     addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
     renderFunds(data);
-    $("dash-err").textContent = "";
-  } catch (e) { if (String(e.message).includes("登录")) showAuth(); else $("dash-err").textContent = e.message; }
+    renderSettings(data);
+    setErr("");
+  } catch (e) { if (String(e.message).includes("登录")) showAuth(); else setErr(e.message); }
   finally { refreshing = false; rb.disabled = false; rb.textContent = "刷新估值"; }
 }
 $("refresh-btn").onclick = loadEstimates;

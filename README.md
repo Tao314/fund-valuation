@@ -104,12 +104,22 @@ rm -rf /opt/fund-valuation
 | DELETE | /api/watchlist/{id} | 删除（仅本人记录） |
 | POST | /api/watchlist/reorder | 在单个分类内重排 {category, ids: [id, ...]}，ids 须与该分类全部基金一致，否则 400；不影响分类顺序 |
 | POST | /api/categories/reorder | 重排分类顺序 {names: [分类名, ...]}，基金随分类整组移动 |
+| POST | /api/categories | 新建分类 {name}，1-20 字，已存在则 400；排到分类顺序末尾 |
+| POST | /api/categories/rename | 重命名分类 {old, new}，new 1-20 字；old 不存在 404，new 已存在 400；同步更新该分类下基金的分类名 |
+| POST | /api/categories/delete | 删除分类 {name}，不存在 404；该分类下基金变为未分类 |
 | POST | /api/watchlist/{id}/category | 设置分类 {category}，最长 20 字，空 = 未分类；新分类自动登记到分类顺序末尾，基金移到该分类末尾 |
-| GET | /api/estimates | 列表 + 自算估值（含 category 字段和 categories 分类顺序数组） |
+| GET | /api/settings | 当前用户设置 {refresh_seconds} |
+| POST | /api/settings | 保存自动刷新间隔 {refresh_seconds}，须 10-600 秒，否则 400 |
+| POST | /api/change-password | 修改密码 {old_password, new_password}，新密码至少 6 位；旧密码错误 400；成功后其他会话失效，当前会话保留 |
+| GET | /api/estimates | 列表 + 自算估值（含 category 字段、categories 分类顺序数组和 refresh_seconds 自动刷新间隔） |
 
 排序规则：先按分类顺序（user_categories 表，未分类永远最后），分类内按基金 sort_order。调基金顺序只在所属分类内生效，不动分类顺序；调分类顺序整组移动，组内基金顺序不变。
 
-前端功能：每行 ↑/↓ 在所属分类内调整顺序；分类标题行 ↑/↓ 调整分类顺序；下拉框给基金设分类（可新建），列表按分类分组显示；自动刷新带 60 秒倒计时；本次刷新有变化的基金行黄底高亮并带「更新」标记，无变化时标记自动消失。
+页面分两个视图（顶部「估值」/「设置」切换）：
+- 估值页：只看估值表格（按分类分组、组标题只有分类名）、刷新按钮、自动刷新倒计时和更新标记说明，没有管理控件。
+- 设置页：自动刷新间隔（10-600 秒，保存后立即生效）、分类管理（新增/重命名/删除/↑↓ 排序）、自选基金（搜索添加、设分类、组内 ↑↓、删除）、账户（修改密码）。
+
+自动刷新间隔按用户存数据库（users.refresh_seconds，默认 60），倒计时跟随该值；本次刷新有变化的基金行黄底高亮并带「更新」标记，无变化时标记自动消失。
 
 所有自选列表操作都按会话中的 user_id 过滤，不信任前端传入的用户 ID。
 
