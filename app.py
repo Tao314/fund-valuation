@@ -78,6 +78,9 @@ def init_db():
             nav_date TEXT,
             dwjz REAL,
             jzzzl REAL,
+            prev_nav_date TEXT,
+            prev_dwjz REAL,
+            prev_jzzzl REAL,
             fetched_at REAL NOT NULL);
         """
     )
@@ -89,6 +92,11 @@ def init_db():
     ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "refresh_seconds" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 60")
+    # Migration: nav_cache prev-day NAV columns (added 2026-11-20)
+    ncols = [r[1] for r in conn.execute("PRAGMA table_info(nav_cache)").fetchall()]
+    for col, ddl in (("prev_nav_date", "TEXT"), ("prev_dwjz", "REAL"), ("prev_jzzzl", "REAL")):
+        if col not in ncols:
+            conn.execute(f"ALTER TABLE nav_cache ADD COLUMN {col} {ddl}")
     # Category ordering table + backfill from existing fund categories (idempotent)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS user_categories("
@@ -310,28 +318,49 @@ async def search(q: str, session: Optional[str] = Cookie(default=None)):
     return {"results": results[:20]}
 
 
+def _nav_from_row(row) -> dict:
+    keys = row.keys()
+    return {
+        "nav_date": row["nav_date"], "dwjz": row["dwjz"], "jzzzl": row["jzzzl"],
+        "prev_nav_date": row["prev_nav_date"] if "prev_nav_date" in keys else None,
+        "prev_dwjz": row["prev_dwjz"] if "prev_dwjz" in keys else None,
+        "prev_jzzzl": row["prev_jzzzl"] if "prev_jzzzl" in keys else None,
+    }
+
+
 async def fetch_nav(code: str) -> dict:
     with db() as conn:
         row = conn.execute("SELECT * FROM nav_cache WHERE fund_code=?", (code,)).fetchone()
     if row and time.time() - row["fetched_at"] < NAV_TTL:
-        return {"nav_date": row["nav_date"], "dwjz": row["dwjz"], "jzzzl": row["jzzzl"], "stale": False}
+        return {**_nav_from_row(row), "stale": False}
     try:
         resp = await upstream_get(
-            f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=1",
+            f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=2",
             referer=f"https://fund.eastmoney.com/f10/jjjz_{code}.html",
         )
-        item = resp.json()["Data"]["LSJZList"][0]
-        nav = {"nav_date": item["FSRQ"], "dwjz": float(item["DWJZ"]), "jzzzl": float(item["JZZZL"] or 0)}
+        items = resp.json()["Data"]["LSJZList"]
+        item = items[0]
+        prev = items[1] if len(items) > 1 else None
+        nav = {
+            "nav_date": item["FSRQ"], "dwjz": float(item["DWJZ"]), "jzzzl": float(item["JZZZL"] or 0),
+            "prev_nav_date": prev["FSRQ"] if prev else None,
+            "prev_dwjz": float(prev["DWJZ"]) if prev else None,
+            "prev_jzzzl": float(prev["JZZZL"] or 0) if prev else None,
+        }
         with db() as conn:
             conn.execute(
-                "INSERT INTO nav_cache(fund_code, nav_date, dwjz, jzzzl, fetched_at) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(fund_code) DO UPDATE SET nav_date=excluded.nav_date, dwjz=excluded.dwjz, jzzzl=excluded.jzzzl, fetched_at=excluded.fetched_at",
-                (code, nav["nav_date"], nav["dwjz"], nav["jzzzl"], time.time()),
+                "INSERT INTO nav_cache(fund_code, nav_date, dwjz, jzzzl, prev_nav_date, prev_dwjz, prev_jzzzl, fetched_at) "
+                "VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(fund_code) DO UPDATE SET nav_date=excluded.nav_date, dwjz=excluded.dwjz, jzzzl=excluded.jzzzl, "
+                "prev_nav_date=excluded.prev_nav_date, prev_dwjz=excluded.prev_dwjz, prev_jzzzl=excluded.prev_jzzzl, "
+                "fetched_at=excluded.fetched_at",
+                (code, nav["nav_date"], nav["dwjz"], nav["jzzzl"],
+                 nav["prev_nav_date"], nav["prev_dwjz"], nav["prev_jzzzl"], time.time()),
             )
         return {**nav, "stale": False}
     except Exception:
         if row:
-            return {"nav_date": row["nav_date"], "dwjz": row["dwjz"], "jzzzl": row["jzzzl"], "stale": True}
+            return {**_nav_from_row(row), "stale": True}
         raise HTTPException(502, f"净值数据暂时不可用（{code}）")
 
 
@@ -698,6 +727,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
         out.append({
             "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
+            "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
             "est_change_pct": round(est_pct, 2),
             "coverage_pct": round(coverage, 2),
