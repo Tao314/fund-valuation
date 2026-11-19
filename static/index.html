@@ -52,9 +52,9 @@
   .fund-card .fc-chg { font-size: 15px; font-weight: 600; }
   .fund-card .fc-est { font-size: 15px; font-weight: 600; margin-top: 2px; }
   .fund-card .fc-nav { font-size: 12px; color: #646A73; margin-top: 2px; }
-  .fund-card .fc-status { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 6px; }
-  .fund-card .fc-state { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; }
-  .fund-card .fc-pub { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; }
+  .fund-card .fc-status { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 6px; white-space: nowrap; }
+  .fund-card .fc-state { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
+  .fund-card .fc-pub { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-diff { font-size: 11px; color: #8F959E; margin-top: 2px; }
   .sort-toggle button { min-height: 40px; }
   .sort-toggle button.active { background: #1677FF; color: #fff; }
@@ -156,7 +156,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.9.0 · 更新于 2026-11-20 00:39</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.9.1 · 更新于 2026-11-20 00:47</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -404,7 +404,8 @@ function renderFunds(data) {
       const right = published
         ? `<div class="fc-chg">${fmtPct(f.jzzzl)}</div>
         <div class="fc-est">${f.dwjz ?? "-"}<span class="fc-pub">已公布</span></div>
-        <div class="fc-nav">前一交易日净值 ${f.prev_dwjz ?? "-"}（${f.prev_nav_date ?? ""}）${fmtPct(f.prev_jzzzl)}</div>
+        <div class="fc-nav">今日净值 ${f.dwjz ?? "-"}（${f.nav_date ?? ""}）</div>
+        ${f.prev_dwjz != null ? `<div class="fc-nav">前一交易日净值 ${f.prev_dwjz}（${f.prev_nav_date ?? ""}）${fmtPct(f.prev_jzzzl)}</div>` : ""}
         <div class="fc-nav">自算估值 ${estNavFromPrev(f)} ${fmtPct(f.est_change_pct)}</div>
         <div class="fc-diff">估值偏差 ${fmtDiff(estDiff(f))}</div>`
         : `<div class="fc-chg">${fmtPct(f.est_change_pct)}</div>

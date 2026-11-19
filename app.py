@@ -331,7 +331,9 @@ def _nav_from_row(row) -> dict:
 async def fetch_nav(code: str) -> dict:
     with db() as conn:
         row = conn.execute("SELECT * FROM nav_cache WHERE fund_code=?", (code,)).fetchone()
-    if row and time.time() - row["fetched_at"] < NAV_TTL:
+    # Cache rows from before v1.8.0 have NULL prev_* (migrated columns); treat as stale
+    # so prev-day NAV gets backfilled immediately instead of waiting out the TTL.
+    if row and time.time() - row["fetched_at"] < NAV_TTL and _nav_from_row(row)["prev_dwjz"] is not None:
         return {**_nav_from_row(row), "stale": False}
     try:
         resp = await upstream_get(
