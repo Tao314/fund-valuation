@@ -316,7 +316,9 @@ def to_sina_symbol(code: str) -> Optional[str]:
         return ("sh" if code[0] in "69" else "sz") + code
     if re.fullmatch(r"\d{5}", code):
         return "hk" + code
-    return None  # US/other alphabetic tickers skipped in MVP
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*", code):
+        return "gb_" + code.lower()  # US stocks via Sina gb_ symbols (verified 2026-11-19)
+    return None
 
 
 _quote_cache: dict = {"at": 0.0, "quotes": {}}
@@ -341,7 +343,14 @@ async def fetch_quotes(symbols: list[str]) -> dict:
                 continue
             sym, fields = m.group(1), m.group(2).split(",")
             try:
-                if sym.startswith("hk"):
+                if sym.startswith("gb_"):
+                    # US layout (verified 2026-11-19): 0=name,1=current,2=change%,3=Beijing datetime,26=prev close
+                    cur = float(fields[1])
+                    prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
+                    quotes[sym] = {"name": fields[0], "prev_close": prev, "current": cur,
+                                   "change_pct": float(fields[2]),
+                                   "quote_time": fields[3] if len(fields) > 3 else None}
+                elif sym.startswith("hk"):
                     # HK layout (verified 2026-11-19): 0=EN name,1=CN name,2=open,3=prev close,
                     # 4=high,5=low,6=current,7=change,8=change%,17=date,18=time
                     prev, cur = float(fields[3]), float(fields[6])
@@ -430,7 +439,9 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             q = quotes.get(sym) if sym else None
             if q:
                 est_pct += h["weight"] * q["change_pct"] / 100
-                quote_time = quote_time or q["quote_time"]
+                qt = q["quote_time"]
+                if qt and (quote_time is None or qt.replace("/", "-") > quote_time.replace("/", "-")):
+                    quote_time = qt
                 detail.append({**h, "change_pct": round(q["change_pct"], 2)})
             else:
                 skipped.append(h["code"])
