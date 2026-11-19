@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>基金自算估值</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f6f8; color: #222; }
+  header { background: #1f3a5f; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 17px; margin: 0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; }
+  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #1f6feb; color: #fff; font-size: 14px; cursor: pointer; }
+  button.secondary { background: #e8ebef; color: #333; }
+  button.danger { background: #d33; padding: 5px 10px; font-size: 13px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row input { flex: 1; min-width: 160px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 9px 6px; border-bottom: 1px solid #eee; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  .up { color: #d33; font-weight: 600; } .down { color: #0a8a4a; font-weight: 600; }
+  .muted { color: #888; font-size: 12px; }
+  .err { color: #d33; font-size: 13px; min-height: 18px; }
+  .search-results button { margin: 4px 4px 0 0; background: #eef3ff; color: #1f3a5f; border: 1px solid #c9d8f5; }
+  footer { text-align: center; color: #999; font-size: 12px; padding: 16px; }
+  @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>基金自算估值</h1>
+  <span id="userbox" class="muted" style="color:#cfe0f5"></span>
+</header>
+<main>
+  <div id="auth" class="card" style="display:none">
+    <h3 id="auth-title">登录</h3>
+    <input id="username" placeholder="用户名" autocomplete="username">
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+    <div class="err" id="auth-err"></div>
+    <div class="row">
+      <button id="auth-btn">登录</button>
+      <button class="secondary" id="auth-switch">没有账号？去注册</button>
+    </div>
+  </div>
+
+  <div id="dash" style="display:none">
+    <div class="card">
+      <div class="row">
+        <input id="q" placeholder="搜索基金代码或名称，如 005827">
+        <button id="search-btn">搜索</button>
+        <button class="secondary" id="refresh-btn">刷新估值</button>
+        <button class="secondary" id="logout-btn">退出</button>
+      </div>
+      <div class="search-results" id="results"></div>
+      <div class="err" id="dash-err"></div>
+    </div>
+    <div class="card" style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>基金</th><th>昨日净值</th><th>自算估值</th><th>估算涨跌</th>
+          <th class="hide-m">持仓覆盖</th><th class="hide-m">持仓报告期</th><th class="hide-m">行情时间</th><th></th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="muted" id="empty-tip">列表为空，先搜索添加基金。估值每 60 秒自动刷新。</div>
+    </div>
+  </div>
+</main>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。</footer>
+<script>
+const $ = id => document.getElementById(id);
+let mode = "login", timer = null;
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ("请求失败 " + r.status));
+  return data;
+}
+function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); }
+function showDash(user) {
+  $("auth").style.display = "none"; $("dash").style.display = "";
+  $("userbox").textContent = user;
+  loadEstimates();
+  clearInterval(timer); timer = setInterval(loadEstimates, 60000);
+}
+$("auth-switch").onclick = () => {
+  mode = mode === "login" ? "register" : "login";
+  $("auth-title").textContent = mode === "login" ? "登录" : "注册";
+  $("auth-btn").textContent = mode === "login" ? "登录" : "注册";
+  $("auth-switch").textContent = mode === "login" ? "没有账号？去注册" : "已有账号？去登录";
+  $("auth-err").textContent = "";
+};
+$("auth-btn").onclick = async () => {
+  try {
+    const body = JSON.stringify({ username: $("username").value.trim(), password: $("password").value });
+    if (mode === "register") await api("/api/register", { method: "POST", body });
+    await api("/api/login", { method: "POST", body });
+    const me = await api("/api/me"); showDash(me.username);
+  } catch (e) { $("auth-err").textContent = e.message; }
+};
+$("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); $("userbox").textContent = ""; showAuth(); };
+$("search-btn").onclick = async () => {
+  try {
+    const { results } = await api("/api/search?q=" + encodeURIComponent($("q").value.trim()));
+    $("results").innerHTML = results.map(r =>
+      `<button onclick="addFund('${r.code}')">${r.code} ${r.name} ＋</button>`).join("") || '<span class="muted">无结果</span>';
+  } catch (e) { $("dash-err").textContent = e.message; }
+};
+async function addFund(code) {
+  try { await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code }) }); $("results").innerHTML = ""; loadEstimates(); }
+  catch (e) { $("dash-err").textContent = e.message; }
+}
+async function delFund(id) {
+  try { await api("/api/watchlist/" + id, { method: "DELETE" }); loadEstimates(); }
+  catch (e) { $("dash-err").textContent = e.message; }
+}
+function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${s}</span>`; }
+async function loadEstimates() {
+  try {
+    const { funds } = await api("/api/estimates");
+    $("empty-tip").style.display = funds.length ? "none" : "";
+    $("tbody").innerHTML = funds.map(f => `<tr>
+      <td>${f.fund_name}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
+      <td>${f.dwjz ?? "-"}<div class="muted">${f.nav_date ?? ""}</div></td>
+      <td>${f.est_nav ?? "-"}</td><td>${fmtPct(f.est_change_pct)}</td>
+      <td class="hide-m">${f.coverage_pct}%</td>
+      <td class="hide-m">${f.report_label ?? "-"}<div class="muted">${f.report_date ?? ""}</div></td>
+      <td class="hide-m">${f.quote_time ?? "-"}</td>
+      <td><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`).join("");
+    $("dash-err").textContent = "";
+  } catch (e) { if (String(e.message).includes("登录")) showAuth(); else $("dash-err").textContent = e.message; }
+}
+$("refresh-btn").onclick = loadEstimates;
+(async () => { try { const me = await api("/api/me"); showDash(me.username); } catch { showAuth(); } })();
+</script>
+</body>
+</html>

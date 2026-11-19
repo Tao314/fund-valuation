@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+fund.db
+fund.db-wal
+fund.db-shm
+*.log
