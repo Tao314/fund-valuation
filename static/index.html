@@ -24,6 +24,14 @@
   .muted { color: #888; font-size: 12px; }
   .err { color: #d33; font-size: 13px; min-height: 18px; }
   .search-results button { margin: 4px 4px 0 0; background: #eef3ff; color: #1f3a5f; border: 1px solid #c9d8f5; }
+  tr.changed td { background: #fff7cc; }
+  .badge { display: inline-block; background: #f5b301; color: #222; font-size: 11px; border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+  tr.group-row td { background: #eef3ff; color: #1f3a5f; font-weight: 600; text-align: left; }
+  button.mini { padding: 4px 8px; font-size: 13px; background: #e8ebef; color: #333; margin-right: 4px; }
+  button.mini:disabled { opacity: .35; cursor: default; }
+  select.cat { padding: 5px; border: 1px solid #ccc; border-radius: 8px; font-size: 13px; max-width: 130px; }
+  .legend { color: #888; font-size: 12px; margin-bottom: 8px; }
+  #countdown { color: #888; font-size: 13px; }
   footer { text-align: center; color: #999; font-size: 12px; padding: 16px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
 </style>
@@ -51,16 +59,18 @@
         <input id="q" placeholder="搜索基金代码或名称，如 005827">
         <button id="search-btn">搜索</button>
         <button class="secondary" id="refresh-btn">刷新估值</button>
+        <span id="countdown">下次自动刷新：60s</span>
         <button class="secondary" id="logout-btn">退出</button>
       </div>
       <div class="search-results" id="results"></div>
       <div class="err" id="dash-err"></div>
     </div>
     <div class="card" style="overflow-x:auto">
+      <div class="legend">黄色高亮＋「更新」标记 = 本次刷新数据有变化；无变化时标记自动消失。</div>
       <table>
         <thead><tr>
-          <th>基金</th><th>昨日净值</th><th>自算估值</th><th>估算涨跌</th>
-          <th class="hide-m">持仓覆盖</th><th class="hide-m">持仓报告期</th><th class="hide-m">行情时间</th><th></th>
+          <th>基金</th><th>昨日净值</th><th>自算估值</th><th>估算涨跌</th><th>分类</th>
+          <th class="hide-m">持仓覆盖</th><th class="hide-m">持仓报告期</th><th class="hide-m">行情时间</th><th>顺序/操作</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -78,10 +88,21 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(data.detail || ("请求失败 " + r.status));
   return data;
 }
-function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); }
+let countdownTimer = null, countdownLeft = 60;
+function resetCountdown() {
+  countdownLeft = 60;
+  const el = $("countdown"); if (el) el.textContent = "下次自动刷新：" + countdownLeft + "s";
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdownLeft = Math.max(0, countdownLeft - 1);
+    const e2 = $("countdown"); if (e2) e2.textContent = "下次自动刷新：" + countdownLeft + "s";
+  }, 1000);
+}
+function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); prevSnapshot = null; }
 function showDash(user) {
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
+  prevSnapshot = null;
   loadEstimates();
   clearInterval(timer); timer = setInterval(loadEstimates, 60000);
 }
@@ -124,24 +145,79 @@ async function delFund(id) {
   catch (e) { $("dash-err").textContent = e.message; }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${s}</span>`; }
-let refreshing = false;
+let refreshing = false, prevSnapshot = null, currentFunds = [];
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function catOptions(current, allCats) {
+  const opts = ['<option value=""' + (current ? "" : " selected") + ">未分类</option>"];
+  allCats.forEach(c => opts.push(`<option value="${esc(c)}"${c === current ? " selected" : ""}>${esc(c)}</option>`));
+  opts.push('<option value="__new__">＋新分类</option>');
+  return opts.join("");
+}
+function renderFunds(funds) {
+  currentFunds = funds;
+  const changed = new Set();
+  if (prevSnapshot) {
+    funds.forEach(f => {
+      const p = prevSnapshot[f.fund_code];
+      if (p && (p.est_nav !== f.est_nav || p.est_change_pct !== f.est_change_pct || p.dwjz !== f.dwjz)) changed.add(f.fund_code);
+    });
+  }
+  const allCats = [...new Set(funds.map(f => f.category || "").filter(Boolean))];
+  const groups = new Map();
+  funds.forEach((f, i) => {
+    const key = f.category || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ f, i });
+  });
+  let html = "";
+  groups.forEach((items, cat) => {
+    html += `<tr class="group-row"><td colspan="9">${esc(cat || "未分类")}</td></tr>`;
+    items.forEach(({ f, i }) => {
+      const ch = changed.has(f.fund_code);
+      html += `<tr${ch ? ' class="changed"' : ""}>
+      <td>${esc(f.fund_name)}${ch ? '<span class="badge">更新</span>' : ""}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
+      <td>${f.dwjz ?? "-"}<div class="muted">${f.nav_date ?? ""}</div></td>
+      <td>${f.est_nav ?? "-"}</td><td>${fmtPct(f.est_change_pct)}</td>
+      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", allCats)}</select></td>
+      <td class="hide-m">${f.coverage_pct}%</td>
+      <td class="hide-m">${f.report_label ?? "-"}<div class="muted">${f.report_date ?? ""}</div></td>
+      <td class="hide-m">${f.quote_time ?? "-"}</td>
+      <td><button class="mini" onclick="moveFund(${f.id}, -1)" ${i === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(${f.id}, 1)" ${i === funds.length - 1 ? "disabled" : ""}>↓</button><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`;
+    });
+  });
+  $("tbody").innerHTML = html;
+  prevSnapshot = {};
+  funds.forEach(f => { prevSnapshot[f.fund_code] = { est_nav: f.est_nav, est_change_pct: f.est_change_pct, dwjz: f.dwjz }; });
+}
+async function moveFund(id, dir) {
+  const idx = currentFunds.findIndex(f => f.id === id);
+  const j = idx + dir;
+  if (idx < 0 || j < 0 || j >= currentFunds.length) return;
+  const ids = currentFunds.map(f => f.id);
+  [ids[idx], ids[j]] = [ids[j], ids[idx]];
+  try { await api("/api/watchlist/reorder", { method: "POST", body: JSON.stringify({ ids }) }); await loadEstimates(); }
+  catch (e) { $("dash-err").textContent = e.message; }
+}
+async function setCategory(id, sel) {
+  let cat = sel.value;
+  if (cat === "__new__") {
+    cat = (prompt("输入新分类名（最多 20 字）") || "").trim();
+    if (!cat) { await loadEstimates(); return; }
+  }
+  try { await api("/api/watchlist/" + id + "/category", { method: "POST", body: JSON.stringify({ category: cat }) }); await loadEstimates(); }
+  catch (e) { $("dash-err").textContent = e.message; }
+}
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
+  resetCountdown();
   const rb = $("refresh-btn");
   rb.disabled = true; rb.textContent = "刷新中…";
   try {
     const { funds } = await api("/api/estimates");
     addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
-    $("tbody").innerHTML = funds.map(f => `<tr>
-      <td>${f.fund_name}<div class="muted">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}</div></td>
-      <td>${f.dwjz ?? "-"}<div class="muted">${f.nav_date ?? ""}</div></td>
-      <td>${f.est_nav ?? "-"}</td><td>${fmtPct(f.est_change_pct)}</td>
-      <td class="hide-m">${f.coverage_pct}%</td>
-      <td class="hide-m">${f.report_label ?? "-"}<div class="muted">${f.report_date ?? ""}</div></td>
-      <td class="hide-m">${f.quote_time ?? "-"}</td>
-      <td><button class="danger" onclick="delFund(${f.id})">删除</button></td></tr>`).join("");
+    renderFunds(funds);
     $("dash-err").textContent = "";
   } catch (e) { if (String(e.message).includes("登录")) showAuth(); else $("dash-err").textContent = e.message; }
   finally { refreshing = false; rb.disabled = false; rb.textContent = "刷新估值"; }

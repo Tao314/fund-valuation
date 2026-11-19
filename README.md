@@ -102,7 +102,11 @@ rm -rf /opt/fund-valuation
 | GET | /api/watchlist | 我的基金列表 |
 | POST | /api/watchlist | 添加基金 {fund_code}，代码须 6 位数字 |
 | DELETE | /api/watchlist/{id} | 删除（仅本人记录） |
-| GET | /api/estimates | 列表 + 自算估值 |
+| POST | /api/watchlist/reorder | 按给定顺序重排 {ids: [id, ...]}，仅本人记录生效 |
+| POST | /api/watchlist/{id}/category | 设置分类 {category}，最长 20 字，空 = 未分类 |
+| GET | /api/estimates | 列表 + 自算估值（含 category 字段） |
+
+前端功能：每行 ↑/↓ 调整顺序；下拉框给基金设分类（可新建），列表按分类分组显示；自动刷新带 60 秒倒计时；本次刷新有变化的基金行黄底高亮并带「更新」标记，无变化时标记自动消失。
 
 所有自选列表操作都按会话中的 user_id 过滤，不信任前端传入的用户 ID。
 

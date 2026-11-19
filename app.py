@@ -81,6 +81,10 @@ def init_db():
             fetched_at REAL NOT NULL);
         """
     )
+    # Migration: user_funds.category (added 2026-11-19)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(user_funds)").fetchall()]
+    if "category" not in cols:
+        conn.execute("ALTER TABLE user_funds ADD COLUMN category TEXT NOT NULL DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -133,6 +137,14 @@ class AuthBody(BaseModel):
 
 class AddFundBody(BaseModel):
     fund_code: str
+
+
+class ReorderBody(BaseModel):
+    ids: list
+
+
+class CategoryBody(BaseModel):
+    category: str
 
 
 @app.post("/api/register")
@@ -377,7 +389,7 @@ def get_watchlist(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, fund_code, fund_name, sort_order FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
+            "SELECT id, fund_code, fund_name, sort_order, category FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
     return {"funds": [dict(r) for r in rows]}
 
@@ -396,8 +408,9 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     with db() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO user_funds(user_id, fund_code, fund_name, created_at) VALUES(?,?,?,?)",
-                (uid, code, name, now_iso()),
+                "INSERT INTO user_funds(user_id, fund_code, fund_name, sort_order, created_at) "
+                "VALUES(?,?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_funds WHERE user_id=?),?)",
+                (uid, code, name, uid, now_iso()),
             )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该基金已在列表中")
@@ -414,12 +427,46 @@ def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)
     return {"ok": True}
 
 
+@app.post("/api/watchlist/reorder")
+def reorder_watchlist(body: ReorderBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    ids = []
+    for v in body.ids:
+        try:
+            ids.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    with db() as conn:
+        owned = {r["id"] for r in conn.execute("SELECT id FROM user_funds WHERE user_id=?", (uid,)).fetchall()}
+        updated = 0
+        for pos, item_id in enumerate(ids):
+            if item_id in owned:  # foreign ids are ignored, never touched
+                conn.execute("UPDATE user_funds SET sort_order=? WHERE id=? AND user_id=?", (pos, item_id, uid))
+                updated += 1
+    return {"ok": True, "updated": updated}
+
+
+@app.post("/api/watchlist/{item_id}/category")
+def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    category = (body.category or "").strip()
+    if len(category) > 20:
+        raise HTTPException(400, "分类名最多 20 个字符")
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE user_funds SET category=? WHERE id=? AND user_id=?", (category, item_id, uid)
+        )
+    if cur.rowcount == 0:
+        raise HTTPException(404, "记录不存在")
+    return {"ok": True, "category": category}
+
+
 @app.get("/api/estimates")
 async def estimates(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, fund_code, fund_name FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
+            "SELECT id, fund_code, fund_name, category FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
     # Fetch NAV + holdings per fund, collect all symbols, one batch quote call
     per_fund, all_symbols = [], []
@@ -448,7 +495,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
                 detail.append({**h, "change_pct": None})
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
         out.append({
-            "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"],
+            "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "est_nav": round(est_nav, 4) if est_nav else None,
             "est_change_pct": round(est_pct, 2),
