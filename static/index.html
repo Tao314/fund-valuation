@@ -52,6 +52,8 @@
   .fund-card .fc-chg { font-size: 15px; font-weight: 600; }
   .fund-card .fc-est { font-size: 15px; font-weight: 600; margin-top: 2px; }
   .fund-card .fc-nav { font-size: 12px; color: #646A73; margin-top: 2px; }
+  .fund-card .fc-status { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 6px; }
+  .fund-card .fc-state { font-size: 11px; color: #8F959E; font-weight: 400; margin-left: 4px; }
   .sort-toggle button { min-height: 40px; }
   .sort-toggle button.active { background: #1677FF; color: #fff; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
@@ -94,12 +96,11 @@
         <div class="row sort-toggle" style="margin-top:10px">
           <button class="secondary active" id="sort-default">默认顺序</button>
           <button class="secondary" id="sort-change">按涨跌幅</button>
-          <button class="secondary" id="sort-coverage">按覆盖率</button>
         </div>
         <div class="err" id="dash-err"></div>
       </div>
       <div class="card">
-        <div class="legend">黄色高亮＋「更新」标记 = 相对上一次刷新有变化，几秒后自动消失。</div>
+        <div class="legend">黄色高亮＋「更新」标记 = 相对上一次刷新有变化，几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。</div>
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
       </div>
@@ -153,7 +154,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.6.0 · 更新于 2026-11-20 00:14</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.7.0 · 更新于 2026-11-20 00:25</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -198,8 +199,62 @@ function marketStatusText() {
   else us = "未开盘";
   return "A股" + a + " · 港股" + hk + " · 美股" + us;
 }
-function updateMarketStatus() { const el = $("market-status"); if (el) el.textContent = marketStatusText(); }
+function updateMarketStatus() { const el = $("market-status"); if (el) el.textContent = marketStatusText(); updateFundStatuses(); }
 setInterval(updateMarketStatus, 60000);
+// Per-fund market status from holdings codes: 6-digit=A股, 5-digit=港股, alphabetic=美股.
+// Sessions by browser local time, Mon-Fri only, holidays ignored, US DST ignored.
+function marketOfCode(code) {
+  const c = String(code || "").trim();
+  if (/^\d{6}$/.test(c)) return "a";
+  if (/^\d{5}$/.test(c)) return "hk";
+  if (/^[A-Za-z]/.test(c)) return "us";
+  return null;
+}
+function marketSession(market, now) {
+  const day = now.getDay(); // 0 Sun .. 6 Sat
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const weekday = day >= 1 && day <= 5;
+  if (market === "a") { // 09:30-11:30, 13:00-15:00; lunch break counts as not trading
+    if (!weekday) return "closed";
+    if ((mins >= 570 && mins < 690) || (mins >= 780 && mins < 900)) return "trading";
+    return "closed";
+  }
+  if (market === "hk") { // 09:30-12:00, 13:00-16:00
+    if (!weekday) return "closed";
+    if ((mins >= 570 && mins < 720) || (mins >= 780 && mins < 960)) return "trading";
+    return "closed";
+  }
+  if (market === "us") { // 21:30-04:00(+1d) trading, 16:00-21:30 pre, 04:00-08:00 post
+    if ((weekday && mins >= 1290) || (day >= 2 && day <= 6 && mins < 240)) return "trading";
+    if (weekday && mins >= 960 && mins < 1290) return "pre";
+    if (day >= 2 && day <= 6 && mins >= 240 && mins < 480) return "post";
+    return "closed";
+  }
+  return "closed";
+}
+function fundMarketStatus(f, now) {
+  now = now || new Date();
+  const markets = new Set();
+  (f.holdings || []).forEach(h => { const m = marketOfCode(h.code); if (m) markets.add(m); });
+  const sessions = [...markets].map(m => marketSession(m, now));
+  let s = "closed"; // priority: trading > pre > post > closed
+  if (sessions.includes("trading")) s = "trading";
+  else if (sessions.includes("pre")) s = "pre";
+  else if (sessions.includes("post")) s = "post";
+  const label = markets.has("us")
+    ? (s === "trading" ? "盘中" : s === "pre" ? "盘前" : s === "post" ? "盘后" : "已收盘")
+    : (s === "trading" ? "盘中交易" : "已收盘");
+  return { session: s, label, state: s === "closed" ? "已确认" : "预估" };
+}
+function updateFundStatuses() {
+  if (!currentFunds.length) return;
+  const now = new Date();
+  currentFunds.forEach(f => {
+    const st = fundMarketStatus(f, now);
+    document.querySelectorAll('.fc-status[data-code="' + f.fund_code + '"]').forEach(el => { el.textContent = st.label; });
+    document.querySelectorAll('.fc-state[data-code="' + f.fund_code + '"]').forEach(el => { el.textContent = st.state; });
+  });
+}
 function showView(name) {
   $("view-main").style.display = name === "main" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
@@ -293,9 +348,8 @@ function buildGroups(data) {
   return cats;
 }
 function sortedItems(items) {
-  if (sortMode === "default") return items;
-  const key = sortMode === "change" ? "est_change_pct" : "coverage_pct";
-  return [...items].sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity));
+  if (sortMode !== "change") return items;
+  return [...items].sort((a, b) => (b.est_change_pct ?? -Infinity) - (a.est_change_pct ?? -Infinity));
 }
 function renderFunds(data) {
   const funds = data.funds || [];
@@ -312,14 +366,15 @@ function renderFunds(data) {
     html += `<div class="group-title">${esc(g.category || "未分类")}</div>`;
     sortedItems(g.items).forEach(f => {
       const ch = changed.has(f.fund_code);
+      const st = fundMarketStatus(f);
       html += `<div class="fund-card${ch ? " changed" : ""}">
       <div class="fc-left">
-        <div class="fc-name">${esc(f.fund_name)}${ch ? '<span class="badge">更新</span>' : ""}</div>
-        <div class="fc-meta">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}<br>覆盖 ${f.coverage_pct}% · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}<br>行情 ${f.quote_time ?? "-"}</div>
+        <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span>${ch ? '<span class="badge">更新</span>' : ""}</div>
+        <div class="fc-meta">${f.fund_code}${f.stale ? " · 数据可能过期" : ""}<br>覆盖 ${f.coverage_pct}% · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}</div>
       </div>
       <div class="fc-right">
         <div class="fc-chg">${fmtPct(f.est_change_pct)}</div>
-        <div class="fc-est">${f.est_nav ?? "-"}</div>
+        <div class="fc-est">${f.est_nav ?? "-"}<span class="fc-state" data-code="${f.fund_code}">${st.state}</span></div>
         <div class="fc-nav">昨日净值 ${f.dwjz ?? "-"}（${f.nav_date ?? ""}）</div>
       </div></div>`;
     });
@@ -458,12 +513,10 @@ function setSortMode(mode) {
   sortMode = mode;
   $("sort-default").className = "secondary" + (mode === "default" ? " active" : "");
   $("sort-change").className = "secondary" + (mode === "change" ? " active" : "");
-  $("sort-coverage").className = "secondary" + (mode === "coverage" ? " active" : "");
   if (window.estimateData) renderFunds(window.estimateData);
 }
 $("sort-default").onclick = () => setSortMode("default");
 $("sort-change").onclick = () => setSortMode("change");
-$("sort-coverage").onclick = () => setSortMode("coverage");
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
