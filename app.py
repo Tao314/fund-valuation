@@ -1397,7 +1397,10 @@ async def rank_vol(session: Optional[str] = Cookie(default=None)):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-cache: browsers must revalidate index.html on every load so frontend
+    # updates take effect immediately after deployment (no stale cached page)
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 init_db()

@@ -16,9 +16,10 @@
   header h1 { font-size: 16px; font-weight: 600; margin: 0; line-height: 22px; }
   .title-wrap { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
   .title-note { font-size: 11px; color: #98A2B3; line-height: 22px; }
-  .toolbar-card { position: sticky; top: var(--header-h); z-index: 20; }
+  .toolbar-card { position: sticky; top: var(--header-h); z-index: 20; max-width: 100%; }
   main { max-width: 1100px; margin: 0 auto; padding: 12px; }
-  .card { background: #FFFFFF; border-radius: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid #EAECF0; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+  .card { background: #FFFFFF; border-radius: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid #EAECF0; box-shadow: 0 1px 2px rgba(16,24,40,.04); max-width: 100%; }
+  img, input, select, button { max-width: 100%; }
   .card h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #202939; }
   .card h4 { margin: 14px 0 8px; font-size: 14px; font-weight: 600; color: #667085; }
   input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #EAECF0; border-radius: 8px; font-size: 15px; min-height: 42px; }
@@ -85,7 +86,10 @@
   .sort-toggle button.active:active { background: #1D4ED8; }
   /* compact top toolbar (v1.10.6): two slim rows instead of big buttons */
   .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; flex-wrap: wrap; }
-  .toolbar-row2 { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  /* row1 items keep natural size and wrap to the next line instead of
+     shrinking/clipping or pushing the card wider than the viewport */
+  .toolbar-row1 > * { flex: none; }
+  .toolbar-row2 { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
   .toolbar-row2 .sort-toggle { display: flex; gap: 4px; flex: none; }
   .tab-btn { height: 28px; min-height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #ECEEF2; color: #667085; }
   .tab-btn.active { background: #EBF1FF; color: #2563EB; font-weight: 600; }
@@ -287,7 +291,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.4 · 更新于 2026-11-20 15:32</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.5 · 更新于 2026-11-20 15:37</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
