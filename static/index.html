@@ -300,7 +300,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.15.0 · 更新于 2026-11-20 22:48</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.15.1 · 更新于 2026-11-20 23:03</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -789,8 +789,10 @@ function extRow(f, published) {
   const nav = published ? estNavExtFromPrev(f) : (f.est_nav_ext ?? "-");
   return `<div class="fc-row"><span class="fc-label">${label}</span><span class="fc-val"><b>${nav}</b> ${fmtPct(f.est_change_pct_ext)}</span></div>`;
 }
-// Intraday estimate sparkline: series from /api/history/today (backend records
-// one est_change_pct point per fund per minute, downsampled to 5-min buckets).
+// Intraday estimate sparkline: series from /api/history/today (backend computes
+// it from holdings' Eastmoney minute trends, downsampled to 5-min buckets).
+// X domain = the fund's full trading span across its holdings' markets
+// (earliest open to latest close), not the data extent.
 let historySeries = {};
 async function loadHistory() {
   try {
@@ -803,8 +805,42 @@ function fmtHM(ts) {
   const p = n => String(n).padStart(2, "0");
   return p(d.getHours()) + ":" + p(d.getMinutes());
 }
-function sparklineHtml(code) {
-  const pts = historySeries[code];
+// Epoch seconds of an ET (America/New_York) wall-clock time, DST-aware:
+// guess UTC, read the ET offset at that instant via Intl, correct by it.
+function etWallEpoch(y, mo, d, h, mi) {
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  const parts = {};
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(guess)).forEach(p => { parts[p.type] = p.value; });
+  const asUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day,
+                         +parts.hour, +parts.minute, +parts.second);
+  const offset = asUTC - Math.floor(guess / 1000) * 1000;
+  return (guess - offset) / 1000;
+}
+// Full-session x domain [start, end] (epoch seconds) for a fund, from its
+// holdings' markets on the current session day (lastTradingDay): A股
+// 09:30-15:00 and 港股 09:30-16:00 local; 美股 09:30-16:00 ET that day
+// (22:30-05:00 Beijing in winter, 21:30-04:00 in summer). Domain runs from
+// the earliest open to the latest close (QDII with US holdings: 09:30 to
+// next-morning US close). Feeder/index funds resolve to A股 through their
+// index holding code. Null when no known market -> data extent fallback.
+function sparkDomain(f) {
+  const markets = new Set();
+  (f.holdings || []).forEach(h => markets.add(marketOfHolding(h.code)));
+  const [y, mo, d] = lastTradingDay().split("-").map(Number);
+  const at = (h, mi) => Math.floor(new Date(y, mo - 1, d, h, mi).getTime() / 1000);
+  const spans = [];
+  if (markets.has("A股")) spans.push([at(9, 30), at(15, 0)]);
+  if (markets.has("港股")) spans.push([at(9, 30), at(16, 0)]);
+  if (markets.has("美股")) spans.push([etWallEpoch(y, mo, d, 9, 30), etWallEpoch(y, mo, d, 16, 0)]);
+  if (!spans.length) return null;
+  return [Math.min(...spans.map(s => s[0])), Math.max(...spans.map(s => s[1]))];
+}
+function sparklineHtml(f) {
+  const pts = historySeries[f.fund_code];
   if (!Array.isArray(pts) || pts.length < 2) return "";
   const vals = pts.map(p => p[1]);
   const min = Math.min(...vals), max = Math.max(...vals);
@@ -813,21 +849,33 @@ function sparklineHtml(code) {
   if (hi === lo) { lo -= 0.1; hi += 0.1; }  // flat series: avoid div0
   const pad = (hi - lo) * 0.1;
   lo -= pad; hi += pad;
-  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const dom = sparkDomain(f);
+  const t0 = dom ? dom[0] : pts[0][0];
+  const t1 = dom ? dom[1] : pts[pts.length - 1][0];
   const tSpan = t1 - t0;
   const W = 100, H = 44, YT = 2, YB = 42;
-  const X = (p, i) => tSpan > 0 ? (p[0] - t0) / tSpan * W : i / (pts.length - 1) * W;
+  const X = p => tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
   const Y = v => YB - (v - lo) / (hi - lo) * (YB - YT);
-  const line = pts.map((p, i) => X(p, i).toFixed(2) + "," + Y(p[1]).toFixed(2)).join(" ");
-  const area = "0," + H + " " + line + " " + W + "," + H;
   const last = vals[vals.length - 1];
   const color = last >= 0 ? "#C9362B" : "#07845B";
+  // Split into segments at gaps > 10 min (lunch break, A/HK close -> US
+  // open) so stretches without data stay empty, not a straight connector.
+  const segs = [[pts[0]]];
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i][0] - pts[i - 1][0] > 600) segs.push([]);
+    segs[segs.length - 1].push(pts[i]);
+  }
+  const lines = segs.filter(s => s.length > 1).map(s => {
+    const line = s.map(p => X(p).toFixed(2) + "," + Y(p[1]).toFixed(2)).join(" ");
+    const area = X(s[0]).toFixed(2) + "," + H + " " + line + " " + X(s[s.length - 1]).toFixed(2) + "," + H;
+    return `<polygon points="${area}" fill="${color}" opacity="0.08"/><polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  }).join("");
   const zero = crossesZero
     ? `<line x1="0" y1="${Y(0).toFixed(2)}" x2="${W}" y2="${Y(0).toFixed(2)}" stroke="#D0D5DD" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`
     : "";
   const fmtLbl = v => (v > 0 ? "+" : "") + v.toFixed(2) + "%";
   return `<div class="fc-spark">
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><polygon points="${area}" fill="${color}" opacity="0.08"/>${zero}<polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${zero}${lines}</svg>
     <span class="sp-max">${fmtLbl(max)}</span>
     <span class="sp-min">${fmtLbl(min)}</span>
     <div class="sp-times"><span>${fmtHM(t0)}</span><span>${fmtHM(t1)}</span></div>
@@ -917,7 +965,7 @@ function renderFunds(data) {
       </div>
       <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · ${ov}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
-      ${sparklineHtml(f.fund_code)}
+      ${sparklineHtml(f)}
       </div>`;
     });
   });

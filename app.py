@@ -50,7 +50,8 @@ async def lifespan(_app):
     # itself never waits on upstream fetches. The quote warmer keeps the
     # in-memory quote cache hot so first page loads don't wait on Sina.
     tasks = [asyncio.create_task(_rank_warm_loop()),
-             asyncio.create_task(_quote_warm_loop())]
+             asyncio.create_task(_quote_warm_loop()),
+             asyncio.create_task(_trends_warm_loop())]
     try:
         yield
     finally:
@@ -1089,6 +1090,50 @@ async def _quote_warm_loop():
         await asyncio.sleep(40)
 
 
+async def _trends_warm_loop():
+    """Keep stock_trends_cache hot: every 240s (< TRENDS_TTL 300s) refresh
+    minute trends for the union of holding codes across all users'
+    watchlists (plus feeder funds' tracking-index secids), so the first
+    /api/history/today call never waits on Eastmoney. Runs beside the
+    quote warmer; startup is never blocked; errors are logged and skipped."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT fund_code, fund_name FROM user_funds").fetchall()
+            if rows:
+                date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+                uniq = {}          # holding code -> market map (or None)
+                feeder_codes = []
+                for r in rows:
+                    hold = await fetch_holdings(r["fund_code"])
+                    mmap = None
+                    if any(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*",
+                                        (h["code"] or "").strip())
+                           for h in hold["holdings"]):
+                        mmap = await fetch_stock_market_map(r["fund_code"])
+                    for h in hold["holdings"]:
+                        if h["weight"]:
+                            uniq.setdefault(h["code"], mmap)
+                    if _is_feeder(r["fund_name"], hold["holdings"]):
+                        feeder_codes.append(r["fund_code"])
+                await asyncio.gather(*[
+                    fetch_holding_trends(c, m, date_str) for c, m in uniq.items()])
+                n = len(uniq)
+                for fc in feeder_codes:
+                    idx = await resolve_fund_index(fc)
+                    if idx:
+                        async with _trends_sem:
+                            await fetch_stock_trends(idx["secid"], date_str)
+                        n += 1
+                print(f"[trends-warm] refreshed {n} secids "
+                      f"for {len(rows)} funds", flush=True)
+        except Exception as e:
+            print(f"[trends-warm] failed: {e!r}", flush=True)
+        await asyncio.sleep(240)
+
+
 # ---------------------------------------------------------------- watchlist
 def category_order(conn, uid) -> list:
     return [r["name"] for r in conn.execute(
@@ -1376,14 +1421,24 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
 
 @app.get("/api/history/today")
 async def history_today(session: Optional[str] = Cookie(default=None)):
-    """Today's intraday estimate curve per watchlisted fund (Asia/Shanghai
-    day), computed from holdings' Eastmoney minute trends and downsampled
-    to 5-minute buckets for the fund-card sparklines. Falls back to the
-    legacy est_history snapshots when trends yield nothing."""
+    """Intraday estimate curve per watchlisted fund for the current
+    session day, computed from holdings' Eastmoney minute trends and
+    downsampled to 5-minute buckets for the fund-card sparklines. Falls
+    back to the legacy est_history snapshots when trends yield nothing."""
     uid = current_user_id(session)
-    start = datetime.now(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_ts = int(start.timestamp())
-    date_str = start.strftime("%Y-%m-%d")
+    now_cn = datetime.now(CN_TZ)
+    date_str = now_cn.strftime("%Y-%m-%d")  # trends cache key = fetch date
+    # Curve window starts at the session day's 00:00 (Asia/Shanghai): the
+    # US session that opened the previous Beijing evening runs past
+    # midnight, so before 09:30 (and on weekends) the session day is the
+    # previous weekday — its A/HK segment and tonight's US points then
+    # stay in one curve instead of being cut at midnight.
+    day = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
+    if not (day.weekday() < 5 and now_cn.hour * 60 + now_cn.minute >= 570):
+        day -= timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+    start_ts = int(day.timestamp())
     with db() as conn:
         fund_rows = conn.execute(
             "SELECT fund_code, fund_name FROM user_funds WHERE user_id=?", (uid,)).fetchall()
