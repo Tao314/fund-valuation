@@ -36,7 +36,6 @@
   button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #202939; margin-right: 4px; min-height: 40px; }
   button.mini:disabled { opacity: .35; cursor: default; }
   select.cat { padding: 5px; border: 1px solid #EAECF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
-  .legend { color: #667085; font-size: 11px; margin-bottom: 8px; }
   #countdown { color: #667085; font-size: 13px; }
   .ms-pill { display: inline-flex; align-items: center; gap: 6px; background: #FFFFFF; border: 1px solid #EAECF0; border-radius: 999px; padding: 6px 12px; font-size: 12px; color: #667085; white-space: nowrap; }
   .ms-dot { width: 6px; height: 6px; border-radius: 50%; background: #98A2B3; flex: none; }
@@ -121,7 +120,6 @@
         <div class="err" id="dash-err"></div>
       </div>
       <div class="card">
-        <div class="legend">卡片左侧琥珀竖条＝刚更新（相对上一次刷新有变化），几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。估值偏差＝自算估算涨幅－公布涨幅，越接近 0 越准。海外含量＝前十大持仓中非A股（港股/美股等）占比；状态按持仓市场算，任一市场交易中显示盘中。</div>
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
       </div>
@@ -175,7 +173,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.4 · 更新于 2026-11-20 11:25</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.5 · 更新于 2026-11-20 11:30</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
