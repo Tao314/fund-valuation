@@ -108,6 +108,17 @@ def init_db():
             ts INTEGER NOT NULL,
             est_change_pct REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_est_history ON est_history(fund_code, ts);
+        CREATE TABLE IF NOT EXISTS stock_trends_cache(
+            secid TEXT NOT NULL,
+            date TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            fetched_at REAL NOT NULL,
+            PRIMARY KEY(secid, date));
+        CREATE TABLE IF NOT EXISTS fund_index_map(
+            fund_code TEXT PRIMARY KEY,
+            index_name TEXT,
+            secid TEXT,
+            fetched_at REAL NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -810,43 +821,242 @@ def quotes_stale() -> bool:
     return time.time() - _quote_cache["at"] >= QUOTE_TTL
 
 
-def _est_pct_from(holdings: list, quotes: dict):
-    """Close-based main estimate: sum(weight% * regular change%) / 100 over
-    holdings that have quotes (same formula as /api/estimates, NAV not
-    needed). Returns (est_pct, quoted_coverage)."""
-    est, cov = 0.0, 0.0
-    for h in holdings:
-        sym = to_sina_symbol(h["code"])
-        q = quotes.get(sym) if sym else None
-        if q:
-            est += h["weight"] * q["change_pct"] / 100
-            cov += h["weight"]
-    return est, cov
+# ---------------------------------------------------------------- stock minute trends
+# Eastmoney trends2 minute data per stock; the intraday fund curve is
+# computed from holdings' minute closes (replaces snapshot recording,
+# v1.15.0). Verified 2026-11-20: data.preClose present; rows are
+# "YYYY-MM-DD HH:MM,open,close,high,low,vol,amount,avg" in Beijing time.
+TRENDS_TTL = 300            # seconds, DB cache for today's session
+TRENDS_REF = "https://quote.eastmoney.com/"
+_trends_sem = asyncio.Semaphore(5)
+_us_prefix_cache: dict = {}     # ticker -> working Eastmoney prefix (105/106/107)
+_secid_fail_at: dict = {}       # holding code -> last all-prefixes-failed ts
+_market_map_cache: dict = {}    # fund code -> (market map, ts)
 
 
-_hist_last_ts: dict = {}
-HIST_MIN_INTERVAL = 60     # seconds between recorded points per fund
-HIST_KEEP_DAYS = 7
+def _secid_candidates(code: str, market_map: Optional[dict]) -> list:
+    """Ordered Eastmoney secid candidates for a holding code (verified
+    2026-11-20): SH 6xxxxx/900xxx B-shares -> 1.; SZ 0/3 -> 0.; BJ 4/8 and
+    920xxx -> 0.; HK 5-digit -> 116.; US alpha -> pingzhongdata prefix
+    (105 NASDAQ / 106 NYSE / 107 AMEX) or try 105, 106, 107 in order."""
+    c = (code or "").strip().upper()
+    if re.fullmatch(r"\d{6}", c):
+        if c[0] == "6":
+            return [f"1.{c}"]
+        if c[0] == "9":
+            return [f"0.{c}", f"1.{c}"] if c.startswith("92") else [f"1.{c}"]
+        return [f"0.{c}"]  # 0/3 Shenzhen, 4/8 Beijing
+    if re.fullmatch(r"\d{5}", c):
+        return [f"116.{c}"]
+    if re.fullmatch(r"[A-Z][A-Z0-9.\-]*", c):
+        known = _us_prefix_cache.get(c)
+        if known:
+            return [f"{known}.{c}"]
+        pref = (market_map or {}).get(c)
+        if pref in ("105", "106", "107"):
+            return [f"{pref}.{c}"]
+        return [f"{p}.{c}" for p in ("105", "106", "107")]
+    return []
 
 
-def _record_est_history(holdings_by_code: dict, quotes: dict) -> None:
-    """Record one est_change_pct point per fund (throttled to 60s/fund) for
-    the intraday sparkline; prunes rows older than 7 days."""
-    now = int(time.time())
-    rows = []
-    for code, holdings in holdings_by_code.items():
-        if now - _hist_last_ts.get(code, 0) < HIST_MIN_INTERVAL:
-            continue
-        est, cov = _est_pct_from(holdings, quotes)
-        if cov <= 0:
-            continue  # no holdings / no quotes -> nothing meaningful to record
-        rows.append((code, now, round(est, 2)))
-        _hist_last_ts[code] = now
+async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
+    """Minute closes for one stock: {"pre_close": float|None,
+    "points": [[ts, close], ...]}. DB-cached per (secid, date); today's
+    rows refresh after TRENDS_TTL, past dates never refetch. Returns None
+    when the secid yields no data (wrong prefix / upstream failure) and
+    no cache exists."""
+    today_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
     with db() as conn:
-        if rows:
-            conn.executemany(
-                "INSERT INTO est_history(fund_code, ts, est_change_pct) VALUES(?,?,?)", rows)
-        conn.execute("DELETE FROM est_history WHERE ts < ?", (now - HIST_KEEP_DAYS * 86400,))
+        row = conn.execute(
+            "SELECT payload, fetched_at FROM stock_trends_cache WHERE secid=? AND date=?",
+            (secid, date_str)).fetchone()
+    if row and (date_str < today_str or time.time() - row["fetched_at"] < TRENDS_TTL):
+        return json.loads(row["payload"])
+    try:
+        resp = await upstream_get(
+            "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
+            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&iscca=0",
+            referer=TRENDS_REF, timeout=15)
+        data = resp.json().get("data")
+        if not data:
+            return json.loads(row["payload"]) if row else None
+        points = []
+        for line in data.get("trends") or []:
+            parts = line.split(",")
+            try:
+                ts = int(datetime.strptime(parts[0], "%Y-%m-%d %H:%M")
+                         .replace(tzinfo=CN_TZ).timestamp())
+                points.append([ts, float(parts[2])])
+            except (ValueError, IndexError):
+                continue
+        pre_close = _fnum(data.get("preClose"))
+        if not pre_close:
+            # Fall back to the Sina quote cache's prev close.
+            sym = to_sina_symbol(secid.split(".", 1)[1])
+            q = _quote_cache["quotes"].get(sym) if sym else None
+            if q:
+                pre_close = q.get("prev_close") or (
+                    q["current"] / (1 + q["change_pct"] / 100) if q.get("current") else None)
+        payload = {"pre_close": pre_close, "points": points}
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO stock_trends_cache(secid, date, payload, fetched_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(secid, date) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+                (secid, date_str, json.dumps(payload), time.time()))
+        return payload
+    except Exception:
+        return json.loads(row["payload"]) if row else None
+
+
+async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: str) -> Optional[dict]:
+    """Trends for one holding, trying secid candidates in order; remembers
+    the working prefix per ticker and backs off TRENDS_TTL after a total
+    failure so a bad code doesn't hammer upstream on every page refresh."""
+    c = (code or "").strip().upper()
+    if time.time() - _secid_fail_at.get(c, 0) < TRENDS_TTL:
+        return None
+    async with _trends_sem:
+        for secid in _secid_candidates(c, market_map):
+            tr = await fetch_stock_trends(secid, date_str)
+            if tr and tr.get("points"):
+                _us_prefix_cache[c] = secid.split(".", 1)[0]
+                return tr
+    _secid_fail_at[c] = time.time()
+    return None
+
+
+def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int) -> list:
+    """Fund intraday estimate curve from holdings' minute trends:
+    pct(t) = sum(weight% * stock change%(t)) / 100 on the union minute
+    grid (Asia/Shanghai day from start_ts), forward-filled per stock
+    (excluded before its first point), no renormalization — same
+    convention as /api/estimates. Downsampled to 5-minute buckets."""
+    per_stock = []  # (weight, [(ts, chg_pct), ...])
+    for h in holdings:
+        if not h["weight"]:
+            continue  # zero-weight rows (e.g. feeder-fund artifacts) carry no signal
+        tr = trends_by_code.get(h["code"])
+        if not tr or not tr.get("pre_close"):
+            continue
+        pre = tr["pre_close"]
+        pts = [(ts, (close - pre) / pre * 100) for ts, close in tr["points"] if ts >= start_ts]
+        if pts:
+            per_stock.append((h["weight"], pts))
+    if not per_stock:
+        return []
+    grid = sorted({ts for _, pts in per_stock for ts, _ in pts})
+    idx = [0] * len(per_stock)
+    last = [None] * len(per_stock)
+    buckets = {}
+    for ts in grid:
+        total, any_data = 0.0, False
+        for i, (w, pts) in enumerate(per_stock):
+            while idx[i] < len(pts) and pts[idx[i]][0] <= ts:
+                last[i] = pts[idx[i]][1]
+                idx[i] += 1
+            if last[i] is not None:
+                total += w * last[i] / 100
+                any_data = True
+        if any_data:
+            buckets[ts // 300] = (ts, round(total, 2))
+    return [[ts, pct] for ts, pct in buckets.values()]
+
+
+# ETF feeder funds （联接） disclose no stock holdings; their curve (and,
+# as a bonus, estimate) comes from the tracking index instead (v1.15.0).
+SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # Eastmoney public web suggest token
+
+
+def _is_feeder(fund_name: Optional[str], holdings: list) -> bool:
+    return "ETF联接" in (fund_name or "") or not holdings
+
+
+async def _fetch_benchmark_index_name(fund_code: str) -> Optional[str]:
+    """Tracking index name from the fund's F10 基金概况 page （跟踪标的 /
+    业绩比较基准）, e.g. 中证畜牧养殖指数 (verified 2026-11-20)."""
+    try:
+        resp = await upstream_get(
+            f"https://fundf10.eastmoney.com/jbgk_{fund_code}.html",
+            referer="https://fundf10.eastmoney.com/", timeout=15)
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", resp.text))
+        m = re.search(r"跟踪标的\s*([^\s]+)", text)
+        if m and "指数" in m.group(1):
+            return m.group(1).strip()
+        m = re.search(r"业绩比较基准\s*(.+?指数)", text)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return None
+
+
+async def _suggest_index_secid(index_name: str) -> Optional[str]:
+    """Resolve an index name to an Eastmoney secid via the suggest API.
+    Tries the full name, then progressively shorter prefixes (the suggest
+    index lists short names, e.g. 中证畜牧 for 中证畜牧养殖指数）."""
+    from urllib.parse import quote
+    core = index_name[:-2] if index_name.endswith("指数") else index_name
+    queries = []
+    for q in [index_name, core]:
+        if q and q not in queries:
+            queries.append(q)
+    c = core
+    while len(c) > 4:
+        c = c[:-1]
+        if c not in queries:
+            queries.append(c)
+    for q in queries:
+        try:
+            resp = await upstream_get(
+                "https://searchapi.eastmoney.com/api/suggest/get?input=" + quote(q) +
+                f"&type=14&token={SUGGEST_TOKEN}",
+                referer="https://quote.eastmoney.com/", timeout=10)
+            rows = (resp.json().get("QuotationCodeTable") or {}).get("Data") or []
+            for r in rows:
+                qid = str(r.get("QuoteID") or "")
+                name = str(r.get("Name") or "")
+                if re.fullmatch(r"[012]\.\d{6}", qid) and len(name) >= 4 and \
+                        (index_name.startswith(name) or name in index_name or core.startswith(name)):
+                    return qid
+        except Exception:
+            continue
+    return None
+
+
+async def resolve_fund_index(fund_code: str) -> Optional[dict]:
+    """{"index_name", "secid"} for a feeder fund, DB-cached in
+    fund_index_map. Failures are cached too and retried after a day."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT index_name, secid, fetched_at FROM fund_index_map WHERE fund_code=?",
+            (fund_code,)).fetchone()
+    if row and row["secid"]:
+        return {"index_name": row["index_name"], "secid": row["secid"]}
+    if row and time.time() - row["fetched_at"] < 86400:
+        return None
+    index_name = await _fetch_benchmark_index_name(fund_code)
+    secid = await _suggest_index_secid(index_name) if index_name else None
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO fund_index_map(fund_code, index_name, secid, fetched_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(fund_code) DO UPDATE SET index_name=excluded.index_name, "
+            "secid=excluded.secid, fetched_at=excluded.fetched_at",
+            (fund_code, index_name, secid, time.time()))
+    return {"index_name": index_name, "secid": secid} if secid else None
+
+
+def _index_curve(tr: Optional[dict], start_ts: int) -> list:
+    """Index minute change% vs preClose as a fund curve (weight 100%),
+    downsampled to 5-minute buckets."""
+    if not tr or not tr.get("pre_close"):
+        return []
+    pre = tr["pre_close"]
+    buckets = {}
+    for ts, close in tr["points"]:
+        if ts >= start_ts:
+            buckets[ts // 300] = (ts, round((close - pre) / pre * 100, 2))
+    return [[ts, pct] for ts, pct in buckets.values()]
 
 
 async def _quote_warm_loop():
@@ -874,12 +1084,6 @@ async def _quote_warm_loop():
                         await _refresh_quotes(sorted(syms))
                     print(f"[quote-warm] refreshed {len(syms)} symbols "
                           f"for {len(codes)} funds", flush=True)
-                    # Record intraday estimate points from the fresh quotes
-                    # (for the fund-card sparklines; throttled inside).
-                    try:
-                        _record_est_history(holdings_by_code, _quote_cache["quotes"])
-                    except Exception as e:
-                        print(f"[quote-warm] history record failed: {e!r}", flush=True)
         except Exception as e:
             print(f"[quote-warm] failed: {e!r}", flush=True)
         await asyncio.sleep(40)
@@ -1131,6 +1335,24 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             else:
                 skipped.append(h["code"])
                 detail.append({**h, "change_pct": None, "change_pct_ext": None})
+        # ETF feeder funds have no usable stock holdings (est would be a
+        # meaningless 0.00%): use the tracking index's latest change.
+        if coverage == 0 and _is_feeder(r["fund_name"], hold["holdings"]):
+            idx = await resolve_fund_index(r["fund_code"])
+            if idx:
+                async with _trends_sem:
+                    tr = await fetch_stock_trends(
+                        idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
+                if tr and tr.get("pre_close") and tr["points"]:
+                    ts_last, close_last = tr["points"][-1]
+                    chg = (close_last - tr["pre_close"]) / tr["pre_close"] * 100
+                    est_pct = chg
+                    coverage = 100.0
+                    detail = [{"code": idx["secid"].split(".", 1)[1],
+                               "name": idx["index_name"], "weight": 100.0,
+                               "change_pct": round(chg, 2), "change_pct_ext": None}]
+                    skipped = []
+                    quote_time = datetime.fromtimestamp(ts_last, CN_TZ).strftime("%Y-%m-%d %H:%M")
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
         # Ext estimate only when the fund holds US stocks with valid ext data
         # (change_pct_ext is None during US regular hours -> null then too).
@@ -1153,25 +1375,59 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
 
 
 @app.get("/api/history/today")
-def history_today(session: Optional[str] = Cookie(default=None)):
-    """Today's recorded estimate points per watchlisted fund (Asia/Shanghai
-    day), downsampled to 5-minute buckets (last point per bucket) for the
-    fund-card sparklines. Points are recorded by _quote_warm_loop."""
+async def history_today(session: Optional[str] = Cookie(default=None)):
+    """Today's intraday estimate curve per watchlisted fund (Asia/Shanghai
+    day), computed from holdings' Eastmoney minute trends and downsampled
+    to 5-minute buckets for the fund-card sparklines. Falls back to the
+    legacy est_history snapshots when trends yield nothing."""
     uid = current_user_id(session)
     start = datetime.now(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start_ts = int(start.timestamp())
+    date_str = start.strftime("%Y-%m-%d")
     with db() as conn:
-        codes = [r[0] for r in conn.execute(
-            "SELECT fund_code FROM user_funds WHERE user_id=?", (uid,)).fetchall()]
-        series = {}
-        for code in codes:
-            rows = conn.execute(
-                "SELECT ts, est_change_pct FROM est_history WHERE fund_code=? AND ts>=? ORDER BY ts",
-                (code, start_ts)).fetchall()
+        fund_rows = conn.execute(
+            "SELECT fund_code, fund_name FROM user_funds WHERE user_id=?", (uid,)).fetchall()
+
+    # Holdings per fund in parallel; market map only when a fund actually
+    # has alpha (US/other) holdings that need a secid prefix.
+    async def _inputs(fr):
+        code = fr["fund_code"]
+        hold = await fetch_holdings(code)
+        mmap = None
+        if any(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*", (h["code"] or "").strip())
+               for h in hold["holdings"]):
+            mmap = await fetch_stock_market_map(code)
+        return code, fr["fund_name"], hold["holdings"], mmap
+
+    per_fund = await asyncio.gather(*[_inputs(fr) for fr in fund_rows])
+    # One trends fetch per unique holding code across all funds.
+    uniq = {}
+    for _, _, holdings, mmap in per_fund:
+        for h in holdings:
+            uniq.setdefault(h["code"], mmap)
+    fetched = await asyncio.gather(*[
+        fetch_holding_trends(c, mmap, date_str) for c, mmap in uniq.items()])
+    trends_by_code = dict(zip(uniq.keys(), fetched))
+    series = {}
+    for code, fund_name, holdings, _ in per_fund:
+        pts = _fund_curve(holdings, trends_by_code, start_ts)
+        if not pts and _is_feeder(fund_name, holdings):
+            # ETF feeder fund: curve from its tracking index (weight 100%).
+            idx = await resolve_fund_index(code)
+            if idx:
+                async with _trends_sem:
+                    tr = await fetch_stock_trends(idx["secid"], date_str)
+                pts = _index_curve(tr, start_ts)
+        if not pts:
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT ts, est_change_pct FROM est_history WHERE fund_code=? AND ts>=? ORDER BY ts",
+                    (code, start_ts)).fetchall()
             buckets = {}
             for ts, pct in rows:
                 buckets[ts // 300] = (ts, pct)
-            series[code] = [[ts, pct] for ts, pct in buckets.values()]
+            pts = [[ts, pct] for ts, pct in buckets.values()]
+        series[code] = pts
     return {"series": series}
 
 
@@ -1314,13 +1570,19 @@ def parse_stock_market_map(text: str) -> dict:
 
 
 async def fetch_stock_market_map(code: str):
-    """Market-prefix map for one fund; None if pingzhongdata fetch fails twice."""
+    """Market-prefix map for one fund; None if pingzhongdata fetch fails twice.
+    Cached in memory for 24h (holdings are quarterly disclosures)."""
+    hit = _market_map_cache.get(code)
+    if hit and time.time() - hit[1] < HOLDINGS_TTL:
+        return hit[0]
     for _ in range(2):
         try:
-            return parse_stock_market_map(await fetch_pingzhong_text(code))
+            mmap = parse_stock_market_map(await fetch_pingzhong_text(code))
+            _market_map_cache[code] = (mmap, time.time())
+            return mmap
         except Exception:
             continue
-    return None
+    return hit[0] if hit else None
 
 
 def is_us_holding(code: str, market_map: dict) -> bool:
