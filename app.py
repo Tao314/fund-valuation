@@ -120,6 +120,11 @@ def init_db():
             index_name TEXT,
             secid TEXT,
             fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS em_secid_map(
+            code TEXT PRIMARY KEY,
+            name TEXT,
+            secid TEXT,
+            fetched_at REAL NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -738,17 +743,57 @@ _quote_refresh_lock = asyncio.Lock()
 _quote_refresh_task: Optional[asyncio.Task] = None
 
 
+async def _fetch_em_quotes(secids: list[str]) -> dict:
+    """Batch quotes for JP/KR/TW Eastmoney secids via ulist (push2delay;
+    push2 302-redirects there). Grouped by market prefix so identical
+    local codes in different markets (2330 JP vs TW) can't collide.
+    Returns {secid: {name, prev_close, current, change_pct, quote_time}}
+    in the same shape as Sina quotes (verified 2026-11-20: f2 price,
+    f3 change%, f18 prev close match trends2 last close / preClose)."""
+    out = {}
+    by_prefix: dict = {}
+    for s in secids:
+        by_prefix.setdefault(s.split(".", 1)[0], []).append(s)
+    qtime = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    for prefix, group in by_prefix.items():
+        try:
+            resp = await upstream_get(
+                "https://push2delay.eastmoney.com/api/qt/ulist.np/get?secids=" +
+                ",".join(group) + "&fields=f2,f3,f12,f14,f18&fltt=2",
+                referer="https://quote.eastmoney.com/", timeout=15)
+            rows = ((resp.json().get("data") or {}).get("diff")) or []
+            want = {s.split(".", 1)[1]: s for s in group}
+            for r in rows:
+                secid = want.get(str(r.get("f12") or ""))
+                cur, prev, chg = _fnum(r.get("f2")), _fnum(r.get("f18")), _fnum(r.get("f3"))
+                if secid and cur and prev:
+                    out[secid] = {"name": r.get("f14"), "prev_close": prev, "current": cur,
+                                  "change_pct": chg if chg is not None else (cur - prev) / prev * 100,
+                                  "quote_time": qtime}
+        except Exception:
+            continue
+    return out
+
+
 async def _refresh_quotes(symbols: list[str]) -> dict:
-    """Fetch quotes from Sina and merge into the cache. Caller holds the lock."""
+    """Fetch quotes (Sina for A/HK/US, Eastmoney ulist for JP/KR/TW secids)
+    and merge into the cache. Caller holds the lock."""
     symbols = sorted(set(symbols))
     if not symbols:
         return {}
     now = time.time()
     cached = _quote_cache["quotes"]
+    sina_syms = [s for s in symbols if "." not in s]
+    em_syms = [s for s in symbols if "." in s]
+    quotes = {}
+    if em_syms:
+        quotes.update(await _fetch_em_quotes(em_syms))
+    if not sina_syms:
+        _quote_cache.update(at=now, quotes={**cached, **quotes})
+        return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
     try:
-        resp = await upstream_get("https://hq.sinajs.cn/list=" + ",".join(symbols), referer="https://finance.sina.com.cn/")
+        resp = await upstream_get("https://hq.sinajs.cn/list=" + ",".join(sina_syms), referer="https://finance.sina.com.cn/")
         text = resp.content.decode("gbk", errors="replace")
-        quotes = {}
         for line in text.splitlines():
             m = re.match(r'var hq_str_(\w+)="(.*)";', line.strip())
             if not m:
@@ -777,7 +822,9 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
         _quote_cache.update(at=now, quotes={**cached, **quotes})
         return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
     except Exception:
-        return {s: cached[s] for s in symbols if s in cached}
+        if quotes:  # Eastmoney part succeeded even if Sina failed
+            _quote_cache.update(at=now, quotes={**cached, **quotes})
+        return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
 
 
 def _schedule_quote_refresh(symbols: list[str]) -> None:
@@ -860,6 +907,116 @@ def _secid_candidates(code: str, market_map: Optional[dict]) -> list:
     return []
 
 
+# ---------------------------------------------------------------- JP/KR/TW via Eastmoney
+# Sina has no JP/KR/TW quotes, so those holdings use Eastmoney directly
+# (ulist quotes + trends2 minute data, v1.15.3). Secid prefixes verified
+# 2026-11-20 via the suggest API: JP=176, KR=177, TW=178. Holding codes
+# come in three shapes: ISIN (JP3236330001), bare local codes (TW 2330,
+# KR 005930 — the latter indistinguishable from A-share codes by shape),
+# and pingzhongdata stockCodesNew gives NO numeric prefix for any of them.
+# Resolution is therefore name-based via the suggest API, DB-cached.
+EM_TYPE_BY_COUNTRY = {"JP": "日股", "KR": "韩股", "TW": "台股"}
+EM_PREFIX_BY_TYPE = {"日股": "176", "韩股": "177", "台股": "178"}
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}\d$")
+
+
+def _bare_foreign(code: str, market_map: Optional[dict]) -> bool:
+    """True when pingzhongdata lists this 6-digit code WITHOUT an A-share
+    0./1. prefix — i.e. it is a KR local code (005930), not an A-share."""
+    c = (code or "").strip().upper()
+    return bool(market_map) and re.fullmatch(r"\d{6}", c) and c in market_map \
+        and market_map[c] is None
+
+
+def _em_want_types(code: str, market_map: Optional[dict]) -> Optional[list]:
+    """Eastmoney SecurityTypeNames to accept for this holding, or None when
+    the holding is not a JP/KR/TW candidate."""
+    c = (code or "").strip().upper()
+    if _ISIN_RE.match(c):
+        t = EM_TYPE_BY_COUNTRY.get(c[:2])
+        return [t] if t else None
+    if re.fullmatch(r"\d{4}[A-Z]?", c):
+        return ["日股", "台股"]  # 4-char local code: JP (7203/285A) or TW (2330)
+    if _bare_foreign(c, market_map):
+        return ["韩股"]
+    return None
+
+
+def _name_match(holding_name: str, cand_name: str) -> bool:
+    a, b = (holding_name or "").strip(), (cand_name or "").strip()
+    return bool(a and b) and (a == b or a.startswith(b) or b.startswith(a))
+
+
+async def _suggest_stock_secid(code: str, name: str, want_types: list) -> Optional[str]:
+    """Resolve a JP/KR/TW holding to an Eastmoney secid via the suggest
+    API. ISINs are not searchable (verified empty), so search by stock
+    name with progressive shortening; bare local codes are also tried as
+    the query. A row is accepted only when its SecurityTypeName is in
+    want_types and its name prefix-matches the holding name."""
+    from urllib.parse import quote
+    queries = []
+    c = (code or "").strip().upper()
+    if re.fullmatch(r"\d{4}[A-Z]?|\d{6}", c):
+        queries.append(c)
+    n = (name or "").strip()
+    if n:
+        queries.append(n)
+        s = n
+        while len(s) > 2:
+            s = s[:-1]
+            if s not in queries:
+                queries.append(s)
+    for q in queries:
+        try:
+            resp = await upstream_get(
+                "https://searchapi.eastmoney.com/api/suggest/get?input=" + quote(q) +
+                f"&type=14&count=10&token={SUGGEST_TOKEN}",
+                referer="https://quote.eastmoney.com/", timeout=10)
+            rows = (resp.json().get("QuotationCodeTable") or {}).get("Data") or []
+            for r in rows:
+                qid = str(r.get("QuoteID") or "")
+                if str(r.get("SecurityTypeName") or "") in want_types and \
+                        re.fullmatch(r"(176|177|178)\..+", qid) and \
+                        _name_match(n, str(r.get("Name") or "")):
+                    return qid
+        except Exception:
+            continue
+    return None
+
+
+async def resolve_em_secid(code: str, name: Optional[str],
+                           market_map: Optional[dict]) -> Optional[str]:
+    """Eastmoney secid for a JP/KR/TW holding, DB-cached in em_secid_map
+    (keyed by holding code). Failures are cached and retried after a day."""
+    c = (code or "").strip().upper()
+    want = _em_want_types(c, market_map)
+    if not want:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT secid, fetched_at FROM em_secid_map WHERE code=?", (c,)).fetchone()
+    if row and row["secid"]:
+        return row["secid"]
+    if row and time.time() - row["fetched_at"] < 86400:
+        return None
+    secid = await _suggest_stock_secid(c, name or "", want)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO em_secid_map(code, name, secid, fetched_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, "
+            "secid=excluded.secid, fetched_at=excluded.fetched_at",
+            (c, name, secid, time.time()))
+    return secid
+
+
+async def holding_quote_symbol(h: dict, market_map: Optional[dict]) -> Optional[str]:
+    """Quote-cache symbol for one holding: Sina symbol for A/HK/US, or the
+    Eastmoney secid (contains '.') for JP/KR/TW, or None."""
+    if _em_want_types(h["code"], market_map):
+        return await resolve_em_secid(h["code"], h.get("name"), market_map)
+    return to_sina_symbol(h["code"])
+
+
 async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     """Minute closes for one stock: {"pre_close": float|None,
     "points": [[ts, close], ...]}. DB-cached per (secid, date); today's
@@ -892,8 +1049,8 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             except (ValueError, IndexError):
                 continue
         pre_close = _fnum(data.get("preClose"))
-        if not pre_close:
-            # Fall back to the Sina quote cache's prev close.
+        if not pre_close and secid.split(".", 1)[0] in ("0", "1", "116", "105", "106", "107"):
+            # Fall back to the Sina quote cache's prev close (A/HK/US only).
             sym = to_sina_symbol(secid.split(".", 1)[1])
             q = _quote_cache["quotes"].get(sym) if sym else None
             if q:
@@ -910,19 +1067,29 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
         return json.loads(row["payload"]) if row else None
 
 
-async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: str) -> Optional[dict]:
+async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: str,
+                               name: Optional[str] = None) -> Optional[dict]:
     """Trends for one holding, trying secid candidates in order; remembers
     the working prefix per ticker and backs off TRENDS_TTL after a total
-    failure so a bad code doesn't hammer upstream on every page refresh."""
+    failure so a bad code doesn't hammer upstream on every page refresh.
+    JP/KR/TW holdings (ISIN / bare local codes) resolve via the suggest
+    API instead (see resolve_em_secid)."""
     c = (code or "").strip().upper()
     if time.time() - _secid_fail_at.get(c, 0) < TRENDS_TTL:
         return None
     async with _trends_sem:
-        for secid in _secid_candidates(c, market_map):
-            tr = await fetch_stock_trends(secid, date_str)
-            if tr and tr.get("points"):
-                _us_prefix_cache[c] = secid.split(".", 1)[0]
-                return tr
+        if _em_want_types(c, market_map):
+            secid = await resolve_em_secid(c, name, market_map)
+            if secid:
+                tr = await fetch_stock_trends(secid, date_str)
+                if tr and tr.get("points"):
+                    return tr
+        else:
+            for secid in _secid_candidates(c, market_map):
+                tr = await fetch_stock_trends(secid, date_str)
+                if tr and tr.get("points"):
+                    _us_prefix_cache[c] = secid.split(".", 1)[0]
+                    return tr
     _secid_fail_at[c] = time.time()
     return None
 
@@ -960,8 +1127,11 @@ def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int) -> list:
                 total += w * last[i] / 100
                 any_data = True
         if any_data:
-            buckets[ts // 300] = (ts, round(total, 2))
-    return [[ts, pct] for ts, pct in buckets.values()]
+            # Bucket timestamp = bucket start (5-min grid); the value is the
+            # last computed point inside the bucket. Beijing session opens
+            # (09:30 etc.) fall on the grid, so the first bucket is the open.
+            buckets[(ts // 300) * 300] = round(total, 2)
+    return [[ts, pct] for ts, pct in sorted(buckets.items())]
 
 
 # ETF feeder funds （联接） disclose no stock holdings; their curve (and,
@@ -1047,6 +1217,27 @@ async def resolve_fund_index(fund_code: str) -> Optional[dict]:
     return {"index_name": index_name, "secid": secid} if secid else None
 
 
+def _live_est_pct(holdings: list, syms: list, quotes: dict):
+    """Main estimate from live quotes: sum(weight% * change%) / 100 over
+    quoted holdings (no renormalization). Single source for both
+    /api/estimates and the final point of /api/history/today, so the
+    curve end and the card number are the same computation."""
+    est_pct, coverage = 0.0, 0.0
+    for h, sym in zip(holdings, syms):
+        coverage += h["weight"]
+        q = quotes.get(sym) if sym else None
+        if q:
+            est_pct += h["weight"] * q["change_pct"] / 100
+    return est_pct, coverage
+
+
+def _index_latest_chg(tr: Optional[dict]) -> Optional[float]:
+    """Tracking index latest change% vs preClose (feeder-fund estimate)."""
+    if tr and tr.get("pre_close") and tr["points"]:
+        return (tr["points"][-1][1] - tr["pre_close"]) / tr["pre_close"] * 100
+    return None
+
+
 def _index_curve(tr: Optional[dict], start_ts: int) -> list:
     """Index minute change% vs preClose as a fund curve (weight 100%),
     downsampled to 5-minute buckets."""
@@ -1056,8 +1247,8 @@ def _index_curve(tr: Optional[dict], start_ts: int) -> list:
     buckets = {}
     for ts, close in tr["points"]:
         if ts >= start_ts:
-            buckets[ts // 300] = (ts, round((close - pre) / pre * 100, 2))
-    return [[ts, pct] for ts, pct in buckets.values()]
+            buckets[(ts // 300) * 300] = round((close - pre) / pre * 100, 2)
+    return [[ts, pct] for ts, pct in sorted(buckets.items())]
 
 
 async def _quote_warm_loop():
@@ -1076,8 +1267,9 @@ async def _quote_warm_loop():
                 for code in codes:
                     hold = await fetch_holdings(code)
                     holdings_by_code[code] = hold["holdings"]
+                    mmap = await fetch_stock_market_map(code)
                     for h in hold["holdings"]:
-                        s = to_sina_symbol(h["code"])
+                        s = await holding_quote_symbol(h, mmap)
                         if s:
                             syms.add(s)
                 if syms:
@@ -1104,22 +1296,18 @@ async def _trends_warm_loop():
                     "SELECT DISTINCT fund_code, fund_name FROM user_funds").fetchall()
             if rows:
                 date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
-                uniq = {}          # holding code -> market map (or None)
+                uniq = {}          # holding code -> (market map, name)
                 feeder_codes = []
                 for r in rows:
                     hold = await fetch_holdings(r["fund_code"])
-                    mmap = None
-                    if any(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*",
-                                        (h["code"] or "").strip())
-                           for h in hold["holdings"]):
-                        mmap = await fetch_stock_market_map(r["fund_code"])
+                    mmap = await fetch_stock_market_map(r["fund_code"])
                     for h in hold["holdings"]:
                         if h["weight"]:
-                            uniq.setdefault(h["code"], mmap)
+                            uniq.setdefault(h["code"], (mmap, h.get("name")))
                     if _is_feeder(r["fund_name"], hold["holdings"]):
                         feeder_codes.append(r["fund_code"])
                 await asyncio.gather(*[
-                    fetch_holding_trends(c, m, date_str) for c, m in uniq.items()])
+                    fetch_holding_trends(c, m, date_str, n) for c, (m, n) in uniq.items()])
                 n = len(uniq)
                 for fc in feeder_codes:
                     idx = await resolve_fund_index(fc)
@@ -1345,7 +1533,8 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
     async def _fund_inputs(r):
         nav = await fetch_nav(r["fund_code"])
         hold = await fetch_holdings(r["fund_code"])
-        syms = [to_sina_symbol(h["code"]) for h in hold["holdings"]]
+        mmap = await fetch_stock_market_map(r["fund_code"])
+        syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
         return (r, nav, hold, syms)
 
     per_fund = await asyncio.gather(*[_fund_inputs(r) for r in rows])
@@ -1361,7 +1550,6 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             coverage += h["weight"]
             q = quotes.get(sym) if sym else None
             if q:
-                est_pct += h["weight"] * q["change_pct"] / 100
                 # Extended-hours estimate: US holdings use ext change when
                 # valid (else their regular change); others same as main.
                 chg_ext = q.get("change_pct_ext")
@@ -1380,6 +1568,9 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             else:
                 skipped.append(h["code"])
                 detail.append({**h, "change_pct": None, "change_pct_ext": None})
+        # Main estimate: same helper the history endpoint uses for its
+        # final curve point (same quotes, same formula).
+        est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes)
         # ETF feeder funds have no usable stock holdings (est would be a
         # meaningless 0.00%): use the tracking index's latest change.
         if coverage == 0 and _is_feeder(r["fund_name"], hold["holdings"]):
@@ -1388,9 +1579,9 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
                 async with _trends_sem:
                     tr = await fetch_stock_trends(
                         idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
-                if tr and tr.get("pre_close") and tr["points"]:
-                    ts_last, close_last = tr["points"][-1]
-                    chg = (close_last - tr["pre_close"]) / tr["pre_close"] * 100
+                chg = _index_latest_chg(tr)
+                if chg is not None:
+                    ts_last = tr["points"][-1][0]
                     est_pct = chg
                     coverage = 100.0
                     detail = [{"code": idx["secid"].split(".", 1)[1],
@@ -1443,36 +1634,40 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
         fund_rows = conn.execute(
             "SELECT fund_code, fund_name FROM user_funds WHERE user_id=?", (uid,)).fetchall()
 
-    # Holdings per fund in parallel; market map only when a fund actually
-    # has alpha (US/other) holdings that need a secid prefix.
+    # Holdings per fund in parallel; market map disambiguates US secid
+    # prefixes and bare KR local codes from A-share codes.
     async def _inputs(fr):
         code = fr["fund_code"]
         hold = await fetch_holdings(code)
-        mmap = None
-        if any(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*", (h["code"] or "").strip())
-               for h in hold["holdings"]):
-            mmap = await fetch_stock_market_map(code)
-        return code, fr["fund_name"], hold["holdings"], mmap
+        mmap = await fetch_stock_market_map(code)
+        syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
+        return code, fr["fund_name"], hold["holdings"], mmap, syms
 
     per_fund = await asyncio.gather(*[_inputs(fr) for fr in fund_rows])
     # One trends fetch per unique holding code across all funds.
     uniq = {}
-    for _, _, holdings, mmap in per_fund:
+    for _, _, holdings, mmap, _ in per_fund:
         for h in holdings:
-            uniq.setdefault(h["code"], mmap)
+            uniq.setdefault(h["code"], (mmap, h.get("name")))
     fetched = await asyncio.gather(*[
-        fetch_holding_trends(c, mmap, date_str) for c, mmap in uniq.items()])
+        fetch_holding_trends(c, mmap, date_str, n) for c, (mmap, n) in uniq.items()])
     trends_by_code = dict(zip(uniq.keys(), fetched))
+    # Live quotes from the same 45s cache /api/estimates reads, for the
+    # final curve point (curve end == card estimate by construction).
+    all_symbols = [s for (_, _, _, _, syms) in per_fund for s in syms if s]
+    quotes = await fetch_quotes(all_symbols)
+    now_ts = int(time.time())
     series = {}
-    for code, fund_name, holdings, _ in per_fund:
+    for code, fund_name, holdings, _, syms in per_fund:
         pts = _fund_curve(holdings, trends_by_code, start_ts)
+        feeder_tr = None
         if not pts and _is_feeder(fund_name, holdings):
             # ETF feeder fund: curve from its tracking index (weight 100%).
             idx = await resolve_fund_index(code)
             if idx:
                 async with _trends_sem:
-                    tr = await fetch_stock_trends(idx["secid"], date_str)
-                pts = _index_curve(tr, start_ts)
+                    feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
+                pts = _index_curve(feeder_tr, start_ts)
         if not pts:
             with db() as conn:
                 rows = conn.execute(
@@ -1480,8 +1675,26 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
                     (code, start_ts)).fetchall()
             buckets = {}
             for ts, pct in rows:
-                buckets[ts // 300] = (ts, pct)
-            pts = [[ts, pct] for ts, pct in buckets.values()]
+                buckets[(ts // 300) * 300] = pct
+            pts = [[ts, pct] for ts, pct in sorted(buckets.items())]
+        if pts:
+            # Final point = live estimate from the same quotes/formula as
+            # /api/estimates (feeder funds: tracking index latest change).
+            est_pct, coverage = _live_est_pct(holdings, syms, quotes)
+            if coverage == 0 and _is_feeder(fund_name, holdings):
+                if feeder_tr is None:
+                    idx = await resolve_fund_index(code)
+                    if idx:
+                        async with _trends_sem:
+                            feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
+                chg = _index_latest_chg(feeder_tr)
+                if chg is not None:
+                    est_pct = chg
+            val = round(est_pct, 2)
+            if now_ts > pts[-1][0]:
+                pts.append([now_ts, val])
+            else:
+                pts[-1] = [pts[-1][0], val]
         series[code] = pts
     return {"series": series}
 

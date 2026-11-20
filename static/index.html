@@ -300,7 +300,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.15.2 · 更新于 2026-11-20 23:13</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.15.4 · 更新于 2026-11-20 23:28</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -820,41 +820,67 @@ function tzWallEpoch(tz, y, mo, d, h, mi) {
   const offset = asUTC - Math.floor(guess / 1000) * 1000;
   return (guess - offset) / 1000;
 }
-// Regular-session open/close per market label (local wall-clock in tz).
-// Lunch breaks don't affect the domain span (earliest open -> latest close).
+// Regular-session segments per market label (local wall-clock in tz,
+// lunch breaks split). The sparkline x-axis is compressed trading time:
+// only these segments occupy width, non-trading gaps are removed.
 const MARKET_SESSIONS = {
-  "A股": { tz: "Asia/Shanghai", open: [9, 30], close: [15, 0] },
-  "港股": { tz: "Asia/Hong_Kong", open: [9, 30], close: [16, 0] },
-  "美股": { tz: "America/New_York", open: [9, 30], close: [16, 0] },
-  "日股": { tz: "Asia/Tokyo", open: [9, 0], close: [15, 30] },   // TSE -> 08:00-14:30 Beijing
-  "韩股": { tz: "Asia/Seoul", open: [9, 0], close: [15, 30] },   // KRX -> 08:00-14:30 Beijing
-  "台股": { tz: "Asia/Taipei", open: [9, 0], close: [13, 30] },  // TWSE -> 09:00-13:30 Beijing
+  "A股": { tz: "Asia/Shanghai", segments: [[[9, 30], [11, 30]], [[13, 0], [15, 0]]] },
+  "港股": { tz: "Asia/Hong_Kong", segments: [[[9, 30], [12, 0]], [[13, 0], [16, 0]]] },
+  "美股": { tz: "America/New_York", segments: [[[9, 30], [16, 0]]] },
+  "日股": { tz: "Asia/Tokyo", segments: [[[9, 0], [11, 30]], [[12, 30], [15, 30]]] }, // -> 08:00-10:30, 11:30-14:30 Beijing
+  "韩股": { tz: "Asia/Seoul", segments: [[[9, 0], [15, 30]]] },   // KRX -> 08:00-14:30 Beijing
+  "台股": { tz: "Asia/Taipei", segments: [[[9, 0], [13, 30]]] },  // TWSE -> 09:00-13:30 Beijing
 };
-// Full-session x domain [start, end] (epoch seconds) for a fund, from its
-// holdings' markets on the current session day (lastTradingDay). Each
-// market contributes its local open/close converted via its timezone
-// (美股 09:30-16:00 ET = 22:30-05:00 Beijing in winter, 21:30-04:00 in
-// summer). Domain runs from the earliest open to the latest close (QDII
-// with US holdings: 09:30 to next-morning US close; with JP/KR holdings it
-// starts 08:00 Beijing). Feeder/index funds resolve to A股 through their
-// index holding code. Markets without a session entry （其他） contribute
+// Merged trading segments [start, end] (epoch seconds) for a fund, from
+// its holdings' markets on the current session day (lastTradingDay).
+// Overlapping segments across markets are merged (e.g. A股 + 港股 share
+// the morning). Feeder/index funds resolve to A股 through their index
+// holding code. Markets without a session entry （其他） contribute
 // nothing. Null when no known market -> data extent fallback.
-function sparkDomain(f) {
+function sparkSegments(f) {
   const markets = new Set();
   (f.holdings || []).forEach(h => markets.add(marketOfHolding(h.code)));
   const [y, mo, d] = lastTradingDay().split("-").map(Number);
   const spans = [];
   markets.forEach(m => {
     const s = MARKET_SESSIONS[m];
-    if (s) spans.push([tzWallEpoch(s.tz, y, mo, d, s.open[0], s.open[1]),
-                       tzWallEpoch(s.tz, y, mo, d, s.close[0], s.close[1])]);
+    if (s) s.segments.forEach(([o, c]) => spans.push([
+      tzWallEpoch(s.tz, y, mo, d, o[0], o[1]),
+      tzWallEpoch(s.tz, y, mo, d, c[0], c[1])]));
   });
   if (!spans.length) return null;
-  return [Math.min(...spans.map(s => s[0])), Math.max(...spans.map(s => s[1]))];
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged = [spans[0].slice()];
+  for (let i = 1; i < spans.length; i++) {
+    const last = merged[merged.length - 1];
+    if (spans[i][0] <= last[1]) last[1] = Math.max(last[1], spans[i][1]);
+    else merged.push(spans[i].slice());
+  }
+  return merged;
+}
+function sparkDomain(f) {
+  const segs = sparkSegments(f);
+  return segs ? [segs[0][0], segs[segs.length - 1][1]] : null;
+}
+// Cumulative trading minutes at ts across merged segments. Timestamps in
+// non-trading gaps clamp to the nearest segment edge (the join point);
+// before the first segment -> 0, after the last -> total.
+function tradingMinutesAt(ts, segs) {
+  let acc = 0;
+  for (const [a, b] of segs) {
+    if (ts < a) return acc;
+    if (ts <= b) return acc + (ts - a) / 60;
+    acc += (b - a) / 60;
+  }
+  return acc;
 }
 function sparklineHtml(f) {
-  const pts = historySeries[f.fund_code];
-  if (!Array.isArray(pts) || pts.length < 2) return "";
+  const raw = historySeries[f.fund_code];
+  if (!Array.isArray(raw) || !raw.length) return "";
+  // The backend appends a final point computed from the same live
+  // quotes as the card estimate, so the line ends at that number.
+  const pts = raw;
+  if (pts.length < 2) return "";
   const vals = pts.map(p => p[1]);
   const min = Math.min(...vals), max = Math.max(...vals);
   const crossesZero = min < 0 && max > 0;
@@ -862,27 +888,27 @@ function sparklineHtml(f) {
   if (hi === lo) { lo -= 0.1; hi += 0.1; }  // flat series: avoid div0
   const pad = (hi - lo) * 0.1;
   lo -= pad; hi += pad;
-  const dom = sparkDomain(f);
-  const t0 = dom ? dom[0] : pts[0][0];
-  const t1 = dom ? dom[1] : pts[pts.length - 1][0];
-  const tSpan = t1 - t0;
+  // Compressed trading-time axis: merged session segments of the fund's
+  // markets; the full session is pre-shown (labels = first open / last
+  // close) while the line only reaches "now". Fallback: linear data span.
+  const segs = sparkSegments(f);
+  const t0 = segs ? segs[0][0] : pts[0][0];
+  const t1 = segs ? segs[segs.length - 1][1] : pts[pts.length - 1][0];
+  const totalMins = segs ? segs.reduce((a, s) => a + (s[1] - s[0]) / 60, 0) : 0;
   const W = 100, H = 44, YT = 2, YB = 42;
-  const X = p => tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
+  const X = p => {
+    if (segs && totalMins > 0) return Math.max(0, Math.min(W, tradingMinutesAt(p[0], segs) / totalMins * W));
+    const tSpan = t1 - t0;
+    return tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
+  };
   const Y = v => YB - (v - lo) / (hi - lo) * (YB - YT);
   const last = vals[vals.length - 1];
   const color = last >= 0 ? "#C9362B" : "#07845B";
-  // Split into segments at gaps > 10 min (lunch break, A/HK close -> US
-  // open) so stretches without data stay empty, not a straight connector.
-  const segs = [[pts[0]]];
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i][0] - pts[i - 1][0] > 600) segs.push([]);
-    segs[segs.length - 1].push(pts[i]);
-  }
-  const lines = segs.filter(s => s.length > 1).map(s => {
-    const line = s.map(p => X(p).toFixed(2) + "," + Y(p[1]).toFixed(2)).join(" ");
-    const area = X(s[0]).toFixed(2) + "," + H + " " + line + " " + X(s[s.length - 1]).toFixed(2) + "," + H;
-    return `<polygon points="${area}" fill="${color}" opacity="0.08"/><polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
-  }).join("");
+  // One continuous line: segment joins are adjacent on the compressed
+  // axis, so the line connects across lunch breaks / market handoffs.
+  const line = pts.map(p => X(p).toFixed(2) + "," + Y(p[1]).toFixed(2)).join(" ");
+  const area = X(pts[0]).toFixed(2) + "," + H + " " + line + " " + X(pts[pts.length - 1]).toFixed(2) + "," + H;
+  const lines = `<polygon points="${area}" fill="${color}" opacity="0.08"/><polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
   const zero = crossesZero
     ? `<line x1="0" y1="${Y(0).toFixed(2)}" x2="${W}" y2="${Y(0).toFixed(2)}" stroke="#D0D5DD" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`
     : "";
