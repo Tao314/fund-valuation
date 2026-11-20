@@ -36,8 +36,9 @@
   button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #202939; margin-right: 4px; min-height: 40px; }
   button.mini:disabled { opacity: .35; cursor: default; }
   select.cat { padding: 5px; border: 1px solid #EAECF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
-  #countdown { color: #667085; font-size: 13px; }
-  .ms-pill { display: inline-flex; align-items: center; gap: 6px; background: #FFFFFF; border: 1px solid #EAECF0; border-radius: 999px; padding: 6px 12px; font-size: 12px; color: #667085; white-space: nowrap; }
+  #countdown { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; background: #ECEFF4; border-radius: 999px; font-size: 11px; font-weight: 500; color: #374151; flex: 1; min-width: 0; }
+  #ms-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ms-dot { width: 6px; height: 6px; border-radius: 50%; background: #98A2B3; flex: none; }
   .ms-dot.on { background: #07845B; }
   .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EAECF0; flex-wrap: wrap; }
@@ -70,8 +71,23 @@
   .fund-card .fc-state { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-pub { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-diff { font-size: 11px; color: #98A2B3; }
-  .sort-toggle button { min-height: 40px; }
-  .sort-toggle button.active { background: #2563EB; color: #fff; }
+  .sort-toggle button { min-height: 26px; height: 26px; padding: 0 8px; font-size: 11px; background: #F3F4F6; color: #667085; border-radius: 6px; }
+  .sort-toggle button.active { background: #2563EB; color: #fff; font-weight: 600; }
+  .sort-toggle button:active { background: #E5E7EB; }
+  .sort-toggle button.active:active { background: #1D4ED8; }
+  /* compact top toolbar (v1.10.6): two slim rows instead of big buttons */
+  .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+  .toolbar-row2 { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .toolbar-row2 .sort-toggle { display: flex; gap: 4px; flex: none; }
+  .tab-btn { height: 28px; min-height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #ECEEF2; color: #667085; }
+  .tab-btn.active { background: #EBF1FF; color: #2563EB; font-weight: 600; }
+  .tab-btn:active { background: #EBF1FF; }
+  #refresh-btn { width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 8px; background: #EBF1FF; color: #2563EB; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  #refresh-btn:active { background: #DBEAFE; }
+  #refresh-btn.spinning svg { animation: fv-spin .8s linear infinite; }
+  @keyframes fv-spin { to { transform: rotate(360deg); } }
+  .logout-btn { background: transparent; color: #667085; font-size: 12px; padding: 4px 6px; min-height: 24px; height: 24px; }
+  .logout-btn:active { background: transparent; color: #374151; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
@@ -98,30 +114,28 @@
 
   <div id="dash" style="display:none">
     <div class="card">
-      <div class="row">
-        <button id="nav-main">估值</button>
-        <button class="secondary" id="nav-settings">设置</button>
+      <div class="toolbar-row1">
+        <button class="tab-btn active" id="nav-main">估值</button>
+        <button class="tab-btn" id="nav-settings">设置</button>
         <span style="flex:1"></span>
-        <button class="secondary" id="logout-btn">退出</button>
+        <button id="refresh-btn" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
+        <span id="countdown" title="下次自动刷新">60s</span>
+        <button class="logout-btn" id="logout-btn">退出</button>
+      </div>
+      <div class="toolbar-row2" id="toolbar-row2">
+        <span id="market-status" class="ms-pill"><span class="ms-dot" id="ms-dot"></span><span id="ms-text"></span></span>
+        <div class="sort-toggle">
+          <button class="secondary active" id="sort-default">默认顺序</button>
+          <button class="secondary" id="sort-change">按涨跌幅</button>
+        </div>
       </div>
     </div>
 
     <div id="view-main">
       <div class="card">
-        <div class="row">
-          <button id="refresh-btn">刷新估值</button>
-          <span id="countdown">下次自动刷新：60s</span>
-          <span id="market-status" class="ms-pill"><span class="ms-dot" id="ms-dot"></span><span id="ms-text"></span></span>
-        </div>
-        <div class="row sort-toggle" style="margin-top:10px">
-          <button class="secondary active" id="sort-default">默认顺序</button>
-          <button class="secondary" id="sort-change">按涨跌幅</button>
-        </div>
-        <div class="err" id="dash-err"></div>
-      </div>
-      <div class="card">
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
+        <div class="err" id="dash-err"></div>
       </div>
     </div>
 
@@ -173,7 +187,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.5 · 更新于 2026-11-20 11:30</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.6 · 更新于 2026-11-20 11:33</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -187,11 +201,11 @@ function setErr(msg) { const a = $("dash-err"), b = $("settings-err"); if (a) a.
 let countdownTimer = null, countdownLeft = 60;
 function resetCountdown() {
   countdownLeft = refreshSeconds;
-  const el = $("countdown"); if (el) el.textContent = "下次自动刷新：" + countdownLeft + "s";
+  const el = $("countdown"); if (el) el.textContent = countdownLeft + "s";
   clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
     countdownLeft = Math.max(0, countdownLeft - 1);
-    const e2 = $("countdown"); if (e2) e2.textContent = "下次自动刷新：" + countdownLeft + "s";
+    const e2 = $("countdown"); if (e2) e2.textContent = countdownLeft + "s";
   }, 1000);
 }
 function startAutoRefresh() { clearInterval(timer); timer = setInterval(loadEstimates, refreshSeconds * 1000); }
@@ -314,8 +328,9 @@ function updateFundStatuses() {
 function showView(name) {
   $("view-main").style.display = name === "main" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
-  $("nav-main").className = name === "main" ? "" : "secondary";
-  $("nav-settings").className = name === "settings" ? "" : "secondary";
+  $("toolbar-row2").style.display = name === "main" ? "" : "none";
+  $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
+  $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
 }
 $("nav-main").onclick = () => showView("main");
 $("nav-settings").onclick = () => showView("settings");
@@ -623,7 +638,7 @@ async function loadEstimates() {
   refreshing = true;
   resetCountdown();
   const rb = $("refresh-btn");
-  rb.disabled = true; rb.textContent = "刷新中…";
+  rb.disabled = true; rb.classList.add("spinning");
   try {
     const data = await api("/api/estimates");
     window.estimateData = data;
@@ -638,7 +653,7 @@ async function loadEstimates() {
     renderSettings(data);
     setErr("");
   } catch (e) { if (String(e.message).includes("登录")) showAuth(); else setErr(e.message); }
-  finally { refreshing = false; rb.disabled = false; rb.textContent = "刷新估值"; }
+  finally { refreshing = false; rb.disabled = false; rb.classList.remove("spinning"); }
 }
 $("refresh-btn").onclick = loadEstimates;
 (async () => { try { const me = await api("/api/me"); showDash(me.username); } catch { showAuth(); } })();
