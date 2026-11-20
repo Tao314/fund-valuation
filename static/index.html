@@ -170,7 +170,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.0 · 更新于 2026-11-20 01:07</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.1 · 更新于 2026-11-20 09:35</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -208,7 +208,7 @@ function marketStatusText() {
   }
   const a = cnStatus(570, 690, 780, 900);   // A股 09:30-11:30, 13:00-15:00
   const hk = cnStatus(570, 720, 780, 960);  // 港股 09:30-12:00, 13:00-16:00
-  // 美股 approx 21:30-04:00 next day (DST ignored); reuse per-fund session logic
+  // 美股 sessions computed in ET (America/New_York, DST-aware); reuse per-fund session logic
   const usSess = marketSession("us", now);
   const us = usSess === "trading" ? "盘中" : usSess === "pre" ? "盘前" : usSess === "post" ? "盘后"
     : usSess === "preopen" ? "未开盘" : "休市";
@@ -222,7 +222,18 @@ function updateMarketStatus() {
 }
 setInterval(updateMarketStatus, 60000);
 // Per-fund market status from holdings codes: 6-digit=A股, 5-digit=港股, alphabetic=美股.
-// Sessions by browser local time, Mon-Fri only, holidays ignored, US DST ignored.
+// A/HK sessions by browser local time, Mon-Fri only, holidays ignored.
+// US sessions computed in ET via Intl (DST-aware), Mon-Fri ET, holidays ignored.
+const ET_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", weekday: "short",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+});
+function etParts(now) {
+  const parts = {};
+  ET_FMT.formatToParts(now).forEach(p => { parts[p.type] = p.value; });
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { day: wd[parts.weekday], mins: parseInt(parts.hour, 10) * 60 + parseInt(parts.minute, 10) };
+}
 function marketOfCode(code) {
   const c = String(code || "").trim();
   if (/^\d{6}$/.test(c)) return "a";
@@ -250,11 +261,13 @@ function marketSession(market, now) {
     if (mins < 960) return "trading";
     return "closed";
   }
-  if (market === "us") { // 21:30-04:00(+1d) trading, 16:00-21:30 pre, 04:00-08:00 post, 08:00-16:00 preopen (weekday)
-    if ((weekday && mins >= 1290) || (day >= 2 && day <= 6 && mins < 240)) return "trading";
-    if (weekday && mins >= 960 && mins < 1290) return "pre";
-    if (day >= 2 && day <= 6 && mins >= 240 && mins < 480) return "post";
-    if (weekday && mins >= 480 && mins < 960) return "preopen";
+  if (market === "us") { // ET: pre 04:00-09:30, trading 09:30-16:00, post 16:00-20:00 (Mon-Fri ET)
+    const et = etParts(now);
+    if (!(et.day >= 1 && et.day <= 5)) return "closed";
+    if (et.mins < 240) return "preopen";
+    if (et.mins < 570) return "pre";
+    if (et.mins < 960) return "trading";
+    if (et.mins < 1200) return "post";
     return "closed";
   }
   return "closed";

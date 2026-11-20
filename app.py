@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from typing import Optional
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import httpx
@@ -455,6 +456,80 @@ def to_sina_symbol(code: str) -> Optional[str]:
     return None
 
 
+ET_TZ = ZoneInfo("America/New_York")
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+
+
+def us_session(now_et: Optional[datetime] = None) -> str:
+    """US market session in ET (Mon-Fri): pre 04:00-09:30, trading 09:30-16:00,
+    post 16:00-20:00, else closed. Holidays ignored."""
+    if now_et is None:
+        now_et = datetime.now(ET_TZ)
+    if now_et.weekday() >= 5:
+        return "closed"
+    mins = now_et.hour * 60 + now_et.minute
+    if 240 <= mins < 570:
+        return "pre"
+    if 570 <= mins < 960:
+        return "trading"
+    if 960 <= mins < 1200:
+        return "post"
+    return "closed"
+
+
+def parse_ext_timestamp(s: str, now_et: datetime) -> Optional[datetime]:
+    """Parse a Sina extended-hours timestamp like 'Nov 19 07:59PM EST'.
+
+    Returns a datetime (midnight ET on that date) or None. The year is taken
+    from now_et, adjusted across the year boundary to the closest match.
+    """
+    m = re.match(r"([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})\s*([AP]M)", (s or "").strip())
+    if not m:
+        return None
+    month = _MONTHS.get(m.group(1))
+    if not month:
+        return None
+    day = int(m.group(2))
+    try:
+        cand = datetime(now_et.year, month, day, tzinfo=ET_TZ)
+        # Year boundary: pick the year that puts the date closest to today.
+        if (cand.date() - now_et.date()).days > 183:
+            cand = datetime(now_et.year - 1, month, day, tzinfo=ET_TZ)
+        elif (now_et.date() - cand.date()).days > 183:
+            cand = datetime(now_et.year + 1, month, day, tzinfo=ET_TZ)
+    except ValueError:
+        return None
+    return cand
+
+
+def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
+    """Build a US quote dict from Sina gb_ fields.
+
+    Regular layout: 0=name, 1=current, 2=change%, 3=Beijing datetime, 26=prev close.
+    Extended hours: 21=ext price, 24=ext timestamp ('Nov 19 07:59PM EST').
+    During pre/post sessions with a same-ET-date ext print, use the ext price
+    and compute change vs prev close; otherwise fall back to regular fields.
+    """
+    if now_et is None:
+        now_et = datetime.now(ET_TZ)
+    cur = float(fields[1])
+    prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
+    price, change_pct = cur, float(fields[2])
+    try:
+        if us_session(now_et) in ("pre", "post") and len(fields) > 24 and fields[21]:
+            ext_price = float(fields[21])
+            ext_dt = parse_ext_timestamp(fields[24], now_et)
+            if ext_price > 0 and prev > 0 and ext_dt is not None and ext_dt.date() == now_et.date():
+                price = ext_price
+                change_pct = (ext_price - prev) / prev * 100
+    except Exception:
+        pass  # malformed ext data -> regular-session fallback
+    return {"name": fields[0], "prev_close": prev, "current": price,
+            "change_pct": change_pct,
+            "quote_time": fields[3] if len(fields) > 3 else None}
+
+
 _quote_cache: dict = {"at": 0.0, "quotes": {}}
 
 
@@ -479,11 +554,8 @@ async def fetch_quotes(symbols: list[str]) -> dict:
             try:
                 if sym.startswith("gb_"):
                     # US layout (verified 2026-11-19): 0=name,1=current,2=change%,3=Beijing datetime,26=prev close
-                    cur = float(fields[1])
-                    prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
-                    quotes[sym] = {"name": fields[0], "prev_close": prev, "current": cur,
-                                   "change_pct": float(fields[2]),
-                                   "quote_time": fields[3] if len(fields) > 3 else None}
+                    # Extended hours (verified 2026-11-20): 21=ext price,24=ext timestamp; see us_quote_with_ext
+                    quotes[sym] = us_quote_with_ext(fields)
                 elif sym.startswith("hk"):
                     # HK layout (verified 2026-11-19): 0=EN name,1=CN name,2=open,3=prev close,
                     # 4=high,5=low,6=current,7=change,8=change%,17=date,18=time
