@@ -670,18 +670,25 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
 
     Regular layout: 0=name, 1=current, 2=change%, 3=Beijing datetime, 26=prev close.
     Extended hours: 21=ext price, 24=ext timestamp ('Nov 19 07:59PM EST').
-    Use the ext price (change vs prev close) when:
+
+    Returns BOTH changes:
+    - change_pct: regular-session change (live price during regular hours,
+      last close otherwise) — feeds the close-based main estimate.
+    - change_pct_ext: extended-hours change (ext price vs prev close), or
+      None when not valid — feeds the separate pre/post estimate.
+    Ext is valid when:
     - pre/post session with a same-ET-date ext print, or
     - closed (overnight/weekend) and the ext print is from the most recent
       regular trading day's post session (at/after its 16:00 ET close) and
-      no more than 4 days old, so the after-hours move still counts.
-    Regular session never uses ext. Otherwise fall back to regular fields.
+      no more than 4 days old.
+    Regular session never has ext. Malformed ext data -> None.
     """
     if now_et is None:
         now_et = datetime.now(ET_TZ)
     cur = float(fields[1])
     prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
-    price, change_pct = cur, float(fields[2])
+    change_pct_ext = None
+    current_ext = None
     try:
         sess = us_session(now_et)
         if sess != "trading" and len(fields) > 24 and fields[21]:
@@ -695,12 +702,13 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
                         and now_et - ext_dt <= timedelta(days=4):
                     use_ext = True
                 if use_ext:
-                    price = ext_price
-                    change_pct = (ext_price - prev) / prev * 100
+                    current_ext = ext_price
+                    change_pct_ext = (ext_price - prev) / prev * 100
     except Exception:
-        pass  # malformed ext data -> regular-session fallback
-    return {"name": fields[0], "prev_close": prev, "current": price,
-            "change_pct": change_pct,
+        pass  # malformed ext data -> no ext change
+    return {"name": fields[0], "prev_close": prev, "current": cur,
+            "change_pct": float(fields[2]),
+            "current_ext": current_ext, "change_pct_ext": change_pct_ext,
             "quote_time": fields[3] if len(fields) > 3 else None}
 
 
@@ -968,27 +976,45 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
     quotes = await fetch_quotes(all_symbols)
     out = []
     for r, nav, hold, syms in per_fund:
-        est_pct, coverage, quote_time, skipped = 0.0, 0.0, None, []
+        est_pct, est_pct_ext, coverage, quote_time, skipped = 0.0, 0.0, 0.0, None, []
+        has_us, has_ext = False, False
         detail = []
         for h, sym in zip(hold["holdings"], syms):
             coverage += h["weight"]
             q = quotes.get(sym) if sym else None
             if q:
                 est_pct += h["weight"] * q["change_pct"] / 100
+                # Extended-hours estimate: US holdings use ext change when
+                # valid (else their regular change); others same as main.
+                chg_ext = q.get("change_pct_ext")
+                if sym and sym.startswith("gb_"):
+                    has_us = True
+                    if chg_ext is not None:
+                        has_ext = True
+                    est_pct_ext += h["weight"] * (chg_ext if chg_ext is not None else q["change_pct"]) / 100
+                else:
+                    est_pct_ext += h["weight"] * q["change_pct"] / 100
                 qt = q["quote_time"]
                 if qt and (quote_time is None or qt.replace("/", "-") > quote_time.replace("/", "-")):
                     quote_time = qt
-                detail.append({**h, "change_pct": round(q["change_pct"], 2)})
+                detail.append({**h, "change_pct": round(q["change_pct"], 2),
+                               "change_pct_ext": round(chg_ext, 2) if chg_ext is not None else None})
             else:
                 skipped.append(h["code"])
-                detail.append({**h, "change_pct": None})
+                detail.append({**h, "change_pct": None, "change_pct_ext": None})
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
+        # Ext estimate only when the fund holds US stocks with valid ext data
+        # (change_pct_ext is None during US regular hours -> null then too).
+        show_ext = has_us and has_ext
+        est_nav_ext = nav["dwjz"] * (1 + est_pct_ext / 100) if (show_ext and nav["dwjz"]) else None
         out.append({
             "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
             "est_change_pct": round(est_pct, 2),
+            "est_nav_ext": round(est_nav_ext, 4) if est_nav_ext else None,
+            "est_change_pct_ext": round(est_pct_ext, 2) if show_ext else None,
             "coverage_pct": round(coverage, 2),
             "report_label": hold["report_label"], "report_date": hold["report_date"],
             "quote_time": quote_time, "stale": nav["stale"] or hold["stale"],
