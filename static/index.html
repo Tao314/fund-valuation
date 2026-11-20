@@ -109,6 +109,9 @@
   .rk-val { font-size: 17px; font-weight: 700; white-space: nowrap; flex: none; }
   .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
   .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
+  .rank-warming { text-align: center; padding: 18px 0; }
+  .rank-warming .dot { animation: rank-pulse 1.2s ease-in-out infinite; }
+  @keyframes rank-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
@@ -231,7 +234,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.11.0 · 更新于 2026-11-20 12:23</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.11.1 · 更新于 2026-11-20 12:51</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -377,7 +380,7 @@ function showView(name) {
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
   $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
-  if (name === "rank") loadRank();
+  if (name === "rank") loadRank(); else stopRankPoll();
 }
 $("nav-main").onclick = () => showView("main");
 $("nav-rank").onclick = () => showView("rank");
@@ -419,21 +422,39 @@ function renderRank(data) {
     html = items.map(it => rankRow(it, it.vol.toFixed(2) + "%", it.y1 != null ? "近1年 " + fmtDiff(it.y1) : "")).join("");
   }
   $("rank-list").innerHTML = html || '<div class="muted">暂无数据</div>';
-  $("rank-updated").textContent = "数据来源：东方财富 · 更新于 " + fmtLocalTime(data.updated_at) + (data.stale ? "（缓存）" : "");
+  $("rank-updated").textContent = "数据来源：东方财富 · 更新于 " + fmtLocalTime(data.updated_at) + (data.stale ? " · 数据更新中" : "");
 }
+let rankPollTimer = null, rankPollCount = 0;
+function stopRankPoll() { if (rankPollTimer) { clearTimeout(rankPollTimer); rankPollTimer = null; } rankPollCount = 0; }
+function etaText(sec) { return sec < 60 ? "不到 1 分钟" : "约 " + Math.ceil(sec / 60) + " 分钟"; }
 async function loadRank() {
+  stopRankPoll();
   const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod : rankBoard;
   $("rank-err").textContent = "";
   if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
-  $("rank-list").innerHTML = '<div class="muted">' + (rankBoard === "returns" ? "加载中…" : "加载中…首次计算较慢") + "</div>";
+  $("rank-list").innerHTML = '<div class="muted">加载中…</div>';
   $("rank-updated").textContent = "";
+  await fetchRank(cacheKey);
+}
+async function fetchRank(cacheKey) {
+  const board = rankBoard, period = rankPeriod;
   try {
-    const url = rankBoard === "returns" ? "/api/rank/returns?period=" + rankPeriod
-      : rankBoard === "us" ? "/api/rank/qdii-us" : "/api/rank/qdii-vol";
+    const url = board === "returns" ? "/api/rank/returns?period=" + period
+      : board === "us" ? "/api/rank/qdii-us" : "/api/rank/qdii-vol";
     const data = await api(url);
-    rankMem[cacheKey] = data;
+    if (board !== rankBoard || period !== rankPeriod) return;  // user switched meanwhile
+    if (data.warming) {
+      $("rank-list").innerHTML = '<div class="muted rank-warming">数据正在准备中，预计还需' + etaText(data.eta_seconds || 60) + '<span class="dot">…</span></div>';
+      $("rank-updated").textContent = "";
+      if (++rankPollCount > 40) { stopRankPoll(); $("rank-err").textContent = "数据准备超时，请稍后重试"; return; }
+      rankPollTimer = setTimeout(() => fetchRank(cacheKey), 15000);
+      return;
+    }
+    stopRankPoll();
+    if (!data.stale) rankMem[cacheKey] = data;
     renderRank(data);
   } catch (e) {
+    stopRankPoll();
     $("rank-list").innerHTML = "";
     $("rank-err").textContent = e.message;
   }
@@ -453,7 +474,7 @@ document.querySelectorAll("#rank-periods .chip").forEach(b => {
     loadRank();
   };
 });
-function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); prevSnapshot = null; }
+function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); stopRankPoll(); prevSnapshot = null; }
 // Keep the sticky toolbar flush under the sticky header: header height can
 // grow when the title note wraps on narrow screens, so measure it live.
 function syncHeaderH() {

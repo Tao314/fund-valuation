@@ -16,7 +16,7 @@ import re
 import secrets
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -44,7 +44,18 @@ NAV_TTL = 3600          # seconds, DB cache
 HOLDINGS_TTL = 86400    # seconds, DB cache
 SESSION_DAYS = 30
 
-app = FastAPI(title="Fund Valuation MVP")
+@asynccontextmanager
+async def lifespan(_app):
+    # Ranking caches warm in the background (see _rank_warm_loop); startup
+    # itself never waits on upstream fetches.
+    task = asyncio.create_task(_rank_warm_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Fund Valuation MVP", lifespan=lifespan)
 
 # ---------------------------------------------------------------- DB
 def init_db():
@@ -434,7 +445,7 @@ async def fetch_holdings(code: str) -> dict:
             f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10&year=&month=&rt=0.1",
             referer=f"https://fundf10.eastmoney.com/ccmx_{code}.html",
         )
-        parsed = parse_holdings(resp.text)
+        parsed = await asyncio.to_thread(parse_holdings, resp.text)
         if not parsed["holdings"]:
             raise ValueError("no holdings parsed")
         with db() as conn:
@@ -882,7 +893,8 @@ async def fetch_returns_all() -> list:
             f"&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi={page}&pn=5000&dx=1&v=0.123456",
             referer=RANK_REF, timeout=60,
         )
-        return parse_rank_rows(resp.text)
+        # 5000-row pages: parse in a thread so the event loop stays responsive
+        return await asyncio.to_thread(parse_rank_rows, resp.text)
 
     rows = []
     for batch in await asyncio.gather(*(one_page(p) for p in range(1, 6))):
@@ -981,7 +993,7 @@ def is_us_holding(code: str, market_map: dict) -> bool:
 
 async def compute_qdii_us() -> dict:
     qdii = await fetch_qdii_rows()
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(5)  # keep upstream load low on the small VPS
 
     async def one(r):
         async with sem:
@@ -1011,8 +1023,7 @@ async def compute_qdii_us() -> dict:
             "excluded_low_coverage": excluded_low_coverage, "items": items[:30]}
 
 
-async def fetch_vol(code: str):
-    text = await fetch_pingzhong_text(code)
+def _parse_vol(text: str):
     m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.S)
     if not m:
         return None
@@ -1026,9 +1037,15 @@ async def fetch_vol(code: str):
     return round(math.sqrt(var) * math.sqrt(250), 2), len(rets)
 
 
+async def fetch_vol(code: str):
+    text = await fetch_pingzhong_text(code)
+    # regex/JSON over the full NAV history: keep it off the event loop
+    return await asyncio.to_thread(_parse_vol, text)
+
+
 async def compute_qdii_vol() -> dict:
     qdii = await fetch_qdii_rows()
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(5)  # keep upstream load low on the small VPS
 
     async def one(r):
         async with sem:
@@ -1047,22 +1064,142 @@ async def compute_qdii_vol() -> dict:
     return {"updated_at": now_iso(), "total": len(qdii), "items": items[:30]}
 
 
+# Per-board locks: a user request arriving while a board is being computed
+# (by pre-warm or another request) waits for that result instead of
+# starting a duplicate multi-minute computation.
+_rank_locks: dict = {}
+
+
+def _rank_lock(key: str) -> asyncio.Lock:
+    lock = _rank_locks.get(key)
+    if lock is None:
+        lock = _rank_locks[key] = asyncio.Lock()
+    return lock
+
+
+# Typical full-compute durations in seconds (measured) for warming ETAs.
+_RANK_ETA = {"returns_all": 100, "qdii_vol": 110, "qdii_us_v2": 240}
+# In-memory per-board compute state: {"state": "computing", "started_at": epoch}
+_rank_state: dict = {}
+_rank_tasks: dict = {}
+
+
+def _rank_mark_computing(key: str):
+    _rank_state[key] = {"state": "computing", "started_at": time.time()}
+
+
+def _rank_mark_idle(key: str):
+    _rank_state[key] = {"state": "idle", "started_at": None}
+
+
+async def _compute_returns_payload() -> dict:
+    rows = await fetch_returns_all()
+    return {"rows": rows, "updated_at": now_iso()}
+
+
+async def _get_or_compute(key: str, ttl: int, compute) -> tuple:
+    """Return (payload, stale) for a ranking board, computing under a per-key
+    lock when the cache is missing/stale. Raises only when there is no cached
+    payload at all and computation fails. Cache reads/writes (the returns
+    payload is ~20k rows) run in a thread to keep the event loop responsive."""
+    payload, fetched_at = await asyncio.to_thread(rank_cache_get, key)
+    if payload is not None and _cache_fresh(fetched_at, ttl):
+        return payload, False
+    async with _rank_lock(key):
+        payload, fetched_at = await asyncio.to_thread(rank_cache_get, key)
+        if payload is not None and _cache_fresh(fetched_at, ttl):
+            return payload, False
+        _rank_mark_computing(key)
+        try:
+            payload = await compute()
+            await asyncio.to_thread(rank_cache_set, key, payload)
+            return payload, False
+        except Exception:
+            if payload is not None:
+                return payload, True
+            raise
+        finally:
+            _rank_mark_idle(key)
+
+
+async def _rank_compute_bg(key: str, ttl: int, compute):
+    try:
+        await _get_or_compute(key, ttl, compute)
+    except Exception as e:
+        print(f"[rank] {key}: background compute failed: {e!r}", flush=True)
+
+
+def _ensure_rank_task(key: str, ttl: int, compute):
+    task = _rank_tasks.get(key)
+    if task is None or task.done():
+        _rank_tasks[key] = asyncio.create_task(_rank_compute_bg(key, ttl, compute))
+
+
+async def _board_payload(key: str, ttl: int, compute):
+    """(payload, stale) if data can be served now, else None (warming).
+
+    Fresh cache -> serve. Stale cache -> serve immediately and refresh in
+    the background. No cache -> start background compute; caller sends 202.
+    """
+    payload, fetched_at = await asyncio.to_thread(rank_cache_get, key)
+    if payload is not None and _cache_fresh(fetched_at, ttl):
+        return payload, False
+    _ensure_rank_task(key, ttl, compute)
+    if payload is not None:
+        return payload, True
+    return None
+
+
+def _warming_response(key: str) -> JSONResponse:
+    st = _rank_state.get(key) or {}
+    started = st.get("started_at") or time.time()
+    eta = max(10, int(_RANK_ETA[key] - (time.time() - started)))
+    return JSONResponse(status_code=202, content={
+        "warming": True, "board": key, "eta_seconds": eta, "started_at": started,
+    })
+
+
+_RANK_BOARDS = [
+    ("returns_all", RETURNS_TTL, _compute_returns_payload),
+    ("qdii_vol", QDII_VOL_TTL, compute_qdii_vol),
+    ("qdii_us_v2", QDII_US_TTL, compute_qdii_us),
+]
+
+
+async def _rank_warm_loop():
+    """Background pre-warm: after a short startup delay, warm each ranking
+    cache that is missing/stale, one board at a time, then re-check hourly
+    so cache expiry never lands on a user request."""
+    await asyncio.sleep(5)  # let the server start answering requests first
+    while True:
+        for key, ttl, compute in _RANK_BOARDS:
+            try:
+                payload, fetched_at = await asyncio.to_thread(rank_cache_get, key)
+                if payload is not None and _cache_fresh(fetched_at, ttl):
+                    print(f"[rank-warm] {key}: cache fresh, skip", flush=True)
+                    continue
+                print(f"[rank-warm] {key}: warming...", flush=True)
+                t0 = time.time()
+                _, stale = await _get_or_compute(key, ttl, compute)
+                dt = time.time() - t0
+                if stale:
+                    print(f"[rank-warm] {key}: compute failed, kept stale cache ({dt:.1f}s)", flush=True)
+                else:
+                    print(f"[rank-warm] {key}: done in {dt:.1f}s", flush=True)
+            except Exception as e:
+                print(f"[rank-warm] {key}: failed: {e!r}", flush=True)
+        await asyncio.sleep(3600)
+
+
 @app.get("/api/rank/returns")
 async def rank_returns(period: str = "1y", session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
     if period not in PERIOD_FIELDS:
         raise HTTPException(400, "period 不支持")
-    payload, fetched_at = rank_cache_get("returns_all")
-    stale = False
-    if payload is None or not _cache_fresh(fetched_at, RETURNS_TTL):
-        try:
-            rows = await fetch_returns_all()
-            payload = {"rows": rows, "updated_at": now_iso()}
-            rank_cache_set("returns_all", payload)
-        except Exception:
-            if payload is None:
-                raise HTTPException(502, "排行数据暂时不可用")
-            stale = True
+    got = await _board_payload("returns_all", RETURNS_TTL, _compute_returns_payload)
+    if got is None:
+        return _warming_response("returns_all")
+    payload, stale = got
     field = PERIOD_FIELDS[period]
     rows = sorted(payload["rows"], key=lambda r: (r[field] is None, -(r[field] or 0)))
     items = []
@@ -1076,16 +1213,10 @@ async def rank_returns(period: str = "1y", session: Optional[str] = Cookie(defau
 @app.get("/api/rank/qdii-us")
 async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
-    payload, fetched_at = rank_cache_get("qdii_us_v2")
-    stale = False
-    if payload is None or not _cache_fresh(fetched_at, QDII_US_TTL):
-        try:
-            payload = await compute_qdii_us()
-            rank_cache_set("qdii_us_v2", payload)
-        except Exception:
-            if payload is None:
-                raise HTTPException(502, "QDII 美股占比数据暂时不可用")
-            stale = True
+    got = await _board_payload("qdii_us_v2", QDII_US_TTL, compute_qdii_us)
+    if got is None:
+        return _warming_response("qdii_us_v2")
+    payload, stale = got
     items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
     return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale,
             "excluded_low_coverage": payload.get("excluded_low_coverage", 0), "items": items}
@@ -1094,16 +1225,10 @@ async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
 @app.get("/api/rank/qdii-vol")
 async def rank_qdii_vol(session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
-    payload, fetched_at = rank_cache_get("qdii_vol")
-    stale = False
-    if payload is None or not _cache_fresh(fetched_at, QDII_VOL_TTL):
-        try:
-            payload = await compute_qdii_vol()
-            rank_cache_set("qdii_vol", payload)
-        except Exception:
-            if payload is None:
-                raise HTTPException(502, "QDII 波动率数据暂时不可用")
-            stale = True
+    got = await _board_payload("qdii_vol", QDII_VOL_TTL, compute_qdii_vol)
+    if got is None:
+        return _warming_response("qdii_vol")
+    payload, stale = got
     items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
     return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale, "items": items}
 
