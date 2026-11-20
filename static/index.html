@@ -7,8 +7,12 @@
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F5F6F8; color: #202939; font-variant-numeric: tabular-nums; }
-  header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EAECF0; }
-  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  :root { --header-h: 47px; }
+  header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EAECF0; position: sticky; top: 0; z-index: 30; }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; line-height: 22px; }
+  .title-wrap { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+  .title-note { font-size: 11px; color: #98A2B3; line-height: 22px; }
+  .toolbar-card { position: sticky; top: var(--header-h); z-index: 20; }
   main { max-width: 1100px; margin: 0 auto; padding: 12px; }
   .card { background: #FFFFFF; border-radius: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid #EAECF0; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
   .card h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #202939; }
@@ -97,7 +101,7 @@
 </head>
 <body>
 <header>
-  <h1>基金自算估值</h1>
+  <div class="title-wrap"><h1>基金自算估值</h1><span class="title-note">估值与市场占比均按最新披露前十大持仓计算</span></div>
   <span id="userbox" class="muted"></span>
 </header>
 <main>
@@ -113,7 +117,7 @@
   </div>
 
   <div id="dash" style="display:none">
-    <div class="card">
+    <div class="card toolbar-card">
       <div class="toolbar-row1">
         <button class="tab-btn active" id="nav-main">估值</button>
         <button class="tab-btn" id="nav-settings">设置</button>
@@ -187,7 +191,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.7 · 更新于 2026-11-20 11:43</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.8 · 更新于 2026-11-20 11:54</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -335,9 +339,17 @@ function showView(name) {
 $("nav-main").onclick = () => showView("main");
 $("nav-settings").onclick = () => showView("settings");
 function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); prevSnapshot = null; }
+// Keep the sticky toolbar flush under the sticky header: header height can
+// grow when the title note wraps on narrow screens, so measure it live.
+function syncHeaderH() {
+  const h = document.querySelector("header");
+  if (h) document.documentElement.style.setProperty("--header-h", h.offsetHeight + "px");
+}
+window.addEventListener("resize", syncHeaderH);
 function showDash(user) {
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
+  syncHeaderH();
   prevSnapshot = null;
   showView("main");
   updateMarketStatus();
@@ -413,10 +425,10 @@ function marketOfHolding(code) {
   if (/^[A-Z][A-Z.\-]*$/.test(c)) return "美股";
   return "其他";
 }
-// Overseas share of top-10 holdings, broken down by market. Denominator is
-// total top-10 weight; overseas = every market except A股. Returns
-// { total: "83.4", parts: [{ market, pct }] } with parts sorted desc by share.
-function overseasBreakdown(f) {
+// Market mix of top-10 holdings, broken down by market (incl. A股).
+// Denominator is total top-10 weight. Returns parts [{ market, pct }]
+// sorted desc by share, only pct > 0.
+function marketBreakdown(f) {
   const hs = f.holdings || [];
   if (!hs.length) return null;
   let total = 0;
@@ -429,26 +441,16 @@ function overseasBreakdown(f) {
     byMarket[m] = (byMarket[m] || 0) + w;
   });
   if (!(total > 0)) return null;
-  const overseas = total - (byMarket["A股"] || 0);
-  const p = Math.round(overseas / total * 1000) / 10;
-  const parts = Object.keys(byMarket)
-    .filter(m => m !== "A股")
+  return Object.keys(byMarket)
     .map(m => ({ market: m, w: byMarket[m], pct: Math.round(byMarket[m] / total * 1000) / 10 }))
     .filter(x => x.pct > 0)
     .sort((a, b) => b.w - a.w);
-  return { total: Number.isInteger(p) ? String(p) : p.toFixed(1), parts };
 }
-function overseasPct(f) {
-  const b = overseasBreakdown(f);
-  return b ? b.total : null;
-}
-// Meta-line segment, e.g. 「海外（前十）83.4%：美股 54.2% · 日股 15.2% · 港股 14.0%」
-function overseasText(f) {
-  const b = overseasBreakdown(f);
-  if (!b) return null;
-  let s = `海外（前十）${b.total}%`;
-  if (b.parts.length) s += "：" + b.parts.map(x => `${x.market} ${x.pct.toFixed(1)}%`).join(" · ");
-  return s;
+// Meta-line segment, e.g. 「美股 54.2% · A股 16.6% · 日股 15.2% · 港股 14.0%」
+function marketText(f) {
+  const parts = marketBreakdown(f);
+  if (!parts || !parts.length) return null;
+  return parts.map(x => `${x.market} ${x.pct.toFixed(1)}%`).join(" · ");
 }
 // After today's NAV publishes, backend est_nav is based on latest dwjz (would double-count);
 // recompute estimate from previous day's NAV instead.
@@ -509,7 +511,7 @@ function renderFunds(data) {
     html += `<div class="group-title"><span class="gt-bar${g.category ? "" : " gt-bar-gray"}"></span><span class="gt-name">${esc(g.category || "未分类")}</span><span class="gt-stats">${stats}</span></div>`;
     metas.forEach(({ f, st, published }) => {
       const ch = changed.has(f.fund_code);
-      const ov = overseasText(f);
+      const ov = marketText(f);
       // Official NAV for last trading day already published and market not live:
       // show published NAV/change as primary, previous day as secondary,
       // and keep the estimate (recomputed from prev NAV) plus its accuracy diff.
@@ -691,6 +693,7 @@ async function loadEstimates() {
   finally { refreshing = false; rb.disabled = false; rb.classList.remove("spinning"); }
 }
 $("refresh-btn").onclick = loadEstimates;
+syncHeaderH();
 (async () => { try { const me = await api("/api/me"); showDash(me.username); } catch { showAuth(); } })();
 </script>
 </body>
