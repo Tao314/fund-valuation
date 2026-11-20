@@ -128,6 +128,16 @@
   .log-row .lg-ok { color: #07845B; font-weight: 600; white-space: nowrap; }
   .log-row .lg-fail { color: #C9362B; font-weight: 600; white-space: nowrap; }
   .log-row .lg-ip { color: #667085; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* settings watchlist rows (v1.12.2): flex rows so controls never overflow on mobile */
+  .wl-group { background: #F5F6F8; color: #202939; font-weight: 600; font-size: 14px; padding: 8px; border-radius: 8px; margin: 12px 0 2px; }
+  .wl-row { padding: 9px 0; border-bottom: 1px solid #F0F2F5; }
+  .wl-line1 { display: flex; align-items: flex-start; gap: 8px; }
+  .wl-main { flex: 1; min-width: 0; }
+  .wl-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
+  .wl-code { font-size: 12px; color: #98A2B3; margin-top: 2px; }
+  .wl-row select.cat { flex: none; max-width: 110px; }
+  .wl-ops { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .wl-ops button.mini { margin-right: 0; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
@@ -248,13 +258,8 @@
           <button id="search-btn">搜索</button>
         </div>
         <div class="search-results" id="results"></div>
-        <div style="overflow-x:auto; margin-top:10px">
-          <table>
-            <thead><tr><th>基金</th><th>分类</th><th>顺序/操作</th></tr></thead>
-            <tbody id="settings-tbody"></tbody>
-          </table>
-          <div class="muted" id="settings-empty-tip">暂无自选基金，先搜索添加。</div>
-        </div>
+        <div id="settings-list" style="margin-top:10px"></div>
+        <div class="muted" id="settings-empty-tip">暂无自选基金，先搜索添加。</div>
       </div>
       <div class="card">
         <h3>账户</h3>
@@ -270,7 +275,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.1 · 更新于 2026-11-20 13:32</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.2 · 更新于 2026-11-20 14:10</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -645,7 +650,7 @@ async function removeFromSearch(code) {
   } catch (e) { setErr(e.message); }
 }
 async function delFund(id, name) {
-  if (!confirm("删除基金「" + name + "」？")) return;
+  if (!confirm("从自选移除基金「" + name + "」？")) return;
   try { await api("/api/watchlist/" + id, { method: "DELETE" }); await loadEstimates(); }
   catch (e) { setErr(e.message); }
 }
@@ -804,18 +809,18 @@ function renderSettings(data) {
      <button class="mini" onclick="renameCategory('${esc(c)}')">重命名</button>
      <button class="danger" onclick="deleteCategory('${esc(c)}')">删除</button></div>`).join("")
     : '<div class="muted">暂无分类，在下方添加。</div>';
-  // watchlist grouped, with management controls
+  // watchlist grouped, with management controls (flex rows, no table overflow)
   let html = "";
   currentGroups.forEach((g, gi) => {
-    html += `<tr class="group-row"><td colspan="3">${esc(g.category || "未分类")}</td></tr>`;
+    html += `<div class="wl-group">${esc(g.category || "未分类")}</div>`;
     g.items.forEach((f, ii) => {
-      html += `<tr>
-      <td>${esc(f.fund_name)}<div class="muted">${f.fund_code}</div></td>
-      <td><select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", cats)}</select></td>
-      <td><button class="mini" onclick="moveFundTo(currentGroups[${gi}].category, ${ii}, 'top')" ${ii === 0 ? "disabled" : ""}>置顶</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, -1)" ${ii === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, 1)" ${ii === g.items.length - 1 ? "disabled" : ""}>↓</button><button class="mini" onclick="moveFundTo(currentGroups[${gi}].category, ${ii}, 'bottom')" ${ii === g.items.length - 1 ? "disabled" : ""}>置底</button><button class="danger" onclick="delFund(${f.id}, '${esc(f.fund_name)}')">删除</button></td></tr>`;
+      html += `<div class="wl-row">
+      <div class="wl-line1"><div class="wl-main"><div class="wl-name">${esc(f.fund_name)}</div><div class="wl-code">${f.fund_code}</div></div>
+      <select class="cat" onchange="setCategory(${f.id}, this)">${catOptions(f.category || "", cats)}</select></div>
+      <div class="wl-ops"><button class="mini" onclick="moveFundTo(currentGroups[${gi}].category, ${ii}, 'top')" ${ii === 0 ? "disabled" : ""}>置顶</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, -1)" ${ii === 0 ? "disabled" : ""}>↑</button><button class="mini" onclick="moveFund(currentGroups[${gi}].category, ${ii}, 1)" ${ii === g.items.length - 1 ? "disabled" : ""}>↓</button><button class="mini" onclick="moveFundTo(currentGroups[${gi}].category, ${ii}, 'bottom')" ${ii === g.items.length - 1 ? "disabled" : ""}>置底</button><button class="danger" onclick="delFund(${f.id}, '${esc(f.fund_name)}')">移除</button></div></div>`;
     });
   });
-  $("settings-tbody").innerHTML = html;
+  $("settings-list").innerHTML = html;
   $("settings-empty-tip").style.display = funds.length ? "none" : "";
 }
 async function moveFund(category, indexInGroup, dir) {
