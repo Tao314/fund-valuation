@@ -18,7 +18,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -631,8 +631,8 @@ def us_session(now_et: Optional[datetime] = None) -> str:
 def parse_ext_timestamp(s: str, now_et: datetime) -> Optional[datetime]:
     """Parse a Sina extended-hours timestamp like 'Nov 19 07:59PM EST'.
 
-    Returns a datetime (midnight ET on that date) or None. The year is taken
-    from now_et, adjusted across the year boundary to the closest match.
+    Returns the ET datetime of the print (date + time) or None. The year is
+    taken from now_et, adjusted across the year boundary to the closest match.
     """
     m = re.match(r"([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})\s*([AP]M)", (s or "").strip())
     if not m:
@@ -641,16 +641,28 @@ def parse_ext_timestamp(s: str, now_et: datetime) -> Optional[datetime]:
     if not month:
         return None
     day = int(m.group(2))
+    hour = int(m.group(3)) % 12 + (12 if m.group(5) == "PM" else 0)
+    minute = int(m.group(4))
     try:
-        cand = datetime(now_et.year, month, day, tzinfo=ET_TZ)
+        cand = datetime(now_et.year, month, day, hour, minute, tzinfo=ET_TZ)
         # Year boundary: pick the year that puts the date closest to today.
         if (cand.date() - now_et.date()).days > 183:
-            cand = datetime(now_et.year - 1, month, day, tzinfo=ET_TZ)
+            cand = datetime(now_et.year - 1, month, day, hour, minute, tzinfo=ET_TZ)
         elif (now_et.date() - cand.date()).days > 183:
-            cand = datetime(now_et.year + 1, month, day, tzinfo=ET_TZ)
+            cand = datetime(now_et.year + 1, month, day, hour, minute, tzinfo=ET_TZ)
     except ValueError:
         return None
     return cand
+
+
+def _last_regular_close(now_et: datetime) -> datetime:
+    """Most recent weekday 16:00 ET at or before now_et (holidays ignored)."""
+    d = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    if d > now_et:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
@@ -658,8 +670,12 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
 
     Regular layout: 0=name, 1=current, 2=change%, 3=Beijing datetime, 26=prev close.
     Extended hours: 21=ext price, 24=ext timestamp ('Nov 19 07:59PM EST').
-    During pre/post sessions with a same-ET-date ext print, use the ext price
-    and compute change vs prev close; otherwise fall back to regular fields.
+    Use the ext price (change vs prev close) when:
+    - pre/post session with a same-ET-date ext print, or
+    - closed (overnight/weekend) and the ext print is from the most recent
+      regular trading day's post session (at/after its 16:00 ET close) and
+      no more than 4 days old, so the after-hours move still counts.
+    Regular session never uses ext. Otherwise fall back to regular fields.
     """
     if now_et is None:
         now_et = datetime.now(ET_TZ)
@@ -667,12 +683,20 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
     prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
     price, change_pct = cur, float(fields[2])
     try:
-        if us_session(now_et) in ("pre", "post") and len(fields) > 24 and fields[21]:
+        sess = us_session(now_et)
+        if sess != "trading" and len(fields) > 24 and fields[21]:
             ext_price = float(fields[21])
             ext_dt = parse_ext_timestamp(fields[24], now_et)
-            if ext_price > 0 and prev > 0 and ext_dt is not None and ext_dt.date() == now_et.date():
-                price = ext_price
-                change_pct = (ext_price - prev) / prev * 100
+            if ext_price > 0 and prev > 0 and ext_dt is not None:
+                use_ext = False
+                if sess in ("pre", "post") and ext_dt.date() == now_et.date():
+                    use_ext = True
+                elif sess == "closed" and ext_dt >= _last_regular_close(now_et) \
+                        and now_et - ext_dt <= timedelta(days=4):
+                    use_ext = True
+                if use_ext:
+                    price = ext_price
+                    change_pct = (ext_price - prev) / prev * 100
     except Exception:
         pass  # malformed ext data -> regular-session fallback
     return {"name": fields[0], "prev_close": prev, "current": price,
