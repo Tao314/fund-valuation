@@ -109,6 +109,7 @@
   .rk-val { font-size: 17px; font-weight: 700; white-space: nowrap; flex: none; }
   .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
   .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
+  .rk-note { font-size: 12px; color: #98A2B3; line-height: 1.5; margin: 2px 2px 8px; }
   .rank-warming { text-align: center; padding: 18px 0; }
   .rank-warming .dot { animation: rank-pulse 1.2s ease-in-out infinite; }
   @keyframes rank-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
@@ -185,7 +186,7 @@
         <div class="chip-row" id="rank-boards">
           <button class="chip active" data-board="returns">涨幅榜</button>
           <button class="chip" data-board="us">美股占比（QDII）</button>
-          <button class="chip" data-board="vol">波动率（QDII）</button>
+          <button class="chip" data-board="vol">波动率</button>
         </div>
         <div class="chip-row" id="rank-periods">
           <button class="chip" data-period="daily">昨日</button>
@@ -196,6 +197,7 @@
           <button class="chip active" data-period="1y">近1年</button>
           <button class="chip" data-period="ytd">今年来</button>
         </div>
+        <div class="rk-note" id="rank-note"></div>
         <div id="rank-list"></div>
         <div class="err" id="rank-err"></div>
         <div class="rk-updated" id="rank-updated"></div>
@@ -268,7 +270,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.0 · 更新于 2026-11-20 13:20</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.1 · 更新于 2026-11-20 13:32</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -490,7 +492,17 @@ function rankRow(it, valHtml, sub) {
     + `<div class="rk-main"><div class="rk-name">${esc(it.name)}</div><div class="rk-sub">${esc(it.code)}${sub ? " · " + sub : ""}</div></div>`
     + `<div class="rk-val">${valHtml}</div></div>`;
 }
+const RANK_NOTES = {
+  returns: "东方财富全市场基金（约 2 万只），按所选周期涨幅从高到低取前 30",
+  us: "QDII 基金（225 只）中，按最新披露前十大持仓的美股占比从高到低取前 30；前十大覆盖率低于 5% 的不入榜",
+};
+function updateRankNote(poolSize) {
+  $("rank-note").textContent = rankBoard === "vol"
+    ? "涨幅榜 7 个周期前 30 合并去重（共 " + (poolSize != null ? poolSize : "—") + " 只）中，按近 1 年年化波动率从高到低取前 30"
+    : (RANK_NOTES[rankBoard] || "");
+}
 function renderRank(data) {
+  updateRankNote(data.pool_size);
   const items = data.items || [];
   let html = "";
   if (rankBoard === "returns") {
@@ -520,6 +532,7 @@ function stopRankPoll() { if (rankPollTimer) { clearTimeout(rankPollTimer); rank
 function etaText(sec) { return sec < 60 ? "不到 1 分钟" : "约 " + Math.ceil(sec / 60) + " 分钟"; }
 async function loadRank() {
   stopRankPoll();
+  updateRankNote(null);
   const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod : rankBoard;
   $("rank-err").textContent = "";
   if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
@@ -531,7 +544,7 @@ async function fetchRank(cacheKey) {
   const board = rankBoard, period = rankPeriod;
   try {
     const url = board === "returns" ? "/api/rank/returns?period=" + period
-      : board === "us" ? "/api/rank/qdii-us" : "/api/rank/qdii-vol";
+      : board === "us" ? "/api/rank/qdii-us" : "/api/rank/vol";
     const data = await api(url);
     if (board !== rankBoard || period !== rankPeriod) return;  // user switched meanwhile
     if (data.warming) {

@@ -963,11 +963,12 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
 
 # ---------------------------------------------------------------- rankings
 # 排行榜 data: Eastmoney rankhandler (full-market period returns, QDII list),
-# holdings (QDII US share), pingzhongdata NAV trend (QDII volatility).
+# holdings (QDII US share), pingzhongdata NAV trend (volatility board, pooled
+# from the returns boards' per-period top-30 union since v1.12.1).
 RANK_REF = "https://fund.eastmoney.com/data/fundranking.html"
 RETURNS_TTL = 12 * 3600     # full-market returns dataset
 QDII_US_TTL = 7 * 86400     # holdings are quarterly disclosures
-QDII_VOL_TTL = 24 * 3600    # NAV-based volatility
+VOL_TTL = 24 * 3600         # NAV-based volatility (returns-top pool)
 PERIOD_FIELDS = {"daily": "daily", "1w": "w1", "1m": "m1", "3m": "m3",
                  "6m": "m6", "1y": "y1", "ytd": "ytd"}
 
@@ -1175,25 +1176,39 @@ async def fetch_vol(code: str):
     return await asyncio.to_thread(_parse_vol, text)
 
 
-async def compute_qdii_vol() -> dict:
-    qdii = await fetch_qdii_rows()
+async def compute_vol_top() -> dict:
+    """Volatility board (v1.12.1): pool = union of the top-30 funds of each
+    returns period (daily/1w/1m/3m/6m/1y/ytd), deduplicated; rank pool funds
+    by annualized volatility (std of last 250 daily returns x sqrt(250))."""
+    payload, _stale = await _get_or_compute(
+        "returns_all", RETURNS_TTL, _compute_returns_payload)
+    rows = payload["rows"]
+    pool = {}  # code -> {"row": returns row, "periods_hit": [period, ...]}
+    for period, field in PERIOD_FIELDS.items():
+        top = sorted(rows, key=lambda r: (r[field] is None, -(r[field] or 0)))[:30]
+        for r in top:
+            entry = pool.setdefault(r["code"], {"row": r, "periods_hit": []})
+            entry["periods_hit"].append(period)
     sem = asyncio.Semaphore(5)  # keep upstream load low on the small VPS
 
-    async def one(r):
+    async def one(code, entry):
         async with sem:
             try:
-                got = await fetch_vol(r["code"])
+                got = await fetch_vol(code)
             except Exception:
                 got = None
         if not got:
             return None
         vol, points = got
-        return {"code": r["code"], "name": r["name"], "vol": vol, "points": points, "y1": r["y1"]}
+        r = entry["row"]
+        return {"code": code, "name": r["name"], "vol": vol, "points": points,
+                "y1": r["y1"], "periods_hit": entry["periods_hit"]}
 
-    results = await asyncio.gather(*(one(r) for r in qdii))
+    results = await asyncio.gather(*(one(c, e) for c, e in pool.items()))
     items = [x for x in results if x]
     items.sort(key=lambda x: x["vol"], reverse=True)
-    return {"updated_at": now_iso(), "total": len(qdii), "items": items[:30]}
+    return {"updated_at": now_iso(), "total": len(pool),
+            "pool_size": len(pool), "items": items[:30]}
 
 
 # Per-board locks: a user request arriving while a board is being computed
@@ -1210,7 +1225,7 @@ def _rank_lock(key: str) -> asyncio.Lock:
 
 
 # Typical full-compute durations in seconds (measured) for warming ETAs.
-_RANK_ETA = {"returns_all": 100, "qdii_vol": 110, "qdii_us_v2": 240}
+_RANK_ETA = {"returns_all": 100, "vol_top": 200, "qdii_us_v2": 240}
 # In-memory per-board compute state: {"state": "computing", "started_at": epoch}
 _rank_state: dict = {}
 _rank_tasks: dict = {}
@@ -1293,7 +1308,7 @@ def _warming_response(key: str) -> JSONResponse:
 
 _RANK_BOARDS = [
     ("returns_all", RETURNS_TTL, _compute_returns_payload),
-    ("qdii_vol", QDII_VOL_TTL, compute_qdii_vol),
+    ("vol_top", VOL_TTL, compute_vol_top),
     ("qdii_us_v2", QDII_US_TTL, compute_qdii_us),
 ]
 
@@ -1354,15 +1369,18 @@ async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
             "excluded_low_coverage": payload.get("excluded_low_coverage", 0), "items": items}
 
 
-@app.get("/api/rank/qdii-vol")
-async def rank_qdii_vol(session: Optional[str] = Cookie(default=None)):
+@app.get("/api/rank/vol")
+@app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.12.1 path)
+async def rank_vol(session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
-    got = await _board_payload("qdii_vol", QDII_VOL_TTL, compute_qdii_vol)
+    got = await _board_payload("vol_top", VOL_TTL, compute_vol_top)
     if got is None:
-        return _warming_response("qdii_vol")
+        return _warming_response("vol_top")
     payload, stale = got
     items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
-    return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale, "items": items}
+    return {"updated_at": payload["updated_at"], "total": payload["total"],
+            "pool_size": payload.get("pool_size", payload["total"]),
+            "stale": stale, "items": items}
 
 
 @app.get("/")
