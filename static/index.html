@@ -7,8 +7,12 @@
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #F5F6F8; color: #202939; font-variant-numeric: tabular-nums; }
+  /* safety guard against any stray horizontal overflow; clip (where supported)
+     does not create a scroll container, so sticky header/toolbar keep working */
+  html, body { overflow-x: hidden; overflow-x: clip; }
   :root { --header-h: 47px; }
-  header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #EAECF0; position: sticky; top: 0; z-index: 30; }
+  header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid #EAECF0; position: sticky; top: 0; z-index: 30; }
+  #userbox { flex: none; max-width: 35vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header h1 { font-size: 16px; font-weight: 600; margin: 0; line-height: 22px; }
   .title-wrap { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
   .title-note { font-size: 11px; color: #98A2B3; line-height: 22px; }
@@ -32,7 +36,7 @@
   .muted { color: #98A2B3; font-size: 12px; }
   .sub { color: #667085; font-size: 12px; }
   .err { color: #C9362B; font-size: 13px; min-height: 18px; }
-  .search-results button { margin: 4px 4px 0 0; background: #F2F3F5; color: #202939; border: 1px solid #EAECF0; }
+  .search-results button { margin: 4px 4px 0 0; background: #F2F3F5; color: #202939; border: 1px solid #EAECF0; max-width: 100%; }
   .search-results button:disabled { background: #E8F3FF; color: #2563EB; border-color: #E8F3FF; }
   .search-results button.remove-btn { background: #FFFFFF; color: #C9362B; border-color: #C9362B; }
   .badge { display: inline-block; background: #FEF3C7; color: #B45309; font-size: 10px; border-radius: 6px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; transition: opacity 1s; }
@@ -63,9 +67,9 @@
   .fund-card .fc-chg { font-size: 20px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
   .fund-card .fc-chg .up, .fund-card .fc-chg .down, .fund-card .fc-chg .flat { font-weight: 700; }
   .fund-card .fc-meta { font-size: 11px; color: #98A2B3; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #667085; }
+  .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #667085; flex-wrap: wrap; }
   .fund-card .fc-row .fc-label { white-space: nowrap; font-size: 12px; font-weight: 400; color: #667085; }
-  .fund-card .fc-row .fc-val { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .fund-card .fc-row .fc-val { white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: auto; }
   .fund-card .fc-row .fc-val b { font-size: 15px; font-weight: 600; color: #202939; }
   .fund-card .fc-row .up, .fund-card .fc-row .down, .fund-card .fc-row .flat { font-size: 13px; font-weight: 500; }
   .fund-card .fc-row-prev .fc-val { font-size: 13px; font-weight: 400; color: #344054; }
@@ -80,7 +84,7 @@
   .sort-toggle button:active { background: #E5E7EB; }
   .sort-toggle button.active:active { background: #1D4ED8; }
   /* compact top toolbar (v1.10.6): two slim rows instead of big buttons */
-  .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+  .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; flex-wrap: wrap; }
   .toolbar-row2 { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
   .toolbar-row2 .sort-toggle { display: flex; gap: 4px; flex: none; }
   .tab-btn { height: 28px; min-height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #ECEEF2; color: #667085; }
@@ -140,7 +144,10 @@
   .wl-ops button.mini { margin-right: 0; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
-  @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
+  /* toolbar row1 (4 tabs + refresh + countdown + logout) must fit one line at
+     390px and wrap cleanly below that instead of overflowing the card */
+  @media (max-width: 429px) { .toolbar-row1 { gap: 6px; } .tab-btn { padding: 0 8px; } }
+  @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } .tab-btn { padding: 0 6px; } }
   @media (min-width: 360px) and (max-width: 389px) { .fund-card { padding: 10px 12px; } }
   @media (min-width: 390px) and (max-width: 429px) { .fund-card { padding: 12px; } .fund-card .fc-chg { font-size: 20px; } .fund-card .fc-row { font-size: 13px; } }
 </style>
@@ -280,7 +287,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.3 · 更新于 2026-11-20 14:13</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.4 · 更新于 2026-11-20 15:32</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
