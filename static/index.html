@@ -187,7 +187,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.6 · 更新于 2026-11-20 11:33</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.7 · 更新于 2026-11-20 11:43</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -399,21 +399,56 @@ function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v
 // Estimate accuracy vs published change (percentage points, neutral color)
 function fmtDiff(v) { if (v == null) return "-"; return (v > 0 ? "+" : "") + v.toFixed(2) + "%"; }
 function estDiff(f) { if (f.est_change_pct == null || f.jzzzl == null) return null; return f.est_change_pct - f.jzzzl; }
-// Overseas share of top-10 holdings: 6-digit numeric = A股; everything else
-// (5-digit 港股, alphabetic tickers, ISIN-like codes) counts as overseas.
-function overseasPct(f) {
+// Classify a holding code into its market: 6-digit numeric = A股, 5-digit
+// numeric = 港股, 12-char ISIN by country prefix (JP日股 TW台股 KR韩股 HK港股
+// US美股 CN A股, other prefix 其他）, alphabetic ticker = 美股， else 其他
+// (e.g. 4-digit numeric is ambiguous JP/TW).
+function marketOfHolding(code) {
+  const c = String(code || "").trim().toUpperCase();
+  if (/^\d{6}$/.test(c)) return "A股";
+  if (/^\d{5}$/.test(c)) return "港股";
+  if (/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(c)) {
+    return { JP: "日股", TW: "台股", KR: "韩股", HK: "港股", US: "美股", CN: "A股" }[c.slice(0, 2)] || "其他";
+  }
+  if (/^[A-Z][A-Z.\-]*$/.test(c)) return "美股";
+  return "其他";
+}
+// Overseas share of top-10 holdings, broken down by market. Denominator is
+// total top-10 weight; overseas = every market except A股. Returns
+// { total: "83.4", parts: [{ market, pct }] } with parts sorted desc by share.
+function overseasBreakdown(f) {
   const hs = f.holdings || [];
   if (!hs.length) return null;
-  let total = 0, overseas = 0;
+  let total = 0;
+  const byMarket = {};
   hs.forEach(h => {
     const w = Number(h.weight);
     if (!isFinite(w)) return;
     total += w;
-    if (!/^\d{6}$/.test(String(h.code || "").trim())) overseas += w;
+    const m = marketOfHolding(h.code);
+    byMarket[m] = (byMarket[m] || 0) + w;
   });
   if (!(total > 0)) return null;
+  const overseas = total - (byMarket["A股"] || 0);
   const p = Math.round(overseas / total * 1000) / 10;
-  return Number.isInteger(p) ? String(p) : p.toFixed(1);
+  const parts = Object.keys(byMarket)
+    .filter(m => m !== "A股")
+    .map(m => ({ market: m, w: byMarket[m], pct: Math.round(byMarket[m] / total * 1000) / 10 }))
+    .filter(x => x.pct > 0)
+    .sort((a, b) => b.w - a.w);
+  return { total: Number.isInteger(p) ? String(p) : p.toFixed(1), parts };
+}
+function overseasPct(f) {
+  const b = overseasBreakdown(f);
+  return b ? b.total : null;
+}
+// Meta-line segment, e.g. 「海外（前十）83.4%：美股 54.2% · 日股 15.2% · 港股 14.0%」
+function overseasText(f) {
+  const b = overseasBreakdown(f);
+  if (!b) return null;
+  let s = `海外（前十）${b.total}%`;
+  if (b.parts.length) s += "：" + b.parts.map(x => `${x.market} ${x.pct.toFixed(1)}%`).join(" · ");
+  return s;
 }
 // After today's NAV publishes, backend est_nav is based on latest dwjz (would double-count);
 // recompute estimate from previous day's NAV instead.
@@ -474,7 +509,7 @@ function renderFunds(data) {
     html += `<div class="group-title"><span class="gt-bar${g.category ? "" : " gt-bar-gray"}"></span><span class="gt-name">${esc(g.category || "未分类")}</span><span class="gt-stats">${stats}</span></div>`;
     metas.forEach(({ f, st, published }) => {
       const ch = changed.has(f.fund_code);
-      const ov = overseasPct(f);
+      const ov = overseasText(f);
       // Official NAV for last trading day already published and market not live:
       // show published NAV/change as primary, previous day as secondary,
       // and keep the estimate (recomputed from prev NAV) plus its accuracy diff.
@@ -490,7 +525,7 @@ function renderFunds(data) {
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         <div class="fc-chg">${published ? fmtPct(f.jzzzl) : fmtPct(f.est_change_pct)}</div>
       </div>
-      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · 海外（前十）${ov}%` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · ${ov}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       </div>`;
     });
