@@ -40,7 +40,7 @@ STATIC_DIR = BASE_DIR / "static"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 FUND_CODE_RE = re.compile(r"^\d{6}$")
 QUOTE_TTL = 45          # seconds, in-memory global cache
-NAV_TTL = 3600          # seconds, DB cache
+NAV_TTL = 600           # seconds, DB cache
 HOLDINGS_TTL = 86400    # seconds, DB cache
 SESSION_DAYS = 30
 
