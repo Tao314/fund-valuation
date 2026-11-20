@@ -354,6 +354,7 @@ def save_settings(body: SettingsBody, session: Optional[str] = Cookie(default=No
         raise HTTPException(400, "自动刷新时间需 10-600 秒")
     with db() as conn:
         conn.execute("UPDATE users SET refresh_seconds=? WHERE id=?", (n, uid))
+    _est_cache.pop(uid, None)  # payload carries refresh_seconds
     return {"ok": True, "refresh_seconds": n}
 
 
@@ -429,6 +430,8 @@ def admin_delete_user(user_id: int, session: Optional[str] = Cookie(default=None
         conn.execute("DELETE FROM user_funds WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM user_categories WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    _est_cache.pop(user_id, None)
+    _series_cache.pop(user_id, None)
     return {"ok": True}
 
 
@@ -1261,6 +1264,8 @@ async def _quote_warm_loop():
             with db() as conn:
                 codes = [r[0] for r in conn.execute(
                     "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
+                uids = [r[0] for r in conn.execute(
+                    "SELECT DISTINCT user_id FROM user_funds").fetchall()]
             if codes:
                 syms = set()
                 holdings_by_code = {}
@@ -1277,6 +1282,14 @@ async def _quote_warm_loop():
                         await _refresh_quotes(sorted(syms))
                     print(f"[quote-warm] refreshed {len(syms)} symbols "
                           f"for {len(codes)} funds", flush=True)
+                # Precompute per-user estimates payloads (quotes are hot
+                # now) so the first page open after startup is served
+                # from cache instead of computing synchronously.
+                for uid in uids:
+                    await _refresh_estimates(uid)
+                if uids:
+                    print(f"[quote-warm] estimates cache refreshed for "
+                          f"{len(uids)} users", flush=True)
         except Exception as e:
             print(f"[quote-warm] failed: {e!r}", flush=True)
         await asyncio.sleep(40)
@@ -1386,6 +1399,7 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该基金已在列表中")
     _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
+    _est_cache.pop(uid, None)  # watchlist changed: recompute estimates next call
     return {"ok": True, "id": cur.lastrowid, "fund_code": code, "fund_name": name, "category": category}
 
 
@@ -1397,6 +1411,7 @@ def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)
     if cur.rowcount == 0:
         raise HTTPException(404, "记录不存在")
     _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
+    _est_cache.pop(uid, None)  # watchlist changed: recompute estimates next call
     return {"ok": True}
 
 
@@ -1422,6 +1437,7 @@ def reorder_watchlist(body: ReorderBody, session: Optional[str] = Cookie(default
                 (pos, item_id, uid, category),
             )
             updated += 1
+    _est_cache.pop(uid, None)  # fund order changed
     return {"ok": True, "updated": updated}
 
 
@@ -1443,6 +1459,7 @@ def reorder_categories(body: CategoryReorderBody, session: Optional[str] = Cooki
                 "UPDATE user_categories SET sort_order=? WHERE user_id=? AND name=?", (pos, uid, name)
             )
             updated += cur.rowcount
+    _est_cache.pop(uid, None)  # category order changed
     return {"ok": True, "updated": updated}
 
 
@@ -1460,6 +1477,7 @@ def create_category(body: CategoryCreateBody, session: Optional[str] = Cookie(de
             "(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_categories WHERE user_id=?))",
             (uid, name, uid),
         )
+    _est_cache.pop(uid, None)  # payload carries category list
     return {"ok": True, "name": name}
 
 
@@ -1477,6 +1495,7 @@ def rename_category(body: CategoryRenameBody, session: Optional[str] = Cookie(de
             raise HTTPException(400, "分类已存在")
         conn.execute("UPDATE user_categories SET name=? WHERE user_id=? AND name=?", (new, uid, old))
         conn.execute("UPDATE user_funds SET category=? WHERE user_id=? AND category=?", (new, uid, old))
+    _est_cache.pop(uid, None)  # category renamed
     return {"ok": True, "name": new}
 
 
@@ -1489,6 +1508,7 @@ def delete_category(body: CategoryDeleteBody, session: Optional[str] = Cookie(de
             raise HTTPException(404, "分类不存在")
         conn.execute("UPDATE user_funds SET category='' WHERE user_id=? AND category=?", (uid, name))
         conn.execute("DELETE FROM user_categories WHERE user_id=? AND name=?", (uid, name))
+    _est_cache.pop(uid, None)  # category deleted
     return {"ok": True}
 
 
@@ -1516,12 +1536,23 @@ def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cook
             "WHERE user_id=? AND category=? AND id<>?) WHERE id=? AND user_id=?",
             (uid, category, item_id, item_id, uid),
         )
+    _est_cache.pop(uid, None)  # fund category changed
     return {"ok": True, "category": category}
 
 
-@app.get("/api/estimates")
-async def estimates(session: Optional[str] = Cookie(default=None)):
-    uid = current_user_id(session)
+# Per-user cache of the computed estimates payload: a full recompute
+# fetches NAV + holdings + quotes for every fund and takes seconds, so
+# page opens serve the cached payload instantly. Fresh (<30s) ->
+# returned as-is; stale -> returned immediately while a deduped
+# background task recomputes; no entry -> computed synchronously. The
+# quote warmer also precomputes it every cycle, so even the first open
+# after a server start hits the cache.
+_est_cache = {}   # uid -> (computed_at_epoch, payload dict)
+_est_tasks = {}   # uid -> asyncio.Task running _refresh_estimates
+_EST_TTL = 30
+
+
+async def _compute_estimates(uid):
     with db() as conn:
         rows = conn.execute(
             "SELECT id, fund_code, fund_name, category, sort_order FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
@@ -1610,6 +1641,30 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "skipped_holdings": skipped, "holdings": detail,
         })
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
+
+
+async def _refresh_estimates(uid):
+    try:
+        payload = await _compute_estimates(uid)
+        _est_cache[uid] = (time.time(), payload)
+    except Exception as e:
+        print(f"[estimates] background refresh failed for uid {uid}: {e!r}")
+    finally:
+        _est_tasks.pop(uid, None)
+
+
+@app.get("/api/estimates")
+async def estimates(session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    hit = _est_cache.get(uid)
+    if hit is not None:
+        computed_at, payload = hit
+        if time.time() - computed_at > _EST_TTL and uid not in _est_tasks:
+            _est_tasks[uid] = asyncio.create_task(_refresh_estimates(uid))
+        return payload
+    payload = await _compute_estimates(uid)
+    _est_cache[uid] = (time.time(), payload)
+    return payload
 
 
 # Per-user cache of the computed curve series: a full recompute touches
