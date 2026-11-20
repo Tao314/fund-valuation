@@ -170,7 +170,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.2 · 更新于 2026-11-20 10:02</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。海外含量按最新披露前十大持仓计算，非基金全部持仓占比。<br><span id="app-version">版本 v1.10.3 · 更新于 2026-11-20 10:56</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -462,7 +462,7 @@ function renderFunds(data) {
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         <div class="fc-chg">${published ? fmtPct(f.jzzzl) : fmtPct(f.est_change_pct)}</div>
       </div>
-      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · 海外 ${ov}%` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · 海外（前十）${ov}%` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       </div>`;
     });
