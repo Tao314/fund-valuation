@@ -1025,7 +1025,10 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     "points": [[ts, close], ...]}. DB-cached per (secid, date); today's
     rows refresh after TRENDS_TTL, past dates never refetch. Returns None
     when the secid yields no data (wrong prefix / upstream failure) and
-    no cache exists."""
+    no cache exists. When the fetch yields nothing usable and there is no
+    same-date cache row, falls back to the most recent cached payload for
+    this secid under any date (weekend/early-morning: Saturday asks for
+    Saturday, but Friday's session is the data the curve needs)."""
     today_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
     with db() as conn:
         row = conn.execute(
@@ -1033,6 +1036,16 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             (secid, date_str)).fetchone()
     if row and (date_str < today_str or time.time() - row["fetched_at"] < TRENDS_TTL):
         return json.loads(row["payload"])
+
+    def _fallback():
+        if row:
+            return json.loads(row["payload"])
+        with db() as conn:
+            latest = conn.execute(
+                "SELECT payload FROM stock_trends_cache WHERE secid=? "
+                "ORDER BY date DESC LIMIT 1", (secid,)).fetchone()
+        return json.loads(latest["payload"]) if latest else None
+
     try:
         resp = await upstream_get(
             "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
@@ -1041,7 +1054,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             referer=TRENDS_REF, timeout=15)
         data = resp.json().get("data")
         if not data:
-            return json.loads(row["payload"]) if row else None
+            return _fallback()
         points = []
         for line in data.get("trends") or []:
             parts = line.split(",")
@@ -1059,6 +1072,8 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             if q:
                 pre_close = q.get("prev_close") or (
                     q["current"] / (1 + q["change_pct"] / 100) if q.get("current") else None)
+        if not points:
+            return _fallback()
         payload = {"pre_close": pre_close, "points": points}
         with db() as conn:
             conn.execute(
@@ -1067,7 +1082,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
                 (secid, date_str, json.dumps(payload), time.time()))
         return payload
     except Exception:
-        return json.loads(row["payload"]) if row else None
+        return _fallback()
 
 
 async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: str,
