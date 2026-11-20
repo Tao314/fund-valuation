@@ -116,7 +116,7 @@
         <div class="err" id="dash-err"></div>
       </div>
       <div class="card">
-        <div class="legend">卡片左侧琥珀竖条＝刚更新（相对上一次刷新有变化），几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。估值偏差＝自算估算涨幅－公布涨幅，越接近 0 越准。</div>
+        <div class="legend">卡片左侧琥珀竖条＝刚更新（相对上一次刷新有变化），几秒后自动消失。预估＝盘中估算会变，已确认＝按收盘价算定。估值偏差＝自算估算涨幅－公布涨幅，越接近 0 越准。海外含量＝前十大持仓中非A股（港股/美股等）占比；状态按持仓市场算，任一市场交易中显示盘中。</div>
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
       </div>
@@ -170,7 +170,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.1 · 更新于 2026-11-20 09:35</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.2 · 更新于 2026-11-20 10:02</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -381,6 +381,22 @@ function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v
 // Estimate accuracy vs published change (percentage points, neutral color)
 function fmtDiff(v) { if (v == null) return "-"; return (v > 0 ? "+" : "") + v.toFixed(2) + "%"; }
 function estDiff(f) { if (f.est_change_pct == null || f.jzzzl == null) return null; return f.est_change_pct - f.jzzzl; }
+// Overseas share of top-10 holdings: 6-digit numeric = A股; everything else
+// (5-digit 港股, alphabetic tickers, ISIN-like codes) counts as overseas.
+function overseasPct(f) {
+  const hs = f.holdings || [];
+  if (!hs.length) return null;
+  let total = 0, overseas = 0;
+  hs.forEach(h => {
+    const w = Number(h.weight);
+    if (!isFinite(w)) return;
+    total += w;
+    if (!/^\d{6}$/.test(String(h.code || "").trim())) overseas += w;
+  });
+  if (!(total > 0)) return null;
+  const p = Math.round(overseas / total * 1000) / 10;
+  return Number.isInteger(p) ? String(p) : p.toFixed(1);
+}
 // After today's NAV publishes, backend est_nav is based on latest dwjz (would double-count);
 // recompute estimate from previous day's NAV instead.
 function estNavFromPrev(f) {
@@ -429,6 +445,7 @@ function renderFunds(data) {
     sortedItems(g.items).forEach(f => {
       const ch = changed.has(f.fund_code);
       const st = fundMarketStatus(f);
+      const ov = overseasPct(f);
       // Official NAV for last trading day already published and market not live:
       // show published NAV/change as primary, previous day as secondary,
       // and keep the estimate (recomputed from prev NAV) plus its accuracy diff.
@@ -445,7 +462,7 @@ function renderFunds(data) {
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         <div class="fc-chg">${published ? fmtPct(f.jzzzl) : fmtPct(f.est_change_pct)}</div>
       </div>
-      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}% · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · 海外 ${ov}%` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       </div>`;
     });
