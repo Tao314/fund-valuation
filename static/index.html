@@ -92,6 +92,23 @@
   @keyframes fv-spin { to { transform: rotate(360deg); } }
   .logout-btn { background: transparent; color: #667085; font-size: 12px; padding: 4px 6px; min-height: 24px; height: 24px; }
   .logout-btn:active { background: transparent; color: #374151; }
+  /* ranking view (v1.11.0) */
+  .chip-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 6px; scrollbar-width: none; }
+  .chip-row::-webkit-scrollbar { display: none; }
+  .chip { min-height: 28px; height: 28px; padding: 0 10px; font-size: 12px; border-radius: 999px; background: #F2F3F5; color: #667085; white-space: nowrap; flex: none; }
+  .chip.active { background: #2563EB; color: #fff; font-weight: 600; }
+  .chip:active { background: #E5E7EB; }
+  .chip.active:active { background: #1D4ED8; }
+  .rank-row { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid #F0F2F5; }
+  .rank-row:last-child { border-bottom: 0; }
+  .rk-num { width: 28px; flex: none; text-align: center; font-size: 14px; font-weight: 600; color: #98A2B3; }
+  .rk-num.top { color: #2563EB; font-weight: 700; font-size: 16px; }
+  .rk-main { flex: 1; min-width: 0; }
+  .rk-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
+  .rk-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
+  .rk-val { font-size: 17px; font-weight: 700; white-space: nowrap; flex: none; }
+  .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
+  .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
@@ -120,6 +137,7 @@
     <div class="card toolbar-card">
       <div class="toolbar-row1">
         <button class="tab-btn active" id="nav-main">估值</button>
+        <button class="tab-btn" id="nav-rank">排行榜</button>
         <button class="tab-btn" id="nav-settings">设置</button>
         <span style="flex:1"></span>
         <button id="refresh-btn" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
@@ -140,6 +158,28 @@
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
         <div class="err" id="dash-err"></div>
+      </div>
+    </div>
+
+    <div id="view-rank" style="display:none">
+      <div class="card">
+        <div class="chip-row" id="rank-boards">
+          <button class="chip active" data-board="returns">涨幅榜</button>
+          <button class="chip" data-board="us">美股占比（QDII）</button>
+          <button class="chip" data-board="vol">波动率（QDII）</button>
+        </div>
+        <div class="chip-row" id="rank-periods">
+          <button class="chip" data-period="daily">昨日</button>
+          <button class="chip" data-period="1w">近1周</button>
+          <button class="chip" data-period="1m">近1月</button>
+          <button class="chip" data-period="3m">近3月</button>
+          <button class="chip" data-period="6m">近6月</button>
+          <button class="chip active" data-period="1y">近1年</button>
+          <button class="chip" data-period="ytd">今年来</button>
+        </div>
+        <div id="rank-list"></div>
+        <div class="err" id="rank-err"></div>
+        <div class="rk-updated" id="rank-updated"></div>
       </div>
     </div>
 
@@ -191,7 +231,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.10.8 · 更新于 2026-11-20 11:54</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.11.0 · 更新于 2026-11-20 12:23</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -331,13 +371,88 @@ function updateFundStatuses() {
 }
 function showView(name) {
   $("view-main").style.display = name === "main" ? "" : "none";
+  $("view-rank").style.display = name === "rank" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
+  $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
   $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
+  if (name === "rank") loadRank();
 }
 $("nav-main").onclick = () => showView("main");
+$("nav-rank").onclick = () => showView("rank");
 $("nav-settings").onclick = () => showView("settings");
+/* ---- ranking view (v1.11.0) ---- */
+let rankBoard = "returns", rankPeriod = "1y";
+const rankMem = {};  // in-memory cache per board+period for this session
+const PERIOD_KEY = { daily: "daily", "1w": "w1", "1m": "m1", "3m": "m3", "6m": "m6", "1y": "y1", ytd: "ytd" };
+function fmtLocalTime(iso) {
+  const d = new Date(iso); if (isNaN(d)) return "";
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function rankRow(it, valHtml, sub) {
+  return `<div class="rank-row"><div class="rk-num${it.rank <= 3 ? " top" : ""}">${it.rank}</div>`
+    + `<div class="rk-main"><div class="rk-name">${esc(it.name)}</div><div class="rk-sub">${esc(it.code)}${sub ? " · " + sub : ""}</div></div>`
+    + `<div class="rk-val">${valHtml}</div></div>`;
+}
+function renderRank(data) {
+  const items = data.items || [];
+  let html = "";
+  if (rankBoard === "returns") {
+    const key = PERIOD_KEY[rankPeriod];
+    html = items.map(it => {
+      const parts = [];
+      if (key !== "m1" && it.m1 != null) parts.push("近1月 " + fmtDiff(it.m1));
+      if (key !== "y1" && it.y1 != null) parts.push("近1年 " + fmtDiff(it.y1));
+      if (it.date) parts.push(it.date);
+      return rankRow(it, fmtPct(it[key]), parts.join(" · "));
+    }).join("");
+  } else if (rankBoard === "us") {
+    html = items.map(it => {
+      const parts = [];
+      if (it.coverage != null) parts.push("覆盖 " + it.coverage.toFixed(1) + "%");
+      if (it.y1 != null) parts.push("近1年 " + fmtDiff(it.y1));
+      return rankRow(it, it.us_pct.toFixed(1) + "%", parts.join(" · "));
+    }).join("");
+  } else {
+    html = items.map(it => rankRow(it, it.vol.toFixed(2) + "%", it.y1 != null ? "近1年 " + fmtDiff(it.y1) : "")).join("");
+  }
+  $("rank-list").innerHTML = html || '<div class="muted">暂无数据</div>';
+  $("rank-updated").textContent = "数据来源：东方财富 · 更新于 " + fmtLocalTime(data.updated_at) + (data.stale ? "（缓存）" : "");
+}
+async function loadRank() {
+  const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod : rankBoard;
+  $("rank-err").textContent = "";
+  if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
+  $("rank-list").innerHTML = '<div class="muted">' + (rankBoard === "returns" ? "加载中…" : "加载中…首次计算较慢") + "</div>";
+  $("rank-updated").textContent = "";
+  try {
+    const url = rankBoard === "returns" ? "/api/rank/returns?period=" + rankPeriod
+      : rankBoard === "us" ? "/api/rank/qdii-us" : "/api/rank/qdii-vol";
+    const data = await api(url);
+    rankMem[cacheKey] = data;
+    renderRank(data);
+  } catch (e) {
+    $("rank-list").innerHTML = "";
+    $("rank-err").textContent = e.message;
+  }
+}
+document.querySelectorAll("#rank-boards .chip").forEach(b => {
+  b.onclick = () => {
+    rankBoard = b.dataset.board;
+    document.querySelectorAll("#rank-boards .chip").forEach(x => x.classList.toggle("active", x === b));
+    $("rank-periods").style.display = rankBoard === "returns" ? "" : "none";
+    loadRank();
+  };
+});
+document.querySelectorAll("#rank-periods .chip").forEach(b => {
+  b.onclick = () => {
+    rankPeriod = b.dataset.period;
+    document.querySelectorAll("#rank-periods .chip").forEach(x => x.classList.toggle("active", x === b));
+    loadRank();
+  };
+});
 function showAuth() { $("auth").style.display = ""; $("dash").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); prevSnapshot = null; }
 // Keep the sticky toolbar flush under the sticky header: header height can
 // grow when the title note wraps on narrow screens, so measure it live.

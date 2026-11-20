@@ -6,9 +6,11 @@ disclosed top-10 holdings; est_nav = latest official NAV * (1 + est/100).
 Data: Eastmoney (search / official NAV / holdings), Sina (stock quotes).
 All upstream calls go through the backend with global caches.
 """
+import asyncio
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -83,6 +85,10 @@ def init_db():
             prev_dwjz REAL,
             prev_jzzzl REAL,
             fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS rank_cache(
+            key TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            fetched_at TEXT NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -288,11 +294,11 @@ def change_password(body: ChangePasswordBody, session: Optional[str] = Cookie(de
 
 
 # ---------------------------------------------------------------- upstream
-async def upstream_get(url: str, referer: Optional[str] = None) -> httpx.Response:
+async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10) -> httpx.Response:
     headers = {"User-Agent": UA}
     if referer:
         headers["Referer"] = referer
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         return resp
@@ -810,6 +816,296 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "skipped_holdings": skipped, "holdings": detail,
         })
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
+
+
+# ---------------------------------------------------------------- rankings
+# 排行榜 data: Eastmoney rankhandler (full-market period returns, QDII list),
+# holdings (QDII US share), pingzhongdata NAV trend (QDII volatility).
+RANK_REF = "https://fund.eastmoney.com/data/fundranking.html"
+RETURNS_TTL = 12 * 3600     # full-market returns dataset
+QDII_US_TTL = 7 * 86400     # holdings are quarterly disclosures
+QDII_VOL_TTL = 24 * 3600    # NAV-based volatility
+PERIOD_FIELDS = {"daily": "daily", "1w": "w1", "1m": "m1", "3m": "m3",
+                 "6m": "m6", "1y": "y1", "ytd": "ytd"}
+
+
+def _fnum(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_rank_rows(text: str) -> list:
+    rows = []
+    for m in re.finditer(r'"(\d{6},[^"]+)"', text):
+        f = m.group(1).split(",")
+        if len(f) < 16:
+            continue
+        rows.append({
+            "code": f[0], "name": f[1], "date": f[3], "nav": _fnum(f[4]),
+            "daily": _fnum(f[6]), "w1": _fnum(f[7]), "m1": _fnum(f[8]),
+            "m3": _fnum(f[9]), "m6": _fnum(f[10]), "y1": _fnum(f[11]), "ytd": _fnum(f[14]),
+        })
+    return rows
+
+
+def rank_cache_get(key: str):
+    with db() as conn:
+        row = conn.execute("SELECT payload, fetched_at FROM rank_cache WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None, None
+    return json.loads(row["payload"]), row["fetched_at"]
+
+
+def rank_cache_set(key: str, payload: dict):
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO rank_cache(key, payload, fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (key, json.dumps(payload, ensure_ascii=False), payload["updated_at"]),
+        )
+
+
+def _cache_fresh(fetched_at, ttl: int) -> bool:
+    try:
+        dt = datetime.fromisoformat(fetched_at)
+        return (datetime.now(timezone.utc) - dt).total_seconds() < ttl
+    except Exception:
+        return False
+
+
+async def fetch_returns_all() -> list:
+    async def one_page(page):
+        resp = await upstream_get(
+            "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0"
+            f"&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi={page}&pn=5000&dx=1&v=0.123456",
+            referer=RANK_REF, timeout=60,
+        )
+        return parse_rank_rows(resp.text)
+
+    rows = []
+    for batch in await asyncio.gather(*(one_page(p) for p in range(1, 6))):
+        rows += batch
+    if not rows:
+        raise ValueError("empty rank data")
+    return rows
+
+
+async def fetch_qdii_rows() -> list:
+    resp = await upstream_get(
+        "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=qdii&rs=&gs=0"
+        "&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi=1&pn=500&dx=1&v=0.123456",
+        referer=RANK_REF, timeout=30,
+    )
+    rows = parse_rank_rows(resp.text)
+    if not rows:
+        raise ValueError("empty qdii data")
+    return rows
+
+
+def market_of_holding(code: str) -> str:
+    """Mirror of frontend marketOfHolding: A / HK / US / JP / TW / KR / OTHER.
+
+    NOTE: alpha ticker -> US here is only a rough guess; QDII US-share ranking
+    must use is_us_holding() with the pingzhongdata market-prefix map instead.
+    """
+    c = (code or "").strip().upper()
+    if re.fullmatch(r"\d{6}", c):
+        return "A"
+    if re.fullmatch(r"\d{5}", c):
+        return "HK"
+    if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", c):
+        return {"JP": "JP", "TW": "TW", "KR": "KR", "HK": "HK", "US": "US", "CN": "A"}.get(c[:2], "OTHER")
+    if re.fullmatch(r"[A-Z][A-Z.\-]*", c):
+        return "US"
+    return "OTHER"
+
+
+async def fetch_pingzhong_text(code: str) -> str:
+    resp = await upstream_get(
+        f"https://fund.eastmoney.com/pingzhongdata/{code}.js",
+        referer="https://fund.eastmoney.com/", timeout=30,
+    )
+    return resp.text
+
+
+def parse_stock_market_map(text: str) -> dict:
+    """ticker(upper) -> Eastmoney market prefix from pingzhongdata stockCodesNew.
+
+    Entries look like "105.NVDA" (US), "116.00883" (HK), "0.300308"/"1.600519" (A);
+    non-US/HK/A listings (e.g. India NSE tickers "ICICIBC") have no numeric prefix.
+    """
+    m = re.search(r"stockCodesNew\s*=\s*(\[[^\]]*\])", text)
+    if not m:
+        return {}
+    try:
+        entries = json.loads(m.group(1))
+    except Exception:
+        return {}
+    out = {}
+    for e in entries:
+        e = str(e).strip()
+        pm = re.match(r"^(\d+)\.(.+)$", e)
+        if pm:
+            out[pm.group(2).strip().upper()] = pm.group(1)
+        elif e:
+            out[e.upper()] = None
+    return out
+
+
+async def fetch_stock_market_map(code: str):
+    """Market-prefix map for one fund; None if pingzhongdata fetch fails twice."""
+    for _ in range(2):
+        try:
+            return parse_stock_market_map(await fetch_pingzhong_text(code))
+        except Exception:
+            continue
+    return None
+
+
+def is_us_holding(code: str, market_map: dict) -> bool:
+    """US holding per pingzhongdata market prefix (105/106/107) or US ISIN.
+
+    Alpha tickers without a US prefix (e.g. India NSE names) are NOT US.
+    """
+    c = (code or "").strip().upper()
+    if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", c):
+        return c[:2] == "US"
+    if re.fullmatch(r"\d{5,6}", c):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z.\-]*", c):
+        return market_map.get(c) in ("105", "106", "107")
+    return False
+
+
+async def compute_qdii_us() -> dict:
+    qdii = await fetch_qdii_rows()
+    sem = asyncio.Semaphore(10)
+
+    async def one(r):
+        async with sem:
+            hold, market_map = await asyncio.gather(
+                fetch_holdings(r["code"]), fetch_stock_market_map(r["code"]))
+        hs = hold["holdings"]
+        total_w = sum(h["weight"] for h in hs)
+        if not hs or total_w <= 0:
+            return None
+        if total_w < 5:
+            return {"_low_coverage": True}
+        if market_map is None:
+            return None  # cannot classify reliably; skip rather than guess 0%
+        us_w = sum(h["weight"] for h in hs if is_us_holding(h["code"], market_map))
+        return {
+            "code": r["code"], "name": r["name"],
+            "us_pct": round(us_w / total_w * 100, 1),
+            "coverage": round(total_w, 2), "y1": r["y1"],
+            "report_label": hold["report_label"],
+        }
+
+    results = await asyncio.gather(*(one(r) for r in qdii))
+    excluded_low_coverage = sum(1 for x in results if x and x.get("_low_coverage"))
+    items = [x for x in results if x and not x.get("_low_coverage")]
+    items.sort(key=lambda x: x["us_pct"], reverse=True)
+    return {"updated_at": now_iso(), "total": len(qdii),
+            "excluded_low_coverage": excluded_low_coverage, "items": items[:30]}
+
+
+async def fetch_vol(code: str):
+    text = await fetch_pingzhong_text(code)
+    m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.S)
+    if not m:
+        return None
+    trend = json.loads(m.group(1))
+    rets = [p.get("equityReturn") for p in trend if isinstance(p.get("equityReturn"), (int, float))]
+    rets = rets[-250:]
+    if len(rets) < 60:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((x - mean) ** 2 for x in rets) / (len(rets) - 1)
+    return round(math.sqrt(var) * math.sqrt(250), 2), len(rets)
+
+
+async def compute_qdii_vol() -> dict:
+    qdii = await fetch_qdii_rows()
+    sem = asyncio.Semaphore(10)
+
+    async def one(r):
+        async with sem:
+            try:
+                got = await fetch_vol(r["code"])
+            except Exception:
+                got = None
+        if not got:
+            return None
+        vol, points = got
+        return {"code": r["code"], "name": r["name"], "vol": vol, "points": points, "y1": r["y1"]}
+
+    results = await asyncio.gather(*(one(r) for r in qdii))
+    items = [x for x in results if x]
+    items.sort(key=lambda x: x["vol"], reverse=True)
+    return {"updated_at": now_iso(), "total": len(qdii), "items": items[:30]}
+
+
+@app.get("/api/rank/returns")
+async def rank_returns(period: str = "1y", session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    if period not in PERIOD_FIELDS:
+        raise HTTPException(400, "period 不支持")
+    payload, fetched_at = rank_cache_get("returns_all")
+    stale = False
+    if payload is None or not _cache_fresh(fetched_at, RETURNS_TTL):
+        try:
+            rows = await fetch_returns_all()
+            payload = {"rows": rows, "updated_at": now_iso()}
+            rank_cache_set("returns_all", payload)
+        except Exception:
+            if payload is None:
+                raise HTTPException(502, "排行数据暂时不可用")
+            stale = True
+    field = PERIOD_FIELDS[period]
+    rows = sorted(payload["rows"], key=lambda r: (r[field] is None, -(r[field] or 0)))
+    items = []
+    for i, r in enumerate(rows[:30]):
+        items.append({"rank": i + 1, **{k: r[k] for k in
+                      ("code", "name", "date", "nav", "daily", "w1", "m1", "m3", "m6", "y1", "ytd")}})
+    return {"period": period, "updated_at": payload["updated_at"],
+            "total": len(payload["rows"]), "stale": stale, "items": items}
+
+
+@app.get("/api/rank/qdii-us")
+async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    payload, fetched_at = rank_cache_get("qdii_us_v2")
+    stale = False
+    if payload is None or not _cache_fresh(fetched_at, QDII_US_TTL):
+        try:
+            payload = await compute_qdii_us()
+            rank_cache_set("qdii_us_v2", payload)
+        except Exception:
+            if payload is None:
+                raise HTTPException(502, "QDII 美股占比数据暂时不可用")
+            stale = True
+    items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
+    return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale,
+            "excluded_low_coverage": payload.get("excluded_low_coverage", 0), "items": items}
+
+
+@app.get("/api/rank/qdii-vol")
+async def rank_qdii_vol(session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    payload, fetched_at = rank_cache_get("qdii_vol")
+    stale = False
+    if payload is None or not _cache_fresh(fetched_at, QDII_VOL_TTL):
+        try:
+            payload = await compute_qdii_vol()
+            rank_cache_set("qdii_vol", payload)
+        except Exception:
+            if payload is None:
+                raise HTTPException(502, "QDII 波动率数据暂时不可用")
+            stale = True
+    items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
+    return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale, "items": items}
 
 
 @app.get("/")
