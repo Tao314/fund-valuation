@@ -291,7 +291,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.13.2 · 更新于 2026-11-20 21:36</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.13.3 · 更新于 2026-11-20 21:47</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -406,7 +406,7 @@ function fundMarketStatus(f, now) {
     ? (s === "trading" ? "盘中" : s === "pre" ? "盘前" : (s === "post" || s === "postext") ? "盘后" : s === "lunch" ? "午休" : s === "preopen" ? "未开盘" : "已收盘")
     : (s === "trading" ? "盘中交易" : s === "lunch" ? "午休" : s === "preopen" ? "未开盘" : "已收盘");
   // Est label depends only on whether the official NAV is published:
-  // unpublished layout always 预估; published layout renders 已确认 itself.
+  // the estimate is always 预估; 已确认 belongs to the published NAV/change row.
   return { session: s, label, state: "预估" };
 }
 // Last trading day (Mon-Fri, holidays ignored): today if weekday and >=09:30,
@@ -844,13 +844,13 @@ function renderFunds(data) {
       //   on top, then the normal estimate (base = latest NAV, targets the
       //   next NAV) still labeled 预估, ext row as-is, no accuracy diff.
       const rows = (published && !live)
-        ? `<div class="fc-row"><span class="fc-label">今日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b><span class="fc-pub">已公布</span></span></div>
+        ? `<div class="fc-row"><span class="fc-label">今日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
         ${f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : ""}
-        <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val"><b>${estNavFromPrev(f)}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state">已确认</span></span></div>
+        <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val"><b>${estNavFromPrev(f)}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state">预估</span></span></div>
         ${extRow(f, true)}
         <div class="fc-row fc-row-diff"><span class="fc-label">估值偏差</span><span class="fc-val fc-diff">${fmtDiff(estDiff(f))}</span></div>`
         : published
-        ? `<div class="fc-row"><span class="fc-label">今日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已公布</span></span></div>
+        ? `<div class="fc-row"><span class="fc-label">今日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
         ${f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : ""}
         <div class="fc-row"><span class="fc-label">自算估值</span><span class="fc-val"><b>${f.est_nav ?? "-"}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state" data-code="${f.fund_code}">${st.state}</span></span></div>
         ${extRow(f, false)}`
