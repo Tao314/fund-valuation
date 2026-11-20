@@ -103,6 +103,11 @@ def init_db():
             key TEXT PRIMARY KEY,
             payload TEXT NOT NULL,
             fetched_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS est_history(
+            fund_code TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            est_change_pct REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_est_history ON est_history(fund_code, ts);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -610,6 +615,7 @@ def to_sina_symbol(code: str) -> Optional[str]:
 
 
 ET_TZ = ZoneInfo("America/New_York")
+CN_TZ = ZoneInfo("Asia/Shanghai")
 _MONTHS = {m: i + 1 for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
 
@@ -804,6 +810,45 @@ def quotes_stale() -> bool:
     return time.time() - _quote_cache["at"] >= QUOTE_TTL
 
 
+def _est_pct_from(holdings: list, quotes: dict):
+    """Close-based main estimate: sum(weight% * regular change%) / 100 over
+    holdings that have quotes (same formula as /api/estimates, NAV not
+    needed). Returns (est_pct, quoted_coverage)."""
+    est, cov = 0.0, 0.0
+    for h in holdings:
+        sym = to_sina_symbol(h["code"])
+        q = quotes.get(sym) if sym else None
+        if q:
+            est += h["weight"] * q["change_pct"] / 100
+            cov += h["weight"]
+    return est, cov
+
+
+_hist_last_ts: dict = {}
+HIST_MIN_INTERVAL = 60     # seconds between recorded points per fund
+HIST_KEEP_DAYS = 7
+
+
+def _record_est_history(holdings_by_code: dict, quotes: dict) -> None:
+    """Record one est_change_pct point per fund (throttled to 60s/fund) for
+    the intraday sparkline; prunes rows older than 7 days."""
+    now = int(time.time())
+    rows = []
+    for code, holdings in holdings_by_code.items():
+        if now - _hist_last_ts.get(code, 0) < HIST_MIN_INTERVAL:
+            continue
+        est, cov = _est_pct_from(holdings, quotes)
+        if cov <= 0:
+            continue  # no holdings / no quotes -> nothing meaningful to record
+        rows.append((code, now, round(est, 2)))
+        _hist_last_ts[code] = now
+    with db() as conn:
+        if rows:
+            conn.executemany(
+                "INSERT INTO est_history(fund_code, ts, est_change_pct) VALUES(?,?,?)", rows)
+        conn.execute("DELETE FROM est_history WHERE ts < ?", (now - HIST_KEEP_DAYS * 86400,))
+
+
 async def _quote_warm_loop():
     """Keep the quote cache hot: every 40s refresh quotes for the union of
     holding symbols across all users' watchlists, so page loads never wait
@@ -816,8 +861,10 @@ async def _quote_warm_loop():
                     "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
             if codes:
                 syms = set()
+                holdings_by_code = {}
                 for code in codes:
                     hold = await fetch_holdings(code)
+                    holdings_by_code[code] = hold["holdings"]
                     for h in hold["holdings"]:
                         s = to_sina_symbol(h["code"])
                         if s:
@@ -827,6 +874,12 @@ async def _quote_warm_loop():
                         await _refresh_quotes(sorted(syms))
                     print(f"[quote-warm] refreshed {len(syms)} symbols "
                           f"for {len(codes)} funds", flush=True)
+                    # Record intraday estimate points from the fresh quotes
+                    # (for the fund-card sparklines; throttled inside).
+                    try:
+                        _record_est_history(holdings_by_code, _quote_cache["quotes"])
+                    except Exception as e:
+                        print(f"[quote-warm] history record failed: {e!r}", flush=True)
         except Exception as e:
             print(f"[quote-warm] failed: {e!r}", flush=True)
         await asyncio.sleep(40)
@@ -1097,6 +1150,29 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "skipped_holdings": skipped, "holdings": detail,
         })
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
+
+
+@app.get("/api/history/today")
+def history_today(session: Optional[str] = Cookie(default=None)):
+    """Today's recorded estimate points per watchlisted fund (Asia/Shanghai
+    day), downsampled to 5-minute buckets (last point per bucket) for the
+    fund-card sparklines. Points are recorded by _quote_warm_loop."""
+    uid = current_user_id(session)
+    start = datetime.now(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ts = int(start.timestamp())
+    with db() as conn:
+        codes = [r[0] for r in conn.execute(
+            "SELECT fund_code FROM user_funds WHERE user_id=?", (uid,)).fetchall()]
+        series = {}
+        for code in codes:
+            rows = conn.execute(
+                "SELECT ts, est_change_pct FROM est_history WHERE fund_code=? AND ts>=? ORDER BY ts",
+                (code, start_ts)).fetchall()
+            buckets = {}
+            for ts, pct in rows:
+                buckets[ts // 300] = (ts, pct)
+            series[code] = [[ts, pct] for ts, pct in buckets.values()]
+    return {"series": series}
 
 
 # ---------------------------------------------------------------- rankings
