@@ -1385,6 +1385,7 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
                 )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该基金已在列表中")
+    _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
     return {"ok": True, "id": cur.lastrowid, "fund_code": code, "fund_name": name, "category": category}
 
 
@@ -1395,6 +1396,7 @@ def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)
         cur = conn.execute("DELETE FROM user_funds WHERE id=? AND user_id=?", (item_id, uid))
     if cur.rowcount == 0:
         raise HTTPException(404, "记录不存在")
+    _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
     return {"ok": True}
 
 
@@ -1610,13 +1612,21 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
 
 
-@app.get("/api/history/today")
-async def history_today(session: Optional[str] = Cookie(default=None)):
+# Per-user cache of the computed curve series: a full recompute touches
+# holdings + trends + quotes for every fund and takes seconds, so page
+# refreshes serve the cached series instantly. Fresh (<20s) -> returned
+# as-is; stale -> returned immediately while a deduped background task
+# recomputes; no entry -> computed synchronously.
+_series_cache = {}   # uid -> (computed_at_epoch, series dict)
+_series_tasks = {}   # uid -> asyncio.Task running _refresh_series
+_SERIES_TTL = 20
+
+
+async def _compute_series(uid):
     """Intraday estimate curve per watchlisted fund for the current
     session day, computed from holdings' Eastmoney minute trends and
     downsampled to 5-minute buckets for the fund-card sparklines. Falls
     back to the legacy est_history snapshots when trends yield nothing."""
-    uid = current_user_id(session)
     now_cn = datetime.now(CN_TZ)
     date_str = now_cn.strftime("%Y-%m-%d")  # trends cache key = fetch date
     # Curve window starts at the session day's 00:00 (Asia/Shanghai): the
@@ -1643,15 +1653,27 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
         return code, fr["fund_name"], hold["holdings"], mmap, syms
 
-    per_fund = await asyncio.gather(*[_inputs(fr) for fr in fund_rows])
+    # Fault-tolerant: one fund's upstream failure must not blank every
+    # curve (a 500 here leaves all sparklines empty).
+    raw_inputs = await asyncio.gather(
+        *[_inputs(fr) for fr in fund_rows], return_exceptions=True)
+    per_fund = []
+    for fr, res in zip(fund_rows, raw_inputs):
+        if isinstance(res, Exception):
+            print(f"[history] inputs failed for {fr['fund_code']}: {res!r}")
+            per_fund.append((fr["fund_code"], fr["fund_name"], [], None, []))
+        else:
+            per_fund.append(res)
     # One trends fetch per unique holding code across all funds.
     uniq = {}
     for _, _, holdings, mmap, _ in per_fund:
         for h in holdings:
             uniq.setdefault(h["code"], (mmap, h.get("name")))
     fetched = await asyncio.gather(*[
-        fetch_holding_trends(c, mmap, date_str, n) for c, (mmap, n) in uniq.items()])
-    trends_by_code = dict(zip(uniq.keys(), fetched))
+        fetch_holding_trends(c, mmap, date_str, n) for c, (mmap, n) in uniq.items()],
+        return_exceptions=True)
+    trends_by_code = {c: (None if isinstance(v, Exception) else v)
+                      for c, v in zip(uniq.keys(), fetched)}
     # Live quotes from the same 45s cache /api/estimates reads, for the
     # final curve point (curve end == card estimate by construction).
     all_symbols = [s for (_, _, _, _, syms) in per_fund for s in syms if s]
@@ -1659,6 +1681,7 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
     now_ts = int(time.time())
     series = {}
     for code, fund_name, holdings, _, syms in per_fund:
+      try:
         pts = _fund_curve(holdings, trends_by_code, start_ts)
         feeder_tr = None
         if not pts and _is_feeder(fund_name, holdings):
@@ -1696,6 +1719,33 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
             else:
                 pts[-1] = [pts[-1][0], val]
         series[code] = pts
+      except Exception as e:
+        print(f"[history] curve failed for {code}: {e!r}")
+        series[code] = []
+    return series
+
+
+async def _refresh_series(uid):
+    try:
+        series = await _compute_series(uid)
+        _series_cache[uid] = (time.time(), series)
+    except Exception as e:
+        print(f"[history] background refresh failed for uid {uid}: {e!r}")
+    finally:
+        _series_tasks.pop(uid, None)
+
+
+@app.get("/api/history/today")
+async def history_today(session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    hit = _series_cache.get(uid)
+    if hit is not None:
+        computed_at, series = hit
+        if time.time() - computed_at > _SERIES_TTL and uid not in _series_tasks:
+            _series_tasks[uid] = asyncio.create_task(_refresh_series(uid))
+        return {"series": series}
+    series = await _compute_series(uid)
+    _series_cache[uid] = (time.time(), series)
     return {"series": series}
 
 
