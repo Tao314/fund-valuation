@@ -47,12 +47,15 @@ SESSION_DAYS = 30
 @asynccontextmanager
 async def lifespan(_app):
     # Ranking caches warm in the background (see _rank_warm_loop); startup
-    # itself never waits on upstream fetches.
-    task = asyncio.create_task(_rank_warm_loop())
+    # itself never waits on upstream fetches. The quote warmer keeps the
+    # in-memory quote cache hot so first page loads don't wait on Sina.
+    tasks = [asyncio.create_task(_rank_warm_loop()),
+             asyncio.create_task(_quote_warm_loop())]
     try:
         yield
     finally:
-        task.cancel()
+        for t in tasks:
+            t.cancel()
 
 
 app = FastAPI(title="Fund Valuation MVP", lifespan=lifespan)
@@ -713,17 +716,17 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
 
 
 _quote_cache: dict = {"at": 0.0, "quotes": {}}
+_quote_refresh_lock = asyncio.Lock()
+_quote_refresh_task: Optional[asyncio.Task] = None
 
 
-async def fetch_quotes(symbols: list[str]) -> dict:
-    """Return {symbol: {name, prev_close, current, change_pct, quote_time}}."""
+async def _refresh_quotes(symbols: list[str]) -> dict:
+    """Fetch quotes from Sina and merge into the cache. Caller holds the lock."""
     symbols = sorted(set(symbols))
     if not symbols:
         return {}
     now = time.time()
     cached = _quote_cache["quotes"]
-    if now - _quote_cache["at"] < QUOTE_TTL and all(s in cached for s in symbols):
-        return {s: cached[s] for s in symbols}
     try:
         resp = await upstream_get("https://hq.sinajs.cn/list=" + ",".join(symbols), referer="https://finance.sina.com.cn/")
         text = resp.content.decode("gbk", errors="replace")
@@ -757,6 +760,76 @@ async def fetch_quotes(symbols: list[str]) -> dict:
         return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
     except Exception:
         return {s: cached[s] for s in symbols if s in cached}
+
+
+def _schedule_quote_refresh(symbols: list[str]) -> None:
+    """Kick off a background quote refresh unless one is already running."""
+    global _quote_refresh_task
+    if _quote_refresh_task is not None and not _quote_refresh_task.done():
+        return
+
+    async def _run():
+        async with _quote_refresh_lock:
+            await _refresh_quotes(symbols)
+
+    _quote_refresh_task = asyncio.create_task(_run())
+
+
+async def fetch_quotes(symbols: list[str]) -> dict:
+    """Return {symbol: {name, prev_close, current, change_pct, quote_time}}.
+
+    Stale-while-revalidate: complete-but-expired cache is served immediately
+    and refreshed in the background; only a cache missing symbols blocks on
+    the upstream fetch (deduped via _quote_refresh_lock).
+    """
+    symbols = sorted(set(symbols))
+    if not symbols:
+        return {}
+    cached = _quote_cache["quotes"]
+    have_all = all(s in cached for s in symbols)
+    if have_all:
+        if time.time() - _quote_cache["at"] >= QUOTE_TTL:
+            _schedule_quote_refresh(symbols)
+        return {s: cached[s] for s in symbols}
+    async with _quote_refresh_lock:
+        # Another coroutine may have refreshed while we waited for the lock.
+        cached = _quote_cache["quotes"]
+        if all(s in cached for s in symbols) and time.time() - _quote_cache["at"] < QUOTE_TTL:
+            return {s: cached[s] for s in symbols}
+        return await _refresh_quotes(symbols)
+
+
+def quotes_stale() -> bool:
+    """True when the quote cache is past TTL (served stale or never filled)."""
+    return time.time() - _quote_cache["at"] >= QUOTE_TTL
+
+
+async def _quote_warm_loop():
+    """Keep the quote cache hot: every 40s refresh quotes for the union of
+    holding symbols across all users' watchlists, so page loads never wait
+    on Sina. Startup is never blocked; errors are logged and skipped."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            with db() as conn:
+                codes = [r[0] for r in conn.execute(
+                    "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
+            if codes:
+                syms = set()
+                for code in codes:
+                    hold = await fetch_holdings(code)
+                    for h in hold["holdings"]:
+                        s = to_sina_symbol(h["code"])
+                        if s:
+                            syms.add(s)
+                if syms:
+                    async with _quote_refresh_lock:
+                        await _refresh_quotes(sorted(syms))
+                    print(f"[quote-warm] refreshed {len(syms)} symbols "
+                          f"for {len(codes)} funds", flush=True)
+        except Exception as e:
+            print(f"[quote-warm] failed: {e!r}", flush=True)
+        await asyncio.sleep(40)
 
 
 # ---------------------------------------------------------------- watchlist
@@ -965,15 +1038,18 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
         urow = conn.execute("SELECT refresh_seconds FROM users WHERE id=?", (uid,)).fetchone()
         refresh_seconds = urow["refresh_seconds"] if urow else 60
     rows = sort_funds(rows, cats)
-    # Fetch NAV + holdings per fund, collect all symbols, one batch quote call
-    per_fund, all_symbols = [], []
-    for r in rows:
+    # Fetch NAV + holdings per fund in parallel, collect all symbols,
+    # then one batch quote call.
+    async def _fund_inputs(r):
         nav = await fetch_nav(r["fund_code"])
         hold = await fetch_holdings(r["fund_code"])
         syms = [to_sina_symbol(h["code"]) for h in hold["holdings"]]
-        all_symbols += [s for s in syms if s]
-        per_fund.append((r, nav, hold, syms))
+        return (r, nav, hold, syms)
+
+    per_fund = await asyncio.gather(*[_fund_inputs(r) for r in rows])
+    all_symbols = [s for (_, _, _, syms) in per_fund for s in syms if s]
     quotes = await fetch_quotes(all_symbols)
+    q_stale = quotes_stale()
     out = []
     for r, nav, hold, syms in per_fund:
         est_pct, est_pct_ext, coverage, quote_time, skipped = 0.0, 0.0, 0.0, None, []
@@ -1017,7 +1093,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
             "est_change_pct_ext": round(est_pct_ext, 2) if show_ext else None,
             "coverage_pct": round(coverage, 2),
             "report_label": hold["report_label"], "report_date": hold["report_date"],
-            "quote_time": quote_time, "stale": nav["stale"] or hold["stale"],
+            "quote_time": quote_time, "stale": nav["stale"] or hold["stale"] or q_stale,
             "skipped_holdings": skipped, "holdings": detail,
         })
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}

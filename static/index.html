@@ -197,7 +197,7 @@
     <div id="view-main">
       <div class="card">
         <div id="fund-cards"></div>
-        <div class="muted" id="empty-tip">列表为空，去「设置」里搜索添加基金。</div>
+        <div class="muted" id="empty-tip">加载中…</div>
         <div class="err" id="dash-err"></div>
       </div>
     </div>
@@ -291,7 +291,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.13.1 · 更新于 2026-11-20 20:50</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.13.2 · 更新于 2026-11-20 21:36</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -464,7 +464,7 @@ $("nav-rank").onclick = () => showView("rank");
 $("nav-admin").onclick = () => showView("admin");
 $("nav-settings").onclick = () => showView("settings");
 /* ---- admin view (v1.12.0) ---- */
-let isAdmin = false, myUserId = null, adminUsers = [];
+let isAdmin = false, myUserId = null, adminUsers = [], myUsername = "";
 function setAdminErr(msg) { const e = $("admin-err"); if (e) e.textContent = msg || ""; }
 async function loadAdmin() {
   if (!isAdmin) return;
@@ -624,8 +624,25 @@ function syncHeaderH() {
   if (h) document.documentElement.style.setProperty("--header-h", h.offsetHeight + "px");
 }
 window.addEventListener("resize", syncHeaderH);
+function estimatesCacheKey() { return "fv-estimates-" + myUsername; }
+function renderCachedEstimates() {
+  // Instant first paint: render the last successful payload from
+  // localStorage while the fresh /api/estimates request is in flight.
+  try {
+    const raw = localStorage.getItem(estimatesCacheKey());
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!data || !Array.isArray(data.funds)) return;
+    window.estimateData = data;
+    addedCodes = new Set(data.funds.map(f => f.fund_code));
+    $("empty-tip").style.display = data.funds.length ? "none" : "";
+    if (!data.funds.length) $("empty-tip").textContent = "列表为空，去「设置」里搜索添加基金。";
+    renderFunds(data);
+    renderSettings(data);
+  } catch { /* corrupted cache -> ignore, fresh load will replace it */ }
+}
 function showDash(user, admin, userId) {
-  isAdmin = !!admin; myUserId = userId ?? null;
+  isAdmin = !!admin; myUserId = userId ?? null; myUsername = user || "";
   $("nav-admin").style.display = isAdmin ? "" : "none";
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
@@ -633,6 +650,7 @@ function showDash(user, admin, userId) {
   prevSnapshot = null;
   showView("main");
   updateMarketStatus();
+  renderCachedEstimates();
   loadEstimates();
   startAutoRefresh();
 }
@@ -651,7 +669,7 @@ $("auth-btn").onclick = async () => {
     const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id);
   } catch (e) { $("auth-err").textContent = e.message; }
 };
-$("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); $("userbox").textContent = ""; showAuth(); };
+$("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); try { localStorage.removeItem(estimatesCacheKey()); } catch {} myUsername = ""; $("userbox").textContent = ""; showAuth(); };
 let addedCodes = new Set(), lastSearchQ = "";
 let addCatSel = "", addCatSig = "";
 $("add-cat").onchange = () => { addCatSel = $("add-cat").value; };
@@ -1004,6 +1022,8 @@ async function loadEstimates() {
     const funds = data.funds || [];
     addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
+    if (!funds.length) $("empty-tip").textContent = "列表为空，去「设置」里搜索添加基金。";
+    try { localStorage.setItem(estimatesCacheKey(), JSON.stringify(data)); } catch { /* quota/private mode */ }
     renderFunds(data);
     renderSettings(data);
     setErr("");
