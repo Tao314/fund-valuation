@@ -110,6 +110,20 @@ def init_db():
     ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "refresh_seconds" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 60")
+    # Migration: users.is_admin (added 2026-11-20, v1.12.0)
+    if "is_admin" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+    # Login log table (added 2026-11-20, v1.12.0)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS login_log("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, "
+        "user_id INTEGER, success INTEGER NOT NULL, ip TEXT, "
+        "user_agent TEXT, created_at TEXT NOT NULL)"
+    )
+    # Promote the configured admin account (idempotent; no-op until it registers)
+    admin_name = os.environ.get("ADMIN_USERNAME", "allen314").strip()
+    if admin_name:
+        conn.execute("UPDATE users SET is_admin=1 WHERE username=?", (admin_name,))
     # Migration: nav_cache prev-day NAV columns (added 2026-11-20)
     ncols = [r[1] for r in conn.execute("PRAGMA table_info(nav_cache)").fetchall()]
     for col, ddl in (("prev_nav_date", "TEXT"), ("prev_dwjz", "REAL"), ("prev_jzzzl", "REAL")):
@@ -178,6 +192,30 @@ def current_user_id(session: Optional[str]) -> int:
     return row["user_id"]
 
 
+def require_admin(session: Optional[str]) -> int:
+    uid = current_user_id(session)  # 401 when unauthenticated
+    with db() as conn:
+        row = conn.execute("SELECT is_admin FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["is_admin"]:
+        raise HTTPException(403, "需要管理员权限")
+    return uid
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _log_login(conn, username: str, user_id, success: bool, request: Request):
+    conn.execute(
+        "INSERT INTO login_log(username, user_id, success, ip, user_agent, created_at) VALUES(?,?,?,?,?,?)",
+        (username, user_id, 1 if success else 0, _client_ip(request),
+         request.headers.get("user-agent", "")[:200], now_iso()),
+    )
+
+
 class AuthBody(BaseModel):
     username: str
     password: str
@@ -242,15 +280,19 @@ def register(body: AuthBody):
 
 
 @app.post("/api/login")
-def login(body: AuthBody, response: Response):
+def login(body: AuthBody, response: Response, request: Request):
+    username = body.username.strip()
     with db() as conn:
-        row = conn.execute("SELECT id, password_hash FROM users WHERE username=?", (body.username.strip(),)).fetchone()
+        row = conn.execute("SELECT id, password_hash FROM users WHERE username=?", (username,)).fetchone()
         if not row or not check_password(body.password, row["password_hash"]):
+            _log_login(conn, username, row["id"] if row else None, False, request)
+            conn.commit()  # db() skips its commit when the block raises
             raise HTTPException(401, "用户名或密码错误")
         token = secrets.token_urlsafe(32)
         conn.execute("INSERT INTO sessions(token, user_id, created_at) VALUES(?,?,?)", (token, row["id"], now_iso()))
+        _log_login(conn, username, row["id"], True, request)
     response.set_cookie("session", token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", path="/")
-    return {"ok": True, "username": body.username.strip()}
+    return {"ok": True, "username": username}
 
 
 @app.post("/api/logout")
@@ -266,8 +308,8 @@ def logout(response: Response, session: Optional[str] = Cookie(default=None)):
 def me(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
-        row = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-    return {"user_id": uid, "username": row["username"]}
+        row = conn.execute("SELECT username, is_admin FROM users WHERE id=?", (uid,)).fetchone()
+    return {"user_id": uid, "username": row["username"], "is_admin": bool(row["is_admin"])}
 
 
 @app.get("/api/settings")
@@ -302,6 +344,96 @@ def change_password(body: ChangePasswordBody, session: Optional[str] = Cookie(de
         # Invalidate all other sessions, keep the current one
         conn.execute("DELETE FROM sessions WHERE user_id=? AND token<>?", (uid, session))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- admin (v1.12.0)
+class AdminPasswordBody(BaseModel):
+    password: str
+
+
+@app.get("/api/admin/users")
+def admin_list_users(session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT u.id, u.username, u.is_admin, u.created_at, "
+            "(SELECT COUNT(*) FROM user_funds WHERE user_id=u.id) AS fund_count, "
+            "(SELECT MAX(created_at) FROM login_log WHERE user_id=u.id AND success=1) AS last_login "
+            "FROM users u ORDER BY u.id"
+        ).fetchall()
+    return {"users": [
+        {"id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"]),
+         "created_at": r["created_at"], "fund_count": r["fund_count"], "last_login": r["last_login"]}
+        for r in rows
+    ]}
+
+
+@app.post("/api/admin/users")
+def admin_create_user(body: AuthBody, session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    username = body.username.strip()
+    if len(username) < 3 or len(username) > 32:
+        raise HTTPException(400, "用户名需 3-32 个字符")
+    if len(body.password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
+                (username, hash_password(body.password), now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "用户名已存在")
+        user_id = cur.lastrowid
+    return {"ok": True, "user_id": user_id, "username": username}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, session: Optional[str] = Cookie(default=None)):
+    uid = require_admin(session)
+    if user_id == uid:
+        raise HTTPException(400, "不能删除自己")
+    with db() as conn:
+        row = conn.execute("SELECT username, is_admin FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "用户不存在")
+        if row["is_admin"]:
+            raise HTTPException(400, "不能删除管理员")
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM user_funds WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM user_categories WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/password")
+def admin_reset_password(user_id: int, body: AdminPasswordBody, session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    if len(body.password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    with db() as conn:
+        row = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "用户不存在")
+        conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.password), user_id))
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    return {"ok": True}
+
+
+@app.get("/api/admin/login-logs")
+def admin_login_logs(limit: int = 200, session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    limit = max(1, min(limit, 500))
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT username, user_id, success, ip, user_agent, created_at "
+            "FROM login_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return {"logs": [
+        {"username": r["username"], "user_id": r["user_id"], "success": bool(r["success"]),
+         "ip": r["ip"], "user_agent": (r["user_agent"] or "")[:120], "created_at": r["created_at"]}
+        for r in rows
+    ]}
 
 
 # ---------------------------------------------------------------- upstream

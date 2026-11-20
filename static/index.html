@@ -112,6 +112,21 @@
   .rank-warming { text-align: center; padding: 18px 0; }
   .rank-warming .dot { animation: rank-pulse 1.2s ease-in-out infinite; }
   @keyframes rank-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  /* admin view (v1.12.0) */
+  .admin-badge { display: inline-block; background: #EBF1FF; color: #2563EB; font-size: 10px; font-weight: 600; border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+  .admin-user-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid #F0F2F5; flex-wrap: wrap; }
+  .admin-user-row:last-child { border-bottom: 0; }
+  .admin-user-row .au-main { flex: 1; min-width: 140px; }
+  .admin-user-row .au-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
+  .admin-user-row .au-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
+  .admin-user-row .au-actions { display: flex; gap: 6px; flex: none; }
+  .log-row { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-bottom: 1px solid #F0F2F5; font-size: 12px; flex-wrap: wrap; }
+  .log-row:last-child { border-bottom: 0; }
+  .log-row .lg-time { color: #98A2B3; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .log-row .lg-user { font-weight: 600; overflow-wrap: break-word; }
+  .log-row .lg-ok { color: #07845B; font-weight: 600; white-space: nowrap; }
+  .log-row .lg-fail { color: #C9362B; font-weight: 600; white-space: nowrap; }
+  .log-row .lg-ip { color: #667085; white-space: nowrap; font-variant-numeric: tabular-nums; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } }
@@ -141,6 +156,7 @@
       <div class="toolbar-row1">
         <button class="tab-btn active" id="nav-main">估值</button>
         <button class="tab-btn" id="nav-rank">排行榜</button>
+        <button class="tab-btn" id="nav-admin" style="display:none">管理</button>
         <button class="tab-btn" id="nav-settings">设置</button>
         <span style="flex:1"></span>
         <button id="refresh-btn" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
@@ -183,6 +199,24 @@
         <div id="rank-list"></div>
         <div class="err" id="rank-err"></div>
         <div class="rk-updated" id="rank-updated"></div>
+      </div>
+    </div>
+
+    <div id="view-admin" style="display:none">
+      <div class="err" id="admin-err"></div>
+      <div class="card">
+        <h3>用户管理</h3>
+        <div id="admin-user-list"></div>
+        <h4>新增用户</h4>
+        <div class="row">
+          <input id="admin-new-username" placeholder="用户名（3-32 个字符）" autocomplete="off">
+          <input id="admin-new-password" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password">
+          <button id="admin-add-user-btn">添加用户</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>登录记录</h3>
+        <div id="admin-login-logs"></div>
       </div>
     </div>
 
@@ -234,7 +268,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.11.1 · 更新于 2026-11-20 12:51</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.0 · 更新于 2026-11-20 13:20</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -375,16 +409,73 @@ function updateFundStatuses() {
 function showView(name) {
   $("view-main").style.display = name === "main" ? "" : "none";
   $("view-rank").style.display = name === "rank" ? "" : "none";
+  $("view-admin").style.display = name === "admin" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
+  $("nav-admin").className = "tab-btn" + (name === "admin" ? " active" : "");
   $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
   if (name === "rank") loadRank(); else stopRankPoll();
+  if (name === "admin") loadAdmin();
 }
 $("nav-main").onclick = () => showView("main");
 $("nav-rank").onclick = () => showView("rank");
+$("nav-admin").onclick = () => showView("admin");
 $("nav-settings").onclick = () => showView("settings");
+/* ---- admin view (v1.12.0) ---- */
+let isAdmin = false, myUserId = null, adminUsers = [];
+function setAdminErr(msg) { const e = $("admin-err"); if (e) e.textContent = msg || ""; }
+async function loadAdmin() {
+  if (!isAdmin) return;
+  setAdminErr("");
+  try {
+    const data = await api("/api/admin/users");
+    adminUsers = data.users || [];
+    $("admin-user-list").innerHTML = adminUsers.map(u => {
+      const badge = u.is_admin ? '<span class="admin-badge">管理员</span>' : "";
+      const sub = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只 · 最近登录 " + (u.last_login ? fmtLocalTime(u.last_login) : "无");
+      const del = (u.id === myUserId || u.is_admin) ? "" : `<button class="danger" onclick="adminDeleteUser(${u.id})">删除</button>`;
+      return `<div class="admin-user-row"><div class="au-main"><div class="au-name">${esc(u.username)}${badge}</div><div class="au-sub">${esc(sub)}</div></div>`
+        + `<div class="au-actions"><button class="mini" onclick="adminResetPassword(${u.id})">改密码</button>${del}</div></div>`;
+    }).join("") || '<div class="muted">暂无用户</div>';
+  } catch (e) { setAdminErr(e.message); }
+  try {
+    const data = await api("/api/admin/login-logs?limit=200");
+    $("admin-login-logs").innerHTML = (data.logs || []).map(l =>
+      `<div class="log-row"><span class="lg-time">${esc(fmtLocalTime(l.created_at))}</span><span class="lg-user">${esc(l.username)}</span>`
+      + (l.success ? '<span class="lg-ok">成功</span>' : '<span class="lg-fail">失败</span>')
+      + `<span class="lg-ip">${esc(l.ip || "")}</span></div>`
+    ).join("") || '<div class="muted">暂无记录</div>';
+  } catch (e) { setAdminErr(e.message); }
+}
+async function adminResetPassword(id) {
+  const u = adminUsers.find(x => x.id === id); if (!u) return;
+  const pw = prompt("为用户「" + u.username + "」设置新密码（至少 6 位）");
+  if (pw === null) return;
+  if (pw.length < 6) { setAdminErr("密码至少 6 位"); return; }
+  try {
+    await api("/api/admin/users/" + id + "/password", { method: "POST", body: JSON.stringify({ password: pw }) });
+    setAdminErr(""); alert("已重置「" + u.username + "」的密码，该用户需重新登录。");
+  } catch (e) { setAdminErr(e.message); }
+}
+async function adminDeleteUser(id) {
+  const u = adminUsers.find(x => x.id === id); if (!u) return;
+  if (!confirm("删除用户「" + u.username + "」？其自选基金与分类会一并删除。")) return;
+  try {
+    await api("/api/admin/users/" + id, { method: "DELETE" });
+    await loadAdmin();
+  } catch (e) { setAdminErr(e.message); }
+}
+$("admin-add-user-btn").onclick = async () => {
+  const username = $("admin-new-username").value.trim();
+  const password = $("admin-new-password").value;
+  try {
+    await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password }) });
+    $("admin-new-username").value = ""; $("admin-new-password").value = "";
+    await loadAdmin();
+  } catch (e) { setAdminErr(e.message); }
+};
 /* ---- ranking view (v1.11.0) ---- */
 let rankBoard = "returns", rankPeriod = "1y";
 const rankMem = {};  // in-memory cache per board+period for this session
@@ -482,7 +573,9 @@ function syncHeaderH() {
   if (h) document.documentElement.style.setProperty("--header-h", h.offsetHeight + "px");
 }
 window.addEventListener("resize", syncHeaderH);
-function showDash(user) {
+function showDash(user, admin, userId) {
+  isAdmin = !!admin; myUserId = userId ?? null;
+  $("nav-admin").style.display = isAdmin ? "" : "none";
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
   syncHeaderH();
@@ -504,7 +597,7 @@ $("auth-btn").onclick = async () => {
     const body = JSON.stringify({ username: $("username").value.trim(), password: $("password").value });
     if (mode === "register") await api("/api/register", { method: "POST", body });
     await api("/api/login", { method: "POST", body });
-    const me = await api("/api/me"); showDash(me.username);
+    const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id);
   } catch (e) { $("auth-err").textContent = e.message; }
 };
 $("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); $("userbox").textContent = ""; showAuth(); };
@@ -830,7 +923,7 @@ async function loadEstimates() {
 }
 $("refresh-btn").onclick = loadEstimates;
 syncHeaderH();
-(async () => { try { const me = await api("/api/me"); showDash(me.username); } catch { showAuth(); } })();
+(async () => { try { const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id); } catch { showAuth(); } })();
 </script>
 </body>
 </html>
