@@ -257,6 +257,11 @@
           <input id="search-q" placeholder="搜索基金代码或名称，如 005827">
           <button id="search-btn">搜索</button>
         </div>
+        <div class="row" style="margin-top:6px">
+          <span class="sub">分类</span>
+          <select id="add-cat" class="cat"><option value="">未分类</option></select>
+          <span class="muted">新添加的基金直接进入所选分类</span>
+        </div>
         <div class="search-results" id="results"></div>
         <div id="settings-list" style="margin-top:10px"></div>
         <div class="muted" id="settings-empty-tip">暂无自选基金，先搜索添加。</div>
@@ -275,7 +280,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.2 · 更新于 2026-11-20 14:10</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.12.3 · 更新于 2026-11-20 14:13</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -620,6 +625,18 @@ $("auth-btn").onclick = async () => {
 };
 $("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); $("userbox").textContent = ""; showAuth(); };
 let addedCodes = new Set(), lastSearchQ = "";
+let addCatSel = "", addCatSig = "";
+$("add-cat").onchange = () => { addCatSel = $("add-cat").value; };
+function syncAddCat(cats) {
+  // Rebuild options only when the category list changed (auto-refresh must not
+  // disturb an open dropdown); fall back to 未分类 if the selection was deleted.
+  const sig = cats.join("\u0001");
+  if (sig === addCatSig) return;
+  addCatSig = sig;
+  if (addCatSel && !cats.includes(addCatSel)) addCatSel = "";
+  $("add-cat").innerHTML = '<option value="">未分类</option>' +
+    cats.map(c => `<option value="${esc(c)}"${c === addCatSel ? " selected" : ""}>${esc(c)}</option>`).join("");
+}
 async function runSearch() {
   const { results } = await api("/api/search?q=" + encodeURIComponent(lastSearchQ));
   $("results").innerHTML = results.map(r => addedCodes.has(r.code)
@@ -633,7 +650,7 @@ $("search-btn").onclick = async () => {
 async function addFund(code, btn) {
   try {
     if (btn) { btn.disabled = true; btn.textContent = "添加中…"; }
-    await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code }) });
+    await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code, category: addCatSel }) });
     await loadEstimates();
     if (!addedCodes.has(code)) { await new Promise(r => setTimeout(r, 1500)); await loadEstimates(); }
     if (lastSearchQ) await runSearch();
@@ -795,6 +812,7 @@ function renderFunds(data) {
 }
 function renderSettings(data) {
   const cats = buildGroups(data);
+  syncAddCat(cats);
   const funds = data.funds || [];
   // refresh-seconds input: don't clobber while user is editing it
   const inp = $("refresh-seconds");

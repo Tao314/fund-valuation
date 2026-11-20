@@ -223,6 +223,7 @@ class AuthBody(BaseModel):
 
 class AddFundBody(BaseModel):
     fund_code: str
+    category: str = ""
 
 
 class ReorderBody(BaseModel):
@@ -764,6 +765,11 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     code = body.fund_code.strip()
     if not FUND_CODE_RE.fullmatch(code):
         raise HTTPException(400, "基金代码需为 6 位数字")
+    # Same semantics as set_category: strip, <=20 chars, "" = uncategorized,
+    # named categories are auto-created if missing.
+    category = (body.category or "").strip()
+    if len(category) > 20:
+        raise HTTPException(400, "分类名最多 20 个字符")
     # Resolve fund name via search API (also validates the code exists)
     resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={code}")
     name = next((d["NAME"] for d in resp.json().get("Datas", []) if d.get("CODE") == code and _is_fund_entry(d)), None)
@@ -772,13 +778,19 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     with db() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO user_funds(user_id, fund_code, fund_name, sort_order, created_at) "
-                "VALUES(?,?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_funds WHERE user_id=?),?)",
-                (uid, code, name, uid, now_iso()),
+                "INSERT INTO user_funds(user_id, fund_code, fund_name, sort_order, category, created_at) "
+                "VALUES(?,?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_funds WHERE user_id=? AND category=?),?,?)",
+                (uid, code, name, uid, category, category, now_iso()),
             )
+            if category:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_categories(user_id, name, sort_order) VALUES(?,?,"
+                    "(SELECT COALESCE(MAX(sort_order),-1)+1 FROM user_categories WHERE user_id=?))",
+                    (uid, category, uid),
+                )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该基金已在列表中")
-    return {"ok": True, "id": cur.lastrowid, "fund_code": code, "fund_name": name}
+    return {"ok": True, "id": cur.lastrowid, "fund_code": code, "fund_name": name, "category": category}
 
 
 @app.delete("/api/watchlist/{item_id}")
