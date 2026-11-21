@@ -80,6 +80,7 @@
   .fund-card .fc-row-today .fc-val b { font-size: 16px; font-weight: 700; }
   .fund-card .fc-row-diff .fc-diff { font-size: 12px; font-weight: 500; color: #344054; }
   .fund-card .fc-status { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 6px; white-space: nowrap; }
+  .fund-card .fc-code { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 6px; white-space: nowrap; }
   .fund-card .fc-state { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-pub { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-diff { font-size: 11px; color: #98A2B3; }
@@ -304,7 +305,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.16.2 · 更新于 2026-11-21 19:19</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.16.3 · 更新于 2026-11-21 19:42</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1054,10 +1055,10 @@ function renderFunds(data) {
         ${extRow(f, false)}`;
       html += `<div class="fund-card${ch ? " changed" : ""}">
       <div class="fc-head">
-        <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
+        <div class="fc-name">${esc(f.fund_name)}<span class="fc-code">${f.fund_code}</span><span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         ${published ? "" : `<div class="fc-chg">${fmtPct(big)}</div>`}
       </div>
-      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${f.sector ? ` · 板块 ${esc(f.sector.name)} ${f.sector.share_pct}%${f.sector.change_pct != null ? " " + fmtPct(f.sector.change_pct) : ""}` : ""}${ov != null ? ` · ${ov}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}覆盖 ${f.coverage_pct}%${f.sector ? ` · 板块 ${esc(f.sector.name)} ${f.sector.share_pct}%${f.sector.change_pct != null ? " " + fmtPct(f.sector.change_pct) : ""}` : ""}${ov != null ? ` · ${ov}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       ${sparklineHtml(f)}
       </div>`;
