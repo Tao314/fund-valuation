@@ -125,6 +125,10 @@ def init_db():
             name TEXT,
             secid TEXT,
             fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS stock_industry(
+            code TEXT PRIMARY KEY,
+            industry TEXT,
+            fetched_at REAL NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -631,6 +635,107 @@ def to_sina_symbol(code: str) -> Optional[str]:
         return "hk" + code
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]*", code):
         return "gb_" + code.lower()  # US stocks via Sina gb_ symbols (verified 2026-11-19)
+    return None
+
+
+INDUSTRY_TTL = 30 * 86400        # seconds, DB cache for a resolved industry
+INDUSTRY_FAIL_TTL = 86400        # seconds, retry delay after a failed lookup
+INDUSTRY_REF = "https://emweb.securities.eastmoney.com/"
+
+# Manual sector table for overseas holdings (F10 has no US/HK industry
+# lookup). Keys: US tickers (uppercase) and HK 5-digit codes. Extend as
+# new names show up in watchlists; unknown codes simply get no sector.
+MANUAL_SECTOR = {
+    # US semiconductors / hardware
+    "NVDA": "半导体", "AMD": "半导体", "INTC": "半导体", "MU": "半导体",
+    "TSM": "半导体", "AVGO": "半导体", "MRVL": "半导体", "QCOM": "半导体",
+    "TXN": "半导体", "ADI": "半导体", "ONTO": "半导体", "SKHY": "半导体",
+    "ASML": "半导体", "STX": "半导体", "WDC": "半导体", "AMAT": "半导体",
+    "LRCX": "半导体", "KLAC": "半导体",
+    "LITE": "光通信", "COHR": "光通信",
+    "AAPL": "消费电子",
+    "MSFT": "软件",
+    "GOOGL": "互联网", "GOOG": "互联网", "META": "互联网",
+    "AMZN": "互联网", "NFLX": "互联网",
+    "TSLA": "汽车",
+    "LLY": "医药", "UNH": "医药", "JNJ": "医药",
+    "JPM": "金融", "V": "金融", "MA": "金融",
+    "XOM": "能源", "CVX": "能源",
+    # HK
+    "00700": "互联网", "09988": "互联网", "03690": "互联网", "09999": "互联网",
+    "01810": "消费电子",
+    "09868": "汽车", "02015": "汽车", "01211": "汽车",
+    "02318": "金融", "01398": "金融", "00939": "金融", "00388": "金融",
+    "00941": "通信",
+    "01876": "消费", "02020": "消费", "09992": "消费",
+    "02476": "半导体",
+}
+
+
+async def fetch_industry(code: str) -> Optional[str]:
+    """Sector/industry (shortened display name) for a holding code.
+    Overseas codes (US tickers, HK 5-digit) resolve via MANUAL_SECTOR.
+    A-share 6-digit codes use Eastmoney F10 CompanySurvey CSRC industry,
+    DB-cached 30 days (failures cached 1 day). Returns None when unknown.
+    Verified 2026-11-21: SH600519 -> 制造业-酒、饮料和精制茶制造业."""
+    code = (code or "").strip()
+    manual = MANUAL_SECTOR.get(code.upper()) or MANUAL_SECTOR.get(code)
+    if manual:
+        return manual
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT industry, fetched_at FROM stock_industry WHERE code=?", (code,)
+        ).fetchone()
+    if row:
+        age = time.time() - row["fetched_at"]
+        if row["industry"] and age < INDUSTRY_TTL:
+            return row["industry"]
+        if not row["industry"] and age < INDUSTRY_FAIL_TTL:
+            return None
+    if code.startswith("92") or code[0] in "48":
+        prefix = "BJ"
+    elif code[0] in "69":
+        prefix = "SH"
+    else:
+        prefix = "SZ"
+    industry = None
+    # F10 endpoint is flaky under load (~50% connection-closed observed
+    # 2026-11-21): retry a few times before giving up.
+    for attempt in range(3):
+        try:
+            resp = await upstream_get(
+                f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code={prefix}{code}",
+                referer=INDUSTRY_REF, timeout=10)
+            jbzl = resp.json().get("jbzl")
+            if isinstance(jbzl, list):
+                jbzl = jbzl[0] if jbzl else None
+            raw = (jbzl or {}).get("INDUSTRYCSRC1") or ""
+            raw = raw.strip()
+            if raw:
+                industry = raw.split("-", 1)[1].strip() if "-" in raw else raw
+            break
+        except Exception:
+            industry = None
+            if attempt < 2:
+                await asyncio.sleep(0.5)
+    if industry:
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO stock_industry(code, industry, fetched_at) VALUES(?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET industry=excluded.industry, fetched_at=excluded.fetched_at",
+                (code, industry, time.time()))
+        return industry
+    # Failure: keep a stale resolved industry if we have one; otherwise
+    # cache the failure so we don't hammer the endpoint.
+    if row and row["industry"]:
+        return row["industry"]
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO stock_industry(code, industry, fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(code) DO UPDATE SET industry=excluded.industry, fetched_at=excluded.fetched_at",
+            (code, "", time.time()))
     return None
 
 
@@ -1589,6 +1694,14 @@ async def _compute_estimates(uid):
     all_symbols = [s for (_, _, _, syms) in per_fund for s in syms if s]
     quotes = await fetch_quotes(all_symbols)
     q_stale = quotes_stale()
+    # Industries/sectors for the union of holding codes (A-share via F10,
+    # DB-cached 30d; overseas via manual table; failures yield no sector).
+    ind_codes = sorted({h["code"] for (_, _, hold, _) in per_fund
+                        for h in hold["holdings"] if h["code"]})
+    ind_results = await asyncio.gather(
+        *[fetch_industry(c) for c in ind_codes], return_exceptions=True)
+    industries = {c: (v if isinstance(v, str) else None)
+                  for c, v in zip(ind_codes, ind_results)}
     out = []
     for r, nav, hold, syms in per_fund:
         est_pct, est_pct_ext, coverage, quote_time, skipped = 0.0, 0.0, 0.0, None, []
@@ -1637,6 +1750,32 @@ async def _compute_estimates(uid):
                                "change_pct": round(chg, 2), "change_pct_ext": None}]
                     skipped = []
                     quote_time = datetime.fromtimestamp(ts_last, CN_TZ).strftime("%Y-%m-%d %H:%M")
+        # Main sector: group top-10 holdings by industry/sector, take the
+        # largest summed weight; sector change = weighted change of that
+        # sector's own holdings (same quotes as the estimate). Computed
+        # from the raw holdings so feeder funds (zero weights) get null.
+        sector = None
+        sec_w: dict = {}
+        sec_num: dict = {}
+        sec_den: dict = {}
+        for h, sym in zip(hold["holdings"], syms):
+            ind = industries.get(h["code"])
+            if not ind or not h["weight"]:
+                continue
+            sec_w[ind] = sec_w.get(ind, 0.0) + h["weight"]
+            q = quotes.get(sym) if sym else None
+            if q:
+                sec_num[ind] = sec_num.get(ind, 0.0) + h["weight"] * q["change_pct"]
+                sec_den[ind] = sec_den.get(ind, 0.0) + h["weight"]
+        raw_coverage = sum(h["weight"] for h in hold["holdings"])
+        if sec_w and raw_coverage > 0:
+            main_ind = max(sec_w, key=sec_w.get)
+            sector = {
+                "name": main_ind,
+                "share_pct": round(sec_w[main_ind] / raw_coverage * 100, 1),
+                "change_pct": round(sec_num[main_ind] / sec_den[main_ind], 2)
+                if sec_den.get(main_ind) else None,
+            }
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
         # Ext estimate only when the fund holds US stocks with valid ext data
         # (change_pct_ext is None during US regular hours -> null then too).
@@ -1654,6 +1793,7 @@ async def _compute_estimates(uid):
             "report_label": hold["report_label"], "report_date": hold["report_date"],
             "quote_time": quote_time, "stale": nav["stale"] or hold["stale"] or q_stale,
             "skipped_holdings": skipped, "holdings": detail,
+            "sector": sector,
         })
     return {"funds": out, "categories": cats, "refresh_seconds": refresh_seconds, "disclaimer": "自算估值，仅供参考，以基金公司公布净值为准"}
 

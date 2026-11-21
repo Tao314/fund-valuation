@@ -304,7 +304,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.15.8 · 更新于 2026-11-21 00:25</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.16.0 · 更新于 2026-11-21 19:08</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1057,7 +1057,7 @@ function renderFunds(data) {
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-status" data-code="${f.fund_code}">${st.label}</span></div>
         ${published ? "" : `<div class="fc-chg">${fmtPct(big)}</div>`}
       </div>
-      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · ${ov}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
+      <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${f.fund_code} · 覆盖 ${f.coverage_pct}%${ov != null ? ` · ${ov}` : ""}${f.sector ? ` · 板块 ${esc(f.sector.name)} ${f.sector.share_pct}%${f.sector.change_pct != null ? " " + fmtPct(f.sector.change_pct) : ""}` : ""} · ${esc(f.report_label ?? "-")} ${f.report_date ?? ""}${f.stale ? " · 数据可能过期" : ""}</div>
       ${rows}
       ${sparklineHtml(f)}
       </div>`;
