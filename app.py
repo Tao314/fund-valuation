@@ -688,6 +688,84 @@ MANUAL_SECTOR = {
     "02476": "半导体",
 }
 
+# Short display names for CSRC level-2 industries (F10 INDUSTRYCSRC1 part
+# after "-"). Full names are too long for the fund-card meta line and push
+# the sector change % off-screen (user screenshot 2026-11-21). Grouping
+# stays by full name; only the displayed sector name is shortened.
+INDUSTRY_SHORT = {
+    "计算机、通信和其他电子设备制造业": "电子设备",
+    "电气机械和器材制造业": "电气机械",
+    "专用设备制造业": "专用设备",
+    "通用设备制造业": "通用设备",
+    "汽车制造业": "汽车",
+    "医药制造业": "医药",
+    "化学原料和化学制品制造业": "化工",
+    "化学纤维制造业": "化纤",
+    "非金属矿物制品业": "非金属矿物",
+    "黑色金属冶炼和压延加工业": "钢铁",
+    "有色金属冶炼和压延加工业": "有色金属",
+    "金属制品业": "金属制品",
+    "酒、饮料和精制茶制造业": "酒饮料",
+    "农副食品加工业": "农副食品",
+    "食品制造业": "食品",
+    "纺织服装、服饰业": "纺织服装",
+    "纺织业": "纺织",
+    "橡胶和塑料制品业": "橡塑",
+    "软件和信息技术服务业": "软件信息",
+    "互联网和相关服务": "互联网",
+    "货币金融服务": "银行",
+    "资本市场服务": "证券",
+    "保险业": "保险",
+    "房地产业": "房地产",
+    "土木工程建筑业": "建筑",
+    "电力、热力生产和供应业": "电力",
+    "农、林、牧、渔业": "农林牧渔",
+    "石油和天然气开采业": "油气开采",
+    "煤炭开采和洗选业": "煤炭",
+    "有色金属矿采选业": "有色采选",
+    "黑色金属矿采选业": "黑色采选",
+    "仪器仪表制造业": "仪器仪表",
+    "造纸和纸制品业": "造纸",
+    "印刷和记录媒介复制业": "印刷",
+    "家具制造业": "家具",
+    "皮革、毛皮、羽毛及其制品和制鞋业": "皮革制鞋",
+    "木材加工和木、竹、藤、棕、草制品业": "木材加工",
+    "文教、工美、体育和娱乐用品制造业": "文体用品",
+    "废弃资源综合利用业": "环保回收",
+    "其他制造业": "其他制造",
+    "铁路、船舶、航空航天和其他运输设备制造业": "运输设备",
+    "水上运输业": "水运",
+    "航空运输业": "航空",
+    "道路运输业": "公路运输",
+    "仓储业": "仓储",
+    "批发业": "批发",
+    "零售业": "零售",
+    "住宿业": "住宿",
+    "餐饮业": "餐饮",
+    "电信、广播电视和卫星传输服务": "通信",
+    "广播、电视、电影和影视录音制作业": "传媒影视",
+    "新闻和出版业": "出版",
+    "研究和试验发展": "研发",
+    "专业技术服务业": "专业服务",
+    "商务服务业": "商务服务",
+    "公共设施管理业": "公共设施",
+    "生态保护和环境治理业": "环保",
+    "卫生": "卫生",
+    "教育": "教育",
+}
+
+
+def _short_industry(name: str) -> str:
+    """Short display name for a sector. Manual-table names (半导体 etc.)
+    are already short and pass through; unmapped CSRC names longer than
+    8 chars drop a trailing 制造业 (keeping at least 4 chars)."""
+    short = INDUSTRY_SHORT.get(name)
+    if short:
+        return short
+    if len(name) > 8 and name.endswith("制造业") and len(name) - 3 >= 4:
+        return name[:-3]
+    return name
+
 
 async def fetch_industry(code: str) -> Optional[str]:
     """Sector/industry (shortened display name) for a holding code.
@@ -1791,7 +1869,7 @@ async def _compute_estimates(uid):
         if sec_w and raw_coverage > 0:
             main_ind = max(sec_w, key=sec_w.get)
             sector = {
-                "name": main_ind,
+                "name": _short_industry(main_ind),
                 "share_pct": round(sec_w[main_ind] / raw_coverage * 100, 1),
                 "change_pct": round(sec_num[main_ind] / sec_den[main_ind], 2)
                 if sec_den.get(main_ind) else None,
