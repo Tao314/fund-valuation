@@ -639,8 +639,25 @@ def to_sina_symbol(code: str) -> Optional[str]:
 
 
 INDUSTRY_TTL = 30 * 86400        # seconds, DB cache for a resolved industry
-INDUSTRY_FAIL_TTL = 86400        # seconds, retry delay after a failed lookup
+INDUSTRY_FAIL_TTL = 600          # seconds, retry delay after a failed lookup
 INDUSTRY_REF = "https://emweb.securities.eastmoney.com/"
+
+# F10 throttles/closes connections under parallel bursts (observed
+# 2026-11-21: live server sectors all null after a burst failed and got
+# cached). Serialize to 2 in flight with ~0.3s spacing between request
+# starts; retries back off outside the semaphore.
+_f10_sem = asyncio.Semaphore(2)
+_f10_lock = asyncio.Lock()
+_f10_last_start = 0.0
+
+
+async def _f10_throttle() -> None:
+    global _f10_last_start
+    async with _f10_lock:
+        wait = _f10_last_start + 0.3 - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _f10_last_start = time.monotonic()
 
 # Manual sector table for overseas holdings (F10 has no US/HK industry
 # lookup). Keys: US tickers (uppercase) and HK 5-digit codes. Extend as
@@ -676,7 +693,7 @@ async def fetch_industry(code: str) -> Optional[str]:
     """Sector/industry (shortened display name) for a holding code.
     Overseas codes (US tickers, HK 5-digit) resolve via MANUAL_SECTOR.
     A-share 6-digit codes use Eastmoney F10 CompanySurvey CSRC industry,
-    DB-cached 30 days (failures cached 1 day). Returns None when unknown.
+    DB-cached 30 days (failures cached 10 minutes). Returns None when unknown.
     Verified 2026-11-21: SH600519 -> 制造业-酒、饮料和精制茶制造业."""
     code = (code or "").strip()
     manual = MANUAL_SECTOR.get(code.upper()) or MANUAL_SECTOR.get(code)
@@ -702,12 +719,15 @@ async def fetch_industry(code: str) -> Optional[str]:
         prefix = "SZ"
     industry = None
     # F10 endpoint is flaky under load (~50% connection-closed observed
-    # 2026-11-21): retry a few times before giving up.
-    for attempt in range(3):
+    # 2026-11-21, worse in parallel bursts): serialize via _f10_sem with
+    # request spacing, retry up to 5 times with backoff before giving up.
+    for attempt, backoff in enumerate((0.5, 1, 2, 3, 0)):
         try:
-            resp = await upstream_get(
-                f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code={prefix}{code}",
-                referer=INDUSTRY_REF, timeout=10)
+            async with _f10_sem:
+                await _f10_throttle()
+                resp = await upstream_get(
+                    f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code={prefix}{code}",
+                    referer=INDUSTRY_REF, timeout=10)
             jbzl = resp.json().get("jbzl")
             if isinstance(jbzl, list):
                 jbzl = jbzl[0] if jbzl else None
@@ -718,8 +738,8 @@ async def fetch_industry(code: str) -> Optional[str]:
             break
         except Exception:
             industry = None
-            if attempt < 2:
-                await asyncio.sleep(0.5)
+            if backoff:
+                await asyncio.sleep(backoff)
     if industry:
         with db() as conn:
             conn.execute(
