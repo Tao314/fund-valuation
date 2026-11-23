@@ -44,7 +44,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.21.4"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.21.5"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
