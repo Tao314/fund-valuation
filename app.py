@@ -9,6 +9,7 @@ All upstream calls go through the backend with global caches.
 import asyncio
 import gzip
 import hashlib
+import ipaddress
 import hmac
 import json
 import logging
@@ -42,7 +43,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.20.2"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.21.0"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -197,6 +198,19 @@ def init_db():
     if "email" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    # Migration: online tracking (added 2026-11-23, v1.21.0) — session
+    # heartbeat timestamp + accumulated online seconds per user, plus an
+    # IP geolocation cache (province/city via ip-api.com, fetched once).
+    if "total_online_seconds" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN total_online_seconds INTEGER NOT NULL DEFAULT 0")
+    scols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+    if "last_seen_at" not in scols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_seen_at TEXT")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ip_geo("
+        "ip TEXT PRIMARY KEY, country TEXT, region TEXT, city TEXT, "
+        "fetched_at REAL NOT NULL)"
+    )
     # Email verification codes (v1.20.0): one active code per (email,
     # purpose); codes stored hashed. email_code_log backs the daily cap.
     conn.execute(
@@ -283,13 +297,43 @@ def check_password(password: str, stored: str) -> bool:
         return False
 
 
+def _parse_iso(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+
+def _heartbeat(conn, token: str, user_id: int, last_seen_at):
+    """Session heartbeat (v1.21.0): at most one write per minute per
+    session; accumulate the elapsed gap into users.total_online_seconds
+    when it looks like continuous activity (<=600s)."""
+    now = datetime.now(timezone.utc)
+    last = _parse_iso(last_seen_at)
+    if last is not None:
+        delta = (now - last).total_seconds()
+        if delta < 60:
+            return
+        if 0 < delta <= 600:
+            conn.execute(
+                "UPDATE users SET total_online_seconds = total_online_seconds + ? WHERE id=?",
+                (int(delta), user_id),
+            )
+    conn.execute("UPDATE sessions SET last_seen_at=? WHERE token=?", (now.isoformat(), token))
+
+
 def current_user_id(session: Optional[str]) -> int:
     if not session:
         raise HTTPException(401, "未登录")
     with db() as conn:
-        row = conn.execute("SELECT user_id FROM sessions WHERE token=?", (session,)).fetchone()
-    if not row:
-        raise HTTPException(401, "会话已失效，请重新登录")
+        row = conn.execute(
+            "SELECT user_id, last_seen_at FROM sessions WHERE token=?", (session,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(401, "会话已失效，请重新登录")
+        _heartbeat(conn, session, row["user_id"], row["last_seen_at"])
     return row["user_id"]
 
 
@@ -679,6 +723,70 @@ def change_password(body: ChangePasswordBody, session: Optional[str] = Cookie(de
     return {"ok": True}
 
 
+# --- IP geolocation (v1.21.0): province/city via ip-api.com, cached
+# forever in ip_geo; failures retried after 7 days. ---
+IP_GEO_RETRY_SECONDS = 7 * 86400
+ONLINE_WINDOW_SECONDS = 300
+
+
+def _is_public_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
+def _fetch_ip_geo(ip: str):
+    """One ip-api.com lookup (sync, 2s timeout). Returns (country, region,
+    city) or None on failure."""
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            resp = client.get(
+                f"http://ip-api.com/json/{ip}",
+                params={"lang": "zh-CN", "fields": "status,country,regionName,city"},
+            )
+            data = resp.json()
+        if data.get("status") != "success":
+            return None
+        return (data.get("country") or "", data.get("regionName") or "",
+                data.get("city") or "")
+    except Exception:
+        return None
+
+
+def _ip_region(conn, ip: Optional[str]) -> str:
+    """Human-readable region for an IP: '广东省 深圳市', country prefixed
+    when not 中国； private/invalid IPs -> '内网/未知'."""
+    if not ip or not _is_public_ip(ip):
+        return "内网/未知"
+    row = conn.execute(
+        "SELECT country, region, city, fetched_at FROM ip_geo WHERE ip=?", (ip,)
+    ).fetchone()
+    if row is None or (not row["region"] and not row["city"]
+                        and time.time() - row["fetched_at"] >= IP_GEO_RETRY_SECONDS):
+        got = _fetch_ip_geo(ip)
+        country, region, city = got if got else ("", "", "")
+        conn.execute(
+            "INSERT INTO ip_geo(ip, country, region, city, fetched_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(ip) DO UPDATE SET country=excluded.country, "
+            "region=excluded.region, city=excluded.city, fetched_at=excluded.fetched_at",
+            (ip, country, region, city, time.time()),
+        )
+        conn.commit()
+    else:
+        country, region, city = row["country"] or "", row["region"] or "", row["city"] or ""
+    parts = []
+    if country and country != "中国":
+        parts.append(country)
+    if region:
+        parts.append(region)
+    if city and city != region:
+        parts.append(city)
+    return " ".join(parts) if parts else "未知"
+
+
 # ---------------------------------------------------------------- admin (v1.12.0)
 class AdminPasswordBody(BaseModel):
     password: str
@@ -687,19 +795,38 @@ class AdminPasswordBody(BaseModel):
 @app.get("/api/admin/users")
 def admin_list_users(session: Optional[str] = Cookie(default=None)):
     require_admin(session)
+    now = datetime.now(timezone.utc)
     with db() as conn:
         rows = conn.execute(
             "SELECT u.id, u.username, u.is_admin, u.created_at, u.email, "
+            "u.total_online_seconds, "
             "(SELECT COUNT(*) FROM user_funds WHERE user_id=u.id) AS fund_count, "
-            "(SELECT MAX(created_at) FROM login_log WHERE user_id=u.id AND success=1) AS last_login "
+            "(SELECT MAX(created_at) FROM login_log WHERE user_id=u.id AND success=1) AS last_login, "
+            "(SELECT COUNT(*) FROM login_log WHERE user_id=u.id AND success=1) AS login_count, "
+            "(SELECT MAX(last_seen_at) FROM sessions WHERE user_id=u.id) AS last_seen_at, "
+            "(SELECT ip FROM login_log WHERE user_id=u.id AND success=1 ORDER BY id DESC LIMIT 1) AS last_ip_ok, "
+            "(SELECT ip FROM login_log WHERE user_id=u.id ORDER BY id DESC LIMIT 1) AS last_ip_any "
             "FROM users u ORDER BY u.id"
         ).fetchall()
-    return {"users": [
-        {"id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"]),
-         "created_at": r["created_at"], "fund_count": r["fund_count"], "last_login": r["last_login"],
-         "email": r["email"]}
-        for r in rows
-    ]}
+        users = []
+        for r in rows:
+            last_seen = _parse_iso(r["last_seen_at"])
+            online = bool(last_seen and (now - last_seen).total_seconds() <= ONLINE_WINDOW_SECONDS)
+            last_logins = [x["created_at"] for x in conn.execute(
+                "SELECT created_at FROM login_log WHERE user_id=? AND success=1 "
+                "ORDER BY id DESC LIMIT 2", (r["id"],)
+            ).fetchall()]
+            last_ip = r["last_ip_ok"] or r["last_ip_any"]
+            users.append({
+                "id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"]),
+                "created_at": r["created_at"], "fund_count": r["fund_count"],
+                "last_login": r["last_login"], "email": r["email"],
+                "online": online, "last_seen_at": r["last_seen_at"],
+                "last_ip": last_ip, "ip_region": _ip_region(conn, last_ip),
+                "total_online_seconds": r["total_online_seconds"] or 0,
+                "login_count": r["login_count"], "last_logins": last_logins,
+            })
+    return {"users": users}
 
 
 class AdminCreateUserBody(BaseModel):

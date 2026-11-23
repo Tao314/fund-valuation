@@ -153,6 +153,12 @@
   .admin-user-row .au-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
   .admin-user-row .au-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
   .admin-user-row .au-actions { display: flex; gap: 6px; flex: none; }
+  .admin-user-row.changed { box-shadow: inset 3px 0 0 #F59E0B; }
+  .au-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .au-dot.on { background: #07845B; }
+  .au-dot.off { background: #D0D5DD; }
+  .au-online { font-size: 11px; font-weight: 600; color: #07845B; }
+  .au-offline { font-size: 11px; color: #98A2B3; }
   .log-row { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-bottom: 1px solid #F0F2F5; font-size: 12px; flex-wrap: wrap; }
   .log-row:last-child { border-bottom: 0; }
   .log-row .lg-time { color: #98A2B3; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -380,7 +386,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.20.2 · 更新于 2026-11-23 14:23</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.21.0 · 更新于 2026-11-23 14:45</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -569,19 +575,56 @@ $("nav-settings").onclick = () => showView("settings");
 /* ---- admin view (v1.12.0) ---- */
 let isAdmin = false, myUserId = null, adminUsers = [], myUsername = "";
 function setAdminErr(msg) { const e = $("admin-err"); if (e) e.textContent = msg || ""; }
+function fmtOnlineDur(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  if (sec < 60) return sec + " 秒";
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60);
+  return h > 0 ? h + " 小时 " + (m % 60) + " 分" : m + " 分钟";
+}
+let adminFadeTimer = null;
 async function loadAdmin() {
   if (!isAdmin) return;
   setAdminErr("");
   try {
     const data = await api("/api/admin/users");
     adminUsers = data.users || [];
+    // Change highlight vs previous visit's snapshot (like fund cards)
+    const snapKey = "fv-admin-users-" + myUsername;
+    let prevSnap = null;
+    try { prevSnap = JSON.parse(localStorage.getItem(snapKey) || "null"); } catch (e) { prevSnap = null; }
+    const snapOf = u => ({ online: !!u.online, login_count: u.login_count || 0, last_logins: u.last_logins || [], total_online_seconds: u.total_online_seconds || 0, email: u.email || "", ip_region: u.ip_region || "" });
+    const changedIds = new Set();
+    if (prevSnap) adminUsers.forEach(u => {
+      const p = prevSnap[u.id], c = snapOf(u);
+      if (p && JSON.stringify(p) !== JSON.stringify(c)) changedIds.add(u.id);
+    });
     $("admin-user-list").innerHTML = adminUsers.map(u => {
       const badge = u.is_admin ? '<span class="admin-badge">管理员</span>' : "";
-      const sub = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只 · 最近登录 " + (u.last_login ? fmtLocalTime(u.last_login) : "无") + " · 邮箱 " + (u.email || "未绑定");
+      const ch = changedIds.has(u.id);
+      const status = u.online
+        ? '<span class="au-dot on"></span><span class="au-online">在线</span>'
+        : '<span class="au-dot off"></span><span class="au-offline">离线</span>' + (u.last_seen_at ? ' <span class="au-offline">最后活跃 ' + fmtLocalTime(u.last_seen_at) + '</span>' : "");
+      const logins = (u.last_logins || []).map(t => fmtLocalTime(t)).filter(Boolean).join(" / ");
+      const sub1 = "邮箱 " + (u.email || "—") + " · IP " + (u.last_ip || "-") + "（" + (u.ip_region || "未知") + "）";
+      const sub2 = "累计在线 " + fmtOnlineDur(u.total_online_seconds) + " · 登录 " + (u.login_count || 0) + " 次" + (logins ? " · 最近登录 " + logins : "");
+      const sub3 = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只";
       const del = (u.id === myUserId || u.is_admin) ? "" : `<button class="danger" onclick="adminDeleteUser(${u.id})">删除</button>`;
-      return `<div class="admin-user-row"><div class="au-main"><div class="au-name">${esc(u.username)}${badge}</div><div class="au-sub">${esc(sub)}</div></div>`
+      return `<div class="admin-user-row${ch ? " changed" : ""}"><div class="au-main"><div class="au-name">${esc(u.username)}${badge} ${status}</div>`
+        + `<div class="au-sub">${ch ? '<span class="badge">已更新</span>' : ""}${esc(sub1)}</div><div class="au-sub">${esc(sub2)}</div><div class="au-sub">${esc(sub3)}</div></div>`
         + `<div class="au-actions"><button class="mini" onclick="adminResetPassword(${u.id})">改密码</button>${del}</div></div>`;
     }).join("") || '<div class="muted">暂无用户</div>';
+    const newSnap = {};
+    adminUsers.forEach(u => { newSnap[u.id] = snapOf(u); });
+    try { localStorage.setItem(snapKey, JSON.stringify(newSnap)); } catch (e) {}
+    clearTimeout(adminFadeTimer);
+    if (changedIds.size) {
+      adminFadeTimer = setTimeout(() => {
+        document.querySelectorAll(".admin-user-row.changed").forEach(el => {
+          el.classList.remove("changed");
+          const b = el.querySelector(".badge"); if (b) b.remove();
+        });
+      }, 4000);
+    }
   } catch (e) { setAdminErr(e.message); }
   try {
     const data = await api("/api/admin/login-logs?limit=200");
