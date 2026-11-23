@@ -44,7 +44,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.21.6"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.22.0"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -89,7 +89,8 @@ async def lifespan(_app):
     tasks = [asyncio.create_task(_rank_warm_loop()),
              asyncio.create_task(_quote_warm_loop()),
              asyncio.create_task(_trends_warm_loop()),
-             asyncio.create_task(_backup_loop())]
+             asyncio.create_task(_backup_loop()),
+             asyncio.create_task(_beta_loop())]
     try:
         yield
     finally:
@@ -180,6 +181,20 @@ def init_db():
             fund_code TEXT PRIMARY KEY,
             stock_pct REAL,
             fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS fund_beta(
+            fund_code TEXT PRIMARY KEY,
+            alpha REAL,
+            beta REAL,
+            n INTEGER NOT NULL DEFAULT 0,
+            mae_raw REAL,
+            mae_cal REAL,
+            updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS stock_daily_cache(
+            secid TEXT NOT NULL,
+            date TEXT NOT NULL,
+            close REAL NOT NULL,
+            fetched_at REAL NOT NULL,
+            PRIMARY KEY(secid, date));
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -3006,6 +3021,20 @@ async def _compute_estimates(uid):
         # curve, and no stale warning (their empty holdings page is not
         # "stale data"). Feeder-index and bond-ETF-estimated funds excluded.
         no_stock_holdings = coverage == 0 and not feeder_applied and not bond_applied
+        # P1 β calibration: correct the holdings-based estimate with the
+        # fund's historical α/β (60d regression vs official NAV changes).
+        # Feeder/bond estimates have their own anchors and MRF funds have
+        # no holdings estimate — none of those are calibrated. The ext
+        # (pre/post-market) estimate stays raw by design.
+        beta_row = _beta_row(r["fund_code"])
+        _ensure_beta(r["fund_code"])
+        beta_applied = False
+        if not feeder_applied and not bond_applied and not no_stock_holdings and not is_mrf:
+            cal = _apply_beta(est_pct, beta_row)
+            if cal != est_pct:
+                beta_applied = True
+                est_pct = cal
+                est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
         out.append({
             "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
             "fund_type": ftype, "is_qdii": is_qdii, "is_mrf": is_mrf,
@@ -3014,6 +3043,10 @@ async def _compute_estimates(uid):
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
             "est_change_pct": round(est_pct, 2),
+            "credibility": _credibility(beta_row) if not (
+                feeder_applied or bond_applied or no_stock_holdings or is_mrf) else None,
+            "beta": round(beta_row["beta"], 3) if (
+                beta_applied and beta_row and beta_row.get("beta") is not None) else None,
             "est_nav_ext": round(est_nav_ext, 4) if est_nav_ext else None,
             "est_change_pct_ext": round(est_pct_ext, 2) if show_ext else None,
             "coverage_pct": round(coverage, 2),
@@ -3204,6 +3237,12 @@ async def _compute_series(uid):
                 chg = bq["change_pct"] if bq else _index_latest_chg(bond_tr)
                 if chg is not None:
                     est_pct = chg
+            if coverage > 0:
+                # Holdings-based estimate: same P1 β calibration as the
+                # card (feeder/bond overrides above only fire at
+                # coverage == 0), keeping curve end == card value.
+                _ensure_beta(code)
+                est_pct = _apply_beta(est_pct, _beta_row(code))
             val = round(est_pct, 2)
             if now_ts > pts[-1][0]:
                 pts.append([now_ts, val])
@@ -3457,6 +3496,273 @@ async def fetch_stock_position(code: str) -> Optional[float]:
             "fetched_at=excluded.fetched_at",
             (code, pct, time.time()))
     return pct
+
+
+# ---------------------------------------------------------------- P1 β calibration
+# Per-fund regression of official daily NAV change on the holdings-based
+# estimate (top-10 + P0 residual fill) over the last 60 NAV days:
+# actual = α + β·est. Live estimates are corrected as α + β·est_raw to
+# absorb manager trading / weight drift since the last disclosure.
+# Holdings are the CURRENT disclosed top-10 applied to the whole window
+# (same look-ahead limitation as tools/backtest.py). Bond/money/MRF and
+# feeder funds are skipped (their estimates have other anchors); a row
+# with n=0 is still stored as a negative cache. P4 credibility tiers
+# come from the stored MAE (calibrated when available, else raw).
+BETA_WINDOW = 60        # NAV days per regression
+BETA_MIN_N = 20         # minimum pairs to calibrate
+BETA_TTL = 86400        # recompute at most once a day per fund
+_kline_sem = asyncio.Semaphore(5)
+_beta_tasks: dict = {}  # fund_code -> asyncio.Task running compute_fund_beta
+_beta_fail_at: dict = {}  # fund_code -> last compute failure ts (600s backoff)
+
+
+async def fetch_nav_history(code: str, days: int = BETA_WINDOW) -> list:
+    """[(date, jzzzl)] newest first from lsjz (20 rows/page, max 6 pages)."""
+    rows = []
+    page = 1
+    while len(rows) < days and page <= 6:
+        resp = await upstream_get(
+            f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}"
+            f"&pageIndex={page}&pageSize=20",
+            referer=f"https://fund.eastmoney.com/f10/jjjz_{code}.html",
+        )
+        items = resp.json()["Data"]["LSJZList"]
+        if not items:
+            break
+        for it in items:
+            try:
+                rows.append((it["FSRQ"], float(it["JZZZL"] or 0)))
+            except (TypeError, ValueError, KeyError):
+                continue
+        page += 1
+    return rows[:days]
+
+
+async def fetch_daily_closes(secid: str) -> dict:
+    """{date: close} daily closes for one secid from the Eastmoney kline
+    API (klt=101, fqt=1), DB-cached in stock_daily_cache. A cache younger
+    than a day is served as-is; upstream failure returns whatever is
+    cached (possibly {})."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT date, close, fetched_at FROM stock_daily_cache WHERE secid=?",
+            (secid,)).fetchall()
+    cached = {r["date"]: r["close"] for r in rows}
+    if rows and time.time() - max(r["fetched_at"] for r in rows) < BETA_TTL:
+        return cached
+    beg = (datetime.now(CN_TZ) - timedelta(days=240)).strftime("%Y%m%d")
+    try:
+        async with _kline_sem:
+            resp = await upstream_get(
+                "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+                f"?secid={secid}&fields1=f1,f2,f3&fields2=f51,f52,f53"
+                f"&klt=101&fqt=1&beg={beg}&end=20500101",
+                referer=TRENDS_REF, timeout=15)
+        klines = ((resp.json().get("data") or {}).get("klines")) or []
+    except Exception:
+        return cached
+    fresh = {}
+    for row in klines:
+        f = row.split(",")
+        if len(f) >= 3:
+            try:
+                fresh[f[0]] = float(f[2])
+            except ValueError:
+                continue
+    if fresh:
+        now = time.time()
+        with db() as conn:
+            conn.executemany(
+                "INSERT INTO stock_daily_cache(secid, date, close, fetched_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(secid, date) DO UPDATE SET "
+                "close=excluded.close, fetched_at=excluded.fetched_at",
+                [(secid, d, c, now) for d, c in fresh.items()])
+        cached.update(fresh)
+    return cached
+
+
+def _daily_changes(closes: dict) -> dict:
+    """{date: change%} vs the stock's own previous trading day."""
+    dates = sorted(closes)
+    out = {}
+    for prev, cur in zip(dates, dates[1:]):
+        if closes[prev]:
+            out[cur] = (closes[cur] - closes[prev]) / closes[prev] * 100
+    return out
+
+
+async def _holding_daily_changes(h: dict, mmap) -> dict:
+    """Daily change% map for one holding via Eastmoney kline; {} when no
+    secid yields enough closes. JP/KR/TW resolve by name like trends."""
+    c = (h["code"] or "").strip().upper()
+    if _em_want_types(c, mmap):
+        secid = await resolve_em_secid(c, h.get("name"), mmap)
+        secids = [secid] if secid else []
+    else:
+        secids = _secid_candidates(c, mmap)
+    for secid in secids:
+        closes = await fetch_daily_closes(secid)
+        if len(closes) >= 30:
+            _us_prefix_cache[c] = secid.split(".", 1)[0]
+            return _daily_changes(closes)
+    return {}
+
+
+def _ols_beta(pairs: list):
+    """OLS actual = α + β·est over [(est, actual)] pairs, β clamped to
+    [0.5, 1.5] and α (recomputed with the clamped β) to [-0.5, 0.5]."""
+    n = len(pairs)
+    mx = sum(p[0] for p in pairs) / n
+    my = sum(p[1] for p in pairs) / n
+    sxx = sum((p[0] - mx) ** 2 for p in pairs)
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pairs)
+    beta = sxy / sxx if sxx > 0 else 1.0
+    beta = min(1.5, max(0.5, beta))
+    alpha = min(0.5, max(-0.5, my - beta * mx))
+    return alpha, beta
+
+
+def _beta_row(code: str) -> Optional[dict]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM fund_beta WHERE fund_code=?", (code,)).fetchone()
+    return dict(row) if row else None
+
+
+def _credibility(row: Optional[dict]) -> Optional[str]:
+    """P4 tier from stored MAE (calibrated preferred): ≤0.3 高, ≤0.6 中,
+    else 低. None when no backtest data exists for the fund."""
+    if not row:
+        return None
+    mae = row.get("mae_cal")
+    if mae is None:
+        mae = row.get("mae_raw")
+    if mae is None:
+        return None
+    return "高" if mae <= 0.3 else ("中" if mae <= 0.6 else "低")
+
+
+def _apply_beta(est_pct: float, row: Optional[dict]) -> float:
+    if row and row.get("beta") is not None and row.get("alpha") is not None:
+        return row["alpha"] + row["beta"] * est_pct
+    return est_pct
+
+
+async def compute_fund_beta(code: str) -> Optional[dict]:
+    """Fit and store α/β for one fund. Ineligible funds (MRF, bond/money
+    type, no stock holdings) store an n=0 row as a daily negative cache.
+    Returns the stored row dict, or None for ineligible funds."""
+    def _store(alpha, beta, n, mae_raw, mae_cal):
+        row = {"fund_code": code, "alpha": alpha, "beta": beta, "n": n,
+               "mae_raw": mae_raw, "mae_cal": mae_cal, "updated_at": time.time()}
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO fund_beta(fund_code, alpha, beta, n, mae_raw, mae_cal, updated_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(fund_code) DO UPDATE SET "
+                "alpha=excluded.alpha, beta=excluded.beta, n=excluded.n, "
+                "mae_raw=excluded.mae_raw, mae_cal=excluded.mae_cal, "
+                "updated_at=excluded.updated_at",
+                (code, alpha, beta, n, mae_raw, mae_cal, row["updated_at"]))
+        return row
+
+    if _is_mrf_code(code):
+        _store(None, None, 0, None, None)
+        return None
+    ftype = await fetch_fund_type(code) or ""
+    if "债券" in ftype or "货币" in ftype:
+        _store(None, None, 0, None, None)
+        return None
+    hold = await fetch_holdings(code)
+    holdings = hold["holdings"]
+    coverage = sum(h["weight"] for h in holdings)
+    if coverage <= 0:
+        _store(None, None, 0, None, None)
+        return None
+    mmap = await fetch_stock_market_map(code)
+    try:
+        stock_position = await fetch_stock_position(code)
+    except Exception:
+        stock_position = None
+    residual = _residual_pct(coverage, stock_position)
+    nav_rows = await fetch_nav_history(code, BETA_WINDOW)
+    changes = {}
+    for h in holdings:
+        changes[h["code"]] = await _holding_daily_changes(h, mmap)
+    pairs = []
+    for date, official in nav_rows:
+        num, quoted_w = 0.0, 0.0
+        for h in holdings:
+            chg = changes.get(h["code"], {}).get(date)
+            if chg is not None:
+                num += h["weight"] * chg
+                quoted_w += h["weight"]
+        if quoted_w < 0.5 * coverage:
+            continue
+        est = num / 100 + (residual * (num / quoted_w) / 100 if quoted_w else 0.0)
+        pairs.append((est, official))
+    n = len(pairs)
+    if n == 0:
+        _store(None, None, 0, None, None)
+        return None
+    mae_raw = sum(abs(e - o) for e, o in pairs) / n
+    if n < BETA_MIN_N:
+        return _store(None, None, n, mae_raw, None)
+    alpha, beta = _ols_beta(pairs)
+    mae_cal = sum(abs(alpha + beta * e - o) for e, o in pairs) / n
+    return _store(alpha, beta, n, mae_raw, mae_cal)
+
+
+async def _compute_beta_bg(code: str):
+    try:
+        await compute_fund_beta(code)
+        _beta_fail_at.pop(code, None)
+    except Exception as e:
+        _beta_fail_at[code] = time.time()
+        print(f"[beta] compute failed for {code}: {e!r}", flush=True)
+    finally:
+        if _beta_tasks.get(code) is asyncio.current_task():
+            _beta_tasks.pop(code, None)
+
+
+def _ensure_beta(code: str):
+    """Schedule a background β compute when the stored row is missing or
+    older than a day. Never blocks the caller; estimates use the raw
+    value until the row lands (next 30s cache refresh picks it up).
+    Failures back off 600s so an upstream outage doesn't retry every
+    estimates refresh."""
+    row = _beta_row(code)
+    if row and time.time() - row["updated_at"] < BETA_TTL:
+        return
+    if time.time() - _beta_fail_at.get(code, 0) < 600:
+        return
+    t = _beta_tasks.get(code)
+    if t and not t.done():
+        return
+    _beta_tasks[code] = asyncio.create_task(_compute_beta_bg(code))
+
+
+async def _beta_loop():
+    """Daily β recalibration for all watchlisted funds after the CN
+    close (15:35 CST). Lazy _ensure_beta covers funds added intraday."""
+    await asyncio.sleep(30)
+    last_run = None
+    while True:
+        try:
+            now = datetime.now(CN_TZ)
+            today = now.strftime("%Y-%m-%d")
+            if now.hour * 60 + now.minute >= 15 * 60 + 35 and last_run != today:
+                last_run = today
+                with db() as conn:
+                    codes = [r[0] for r in conn.execute(
+                        "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
+                for code in codes:
+                    await _jittered(_compute_beta_bg(code))
+                if codes:
+                    print(f"[beta] daily recalibration for {len(codes)} funds",
+                          flush=True)
+        except Exception as e:
+            print(f"[beta] loop failed: {e!r}", flush=True)
+        await asyncio.sleep(600)
 
 
 def is_us_holding(code: str, market_map: dict) -> bool:

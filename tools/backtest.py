@@ -112,7 +112,7 @@ def yahoo_symbol(code: str) -> str:
 
 async def yahoo_closes(sym: str) -> dict:
     """{local_date: close} from Yahoo chart API (6mo daily)."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=6mo&interval=1d"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1y&interval=1d"
     data = json.loads(await fetch_text(url))
     result = (data.get("chart") or {}).get("result")
     if not result:
