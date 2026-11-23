@@ -149,6 +149,8 @@
   .rk-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
   .rk-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
   .rk-val { font-size: 17px; font-weight: 700; white-space: nowrap; flex: none; }
+  .rk-add { flex: none; min-height: 26px; padding: 0 8px; font-size: 11px; border-radius: 999px; background: #EBF1FF; color: #2563EB; font-weight: 600; white-space: nowrap; }
+  .rk-add:disabled { background: #F2F3F5; color: #98A2B3; font-weight: 400; }
   .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
   .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
   .rk-note { font-size: 12px; color: #98A2B3; line-height: 1.5; margin: 2px 2px 8px; }
@@ -470,6 +472,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.1</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">排行榜一键加入自选（默认未分类）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.0</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">TrueNAV 1.1/1.2 估值提准与可信度标签、邮箱注册、系统备份与恢复、收益波动比榜、腾讯分时兜底、演变页</div></div></div>
           <div class="es-row"><div class="es-ver">v1.3.0</div><div class="es-main"><div class="es-date">2026-11-21</div><div class="es-desc">板块识别与板块涨跌、曲线对称轴与秒显、行业查询限速修复</div></div></div>
           <div class="es-row"><div class="es-ver">v1.2.0</div><div class="es-main"><div class="es-date">2026-11-20</div><div class="es-desc">当日估值曲线、排行榜、QDII 盘前/盘后估值、日韩台股持仓、秒开缓存</div></div></div>
@@ -480,7 +483,7 @@
     </div>
   </div>
 </main>
-<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.0 · 更新于 2026-11-23 18:27</span></footer>
+<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.1 · 更新于 2026-11-23 19:06</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -846,9 +849,53 @@ function fmtLocalTime(iso) {
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
 }
 function rankRow(it, valHtml, sub) {
+  const inList = addedCodes.has(it.code);
+  const btn = inList
+    ? `<button class="rk-add" data-code="${esc(it.code)}" disabled>已在自选</button>`
+    : `<button class="rk-add" data-code="${esc(it.code)}" data-name="${esc(it.name)}" onclick="rankAdd('${esc(it.code)}', this)">+ 加入</button>`;
   return `<div class="rank-row"><div class="rk-num${it.rank <= 3 ? " top" : ""}">${it.rank}</div>`
     + `<div class="rk-main"><div class="rk-name">${esc(it.name)}</div><div class="rk-sub">${esc(it.code)}${sub ? " · " + sub : ""}</div></div>`
-    + `<div class="rk-val">${valHtml}</div></div>`;
+    + `<div class="rk-val">${valHtml}</div>${btn}</div>`;
+}
+// One-click add from rankings (v1.4.1): default uncategorized; the user
+// re-categorizes later in settings. Watchlist state comes from the
+// estimates payload when loaded, else one /api/watchlist fetch.
+let rankWatchPromise = null;
+function ensureRankWatchlist() {
+  if (window.estimateData) return Promise.resolve();
+  if (!rankWatchPromise) {
+    rankWatchPromise = api("/api/watchlist").then(d => {
+      addedCodes = new Set((d.funds || []).map(f => f.fund_code));
+    }).catch(() => { rankWatchPromise = null; });
+  }
+  return rankWatchPromise;
+}
+function rankMarkAdded(code, label) {
+  document.querySelectorAll(`.rk-add[data-code="${code}"]`).forEach(b => { b.disabled = true; b.textContent = label; });
+}
+async function rankAdd(code, btn) {
+  if (addedCodes.has(code)) { rankMarkAdded(code, "已在自选"); return; }
+  const name = btn ? (btn.dataset.name || "") : "";
+  if (btn) { btn.disabled = true; btn.textContent = "处理中…"; }
+  const placeholder = optimisticAdd(code, name, "");
+  try {
+    const r = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code, fund_name: name, category: "" }) });
+    if (placeholder) placeholder.id = r.id;
+    addedCodes.add(code);
+    rankMarkAdded(code, "已加入");
+    loadEstimates();
+    setTimeout(() => { if (!addedCodes.has(code)) loadEstimates(); }, 2500);
+  } catch (e) {
+    if (placeholder) optimisticRemove(placeholder.id);
+    if (String(e.message || "").includes("已在")) {
+      addedCodes.add(code);
+      rankMarkAdded(code, "已在自选");
+      loadEstimates();
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = "+ 加入"; }
+      $("rank-err").textContent = e.message;
+    }
+  }
 }
 const RANK_NOTES = {
   returns: "东方财富全市场基金（约 2 万只），按所选周期涨幅从高到低取前 30",
@@ -915,6 +962,7 @@ function etaText(sec) { return sec < 60 ? "不到 1 分钟" : "约 " + Math.ceil
 async function loadRank() {
   stopRankPoll();
   updateRankNote(null);
+  await ensureRankWatchlist();
   const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod + ":" + rankCat
     : (rankBoard === "vol" || rankBoard === "ratio") ? rankBoard + ":" + rankCat + ":" + rankWindow
     : rankBoard;
@@ -1123,10 +1171,11 @@ $("search-btn").onclick = async () => {
 // Optimistic watchlist mutations (v1.4.0): update the local payload and
 // re-render immediately, then sync with the server in the background;
 // failures roll back (add) or resync (remove) and surface the error.
-function optimisticAdd(code, name) {
+function optimisticAdd(code, name, cat) {
   if (!window.estimateData) return null;
+  if (cat === undefined) cat = addCatSel;
   const placeholder = {
-    id: -1, fund_code: code, fund_name: name || code, category: addCatSel,
+    id: -1, fund_code: code, fund_name: name || code, category: cat,
     nav_date: null, dwjz: null, jzzzl: null,
     prev_nav_date: null, prev_dwjz: null, prev_jzzzl: null,
     est_nav: null, est_change_pct: null, est_nav_ext: null, est_change_pct_ext: null,
@@ -1136,9 +1185,9 @@ function optimisticAdd(code, name) {
   window.estimateData.funds = [...(window.estimateData.funds || []), placeholder];
   // A brand-new category is auto-created server-side; mirror it locally or
   // buildGroups would drop the placeholder (category not in the list yet).
-  if (addCatSel && Array.isArray(window.estimateData.categories)
-      && !window.estimateData.categories.includes(addCatSel)) {
-    window.estimateData.categories = [...window.estimateData.categories, addCatSel];
+  if (cat && Array.isArray(window.estimateData.categories)
+      && !window.estimateData.categories.includes(cat)) {
+    window.estimateData.categories = [...window.estimateData.categories, cat];
   }
   addedCodes.add(code);
   renderFunds(window.estimateData);
