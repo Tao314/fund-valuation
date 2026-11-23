@@ -98,6 +98,7 @@
   .fund-card .fc-spark .sp-max, .fund-card .fc-spark .sp-min { position: absolute; left: 0; font-size: 10px; line-height: 1; color: #98A2B3; font-variant-numeric: tabular-nums; pointer-events: none; }
   .fund-card .fc-spark .sp-max { top: 0; }
   .fund-card .fc-spark .sp-min { top: 34px; }
+  .fund-card .fc-spark .sp-loading { position: absolute; left: 50%; top: 22px; transform: translate(-50%, -50%); font-size: 11px; color: #98A2B3; pointer-events: none; }
   .fund-card .fc-spark .sp-times { position: relative; height: 12px; font-size: 10px; color: #98A2B3; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .fund-card .fc-spark .sp-times span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
   .fund-card .fc-spark .sp-times .sp-t-first { left: 0; transform: none; }
@@ -386,7 +387,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.21.0 · 更新于 2026-11-23 14:45</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.21.2 · 更新于 2026-11-23 15:26</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1332,6 +1333,7 @@ function sparklineHtml(f, published) {
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${gridH}${gridV}${zero}${lines}</svg>
     <span class="sp-max">${fmtLbl(bound)}</span>
     <span class="sp-min">${fmtLbl(-bound)}</span>
+    ${hasPts ? "" : '<span class="sp-loading">曲线加载中</span>'}
     ${dot}
     <div class="sp-times"><span class="sp-t-first">${fmtHM(t0)}</span>${joinLabels}<span class="sp-t-last">${fmtHM(t1)}</span></div>
   </div>`;

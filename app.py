@@ -43,7 +43,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.21.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.21.2"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -1932,8 +1932,10 @@ def quotes_stale() -> bool:
 # v1.15.0). Verified 2026-11-20: data.preClose present; rows are
 # "YYYY-MM-DD HH:MM,open,close,high,low,vol,amount,avg" in Beijing time.
 TRENDS_TTL = 300            # seconds, DB cache for today's session
+TRENDS_FAIL_BACKOFF = 900   # seconds, per-secid upstream failure backoff (v1.21.2)
 TRENDS_REF = "https://quote.eastmoney.com/"
 _trends_sem = asyncio.Semaphore(5)
+_trends_fail_until: dict = {}   # secid -> ts until which upstream calls are skipped
 _us_prefix_cache: dict = {}     # ticker -> working Eastmoney prefix (105/106/107)
 _secid_fail_at: dict = {}       # holding code -> last all-prefixes-failed ts
 _market_map_cache: dict = {}    # fund code -> (market map, ts)
@@ -2074,6 +2076,69 @@ async def holding_quote_symbol(h: dict, market_map: Optional[dict]) -> Optional[
     return to_sina_symbol(h["code"])
 
 
+def _tencent_code(secid: str) -> Optional[str]:
+    """Tencent (gtimg) symbol for an Eastmoney secid, or None when Tencent
+    has no equivalent (JP/KR/TW 176/177/178, CSI indices 2.)."""
+    prefix, _, code = secid.partition(".")
+    if prefix == "1":
+        return "sh" + code
+    if prefix == "0":
+        return "sz" + code
+    if prefix == "116":
+        return "hk" + code
+    if prefix in ("105", "106", "107"):
+        return "us" + code.upper()
+    return None
+
+
+async def _fetch_tencent_trends(secid: str, date_str: str) -> Optional[dict]:
+    """Minute closes from Tencent as an Eastmoney fallback (v1.21.2).
+    Tencent's minute query only serves the current session, so callers
+    must restrict this to date_str == today. Rows are "HHMM price vol amt"
+    with no date; A/HK times are Beijing time, US times are ET (converted
+    via ET_TZ, shifted back a day when they land in the future, i.e. the
+    previous US session). pre_close comes from qt[4] (verified 2026-11-23
+    against Sina prev_close for 600519/688137/301080). Payloads with
+    fewer than 10 points are rejected (Tencent US returns a single
+    placeholder row outside US hours)."""
+    tcode = _tencent_code(secid)
+    if not tcode:
+        return None
+    resp = await upstream_get(
+        f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={tcode}",
+        referer="https://gu.qq.com/", timeout=10)
+    node = (resp.json().get("data") or {}).get(tcode) or {}
+    rows = ((node.get("data") or {}).get("data")) or []
+    qt = ((node.get("qt") or {}).get(tcode)) or []
+    pre_close = _fnum(qt[4]) if len(qt) > 4 else None
+    is_us = tcode.startswith("us")
+    points = []
+    for line in rows:
+        parts = line.split()
+        if len(parts) < 2 or len(parts[0]) != 4:
+            continue
+        try:
+            hh, mm = int(parts[0][:2]), int(parts[0][2:])
+            close = float(parts[1])
+        except ValueError:
+            continue
+        if is_us:
+            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                hour=hh, minute=mm, tzinfo=ET_TZ)
+            ts = int(dt.timestamp())
+            if ts > time.time() + 3600:
+                ts -= 86400
+        else:
+            ts = int(datetime.strptime(f"{date_str} {hh:02d}:{mm:02d}",
+                                       "%Y-%m-%d %H:%M")
+                     .replace(tzinfo=CN_TZ).timestamp())
+        points.append([ts, close])
+    if len(points) < 10:
+        return None
+    points.sort()
+    return {"pre_close": pre_close, "points": points}
+
+
 async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     """Minute closes for one stock: {"pre_close": float|None,
     "points": [[ts, close], ...]}. DB-cached per (secid, date); today's
@@ -2082,7 +2147,11 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     no cache exists. When the fetch yields nothing usable and there is no
     same-date cache row, falls back to the most recent cached payload for
     this secid under any date (weekend/early-morning: Saturday asks for
-    Saturday, but Friday's session is the data the curve needs)."""
+    Saturday, but Friday's session is the data the curve needs).
+    v1.21.2: when Eastmoney yields nothing for today (throttled server
+    IP), Tencent minute data is tried before the cache fallback; after a
+    hard failure on both sources the secid backs off for
+    TRENDS_FAIL_BACKOFF seconds (upstream skipped, cache fallback only)."""
     today_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
     with db() as conn:
         row = conn.execute(
@@ -2100,6 +2169,14 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
                 "ORDER BY date DESC LIMIT 1", (secid,)).fetchone()
         return json.loads(latest["payload"]) if latest else None
 
+    # Per-secid failure backoff (v1.21.2): after both upstreams fail, skip
+    # upstream calls for TRENDS_FAIL_BACKOFF so the 240s warm loop doesn't
+    # hammer a throttled IP. Fresh same-date cache already returned above.
+    if time.time() < _trends_fail_until.get(secid, 0):
+        return _fallback()
+
+    payload = None
+    hard_fail = False   # exception / no data at all (vs. data but no points yet)
     try:
         resp = await upstream_get(
             "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
@@ -2108,35 +2185,51 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             referer=TRENDS_REF, timeout=15)
         data = resp.json().get("data")
         if not data:
-            return _fallback()
-        points = []
-        for line in data.get("trends") or []:
-            parts = line.split(",")
-            try:
-                ts = int(datetime.strptime(parts[0], "%Y-%m-%d %H:%M")
-                         .replace(tzinfo=CN_TZ).timestamp())
-                points.append([ts, float(parts[2])])
-            except (ValueError, IndexError):
-                continue
-        pre_close = _fnum(data.get("preClose"))
-        if not pre_close and secid.split(".", 1)[0] in ("0", "1", "116", "105", "106", "107"):
+            hard_fail = True
+        else:
+            points = []
+            for line in data.get("trends") or []:
+                parts = line.split(",")
+                try:
+                    ts = int(datetime.strptime(parts[0], "%Y-%m-%d %H:%M")
+                             .replace(tzinfo=CN_TZ).timestamp())
+                    points.append([ts, float(parts[2])])
+                except (ValueError, IndexError):
+                    continue
+            if points:
+                payload = {"pre_close": _fnum(data.get("preClose")),
+                           "points": points}
+    except Exception:
+        hard_fail = True
+
+    if payload is None and date_str == today_str:
+        # Eastmoney yielded nothing usable (throttled IP returns empty):
+        # try Tencent before giving up (v1.21.2).
+        try:
+            payload = await _fetch_tencent_trends(secid, date_str)
+        except Exception:
+            payload = None
+
+    if payload and payload.get("points"):
+        if not payload.get("pre_close") and \
+                secid.split(".", 1)[0] in ("0", "1", "116", "105", "106", "107"):
             # Fall back to the Sina quote cache's prev close (A/HK/US only).
             sym = to_sina_symbol(secid.split(".", 1)[1])
             q = _quote_cache["quotes"].get(sym) if sym else None
             if q:
-                pre_close = q.get("prev_close") or (
+                payload["pre_close"] = q.get("prev_close") or (
                     q["current"] / (1 + q["change_pct"] / 100) if q.get("current") else None)
-        if not points:
-            return _fallback()
-        payload = {"pre_close": pre_close, "points": points}
+        _trends_fail_until.pop(secid, None)
         with db() as conn:
             conn.execute(
                 "INSERT INTO stock_trends_cache(secid, date, payload, fetched_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(secid, date) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
                 (secid, date_str, json.dumps(payload), time.time()))
         return payload
-    except Exception:
-        return _fallback()
+
+    if hard_fail:
+        _trends_fail_until[secid] = time.time() + TRENDS_FAIL_BACKOFF
+    return _fallback()
 
 
 async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: str,
