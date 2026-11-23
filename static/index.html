@@ -56,9 +56,8 @@
   button.mini:disabled { opacity: .35; cursor: default; }
   select.cat { padding: 5px; border: 1px solid #EAECF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
   #countdown { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; }
-  .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; background: #ECEFF4; border-radius: 999px; font-size: 11px; font-weight: 500; color: #374151; flex: 1; min-width: 0; }
-  .ms-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-  .ms-sep { color: #98A2B3; flex: none; }
+  .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: 1; min-width: 0; }
+  .ms-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
   .ms-dot { width: 6px; height: 6px; border-radius: 50%; background: #98A2B3; flex: none; }
   .ms-dot.on { background: #07845B; }
   .ms-dot.warn { background: #D97706; }
@@ -111,7 +110,7 @@
   .fund-card .fc-spark .sp-times .sp-t-first { left: 0; transform: none; }
   .fund-card .fc-spark .sp-times .sp-t-last { right: 0; left: auto; transform: none; }
   .fund-card .fc-spark .sp-dot { position: absolute; width: 5px; height: 5px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
-  .sort-toggle button { min-height: 26px; height: 26px; padding: 0 8px; font-size: 11px; background: #F3F4F6; color: #667085; border-radius: 6px; }
+  .sort-toggle button { min-height: 26px; height: 26px; padding: 0 7px; font-size: 11px; background: #F3F4F6; color: #667085; border-radius: 6px; }
   .sort-toggle button.active { background: #2563EB; color: #fff; font-weight: 600; }
   .sort-toggle button:active { background: #E5E7EB; }
   .sort-toggle button.active:active { background: #1D4ED8; }
@@ -186,7 +185,7 @@
   .wl-ops button.mini { margin-right: 0; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
-  /* toolbar row1 (4 tabs + refresh + countdown + logout) must fit one line at
+  /* toolbar row1 (4 tabs + username + logout) must fit one line at
      390px and wrap cleanly below that instead of overflowing the card */
   @media (max-width: 429px) { .toolbar-row1 { gap: 6px; } .tab-btn { padding: 0 8px; } }
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } .tab-btn { padding: 0 6px; } }
@@ -196,7 +195,7 @@
 </head>
 <body>
 <header>
-  <div class="header-row1"><div class="title-wrap"><h1>基金自算估值</h1><span class="refresh-group"><button id="refresh-btn" title="刷新" aria-label="刷新" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button><span id="countdown" title="下次自动刷新" style="display:none">60s</span></span></div><span class="user-wrap"><span id="userbox"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span></div>
+  <div class="header-row1"><div class="title-wrap"><h1>基金自算估值</h1><span class="refresh-group"><button id="refresh-btn" title="刷新" aria-label="刷新" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button><span id="countdown" title="下次自动刷新" style="display:none">60s</span></span></div></div>
   <div class="title-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div>
 </header>
 <main>
@@ -242,9 +241,10 @@
         <button class="tab-btn" id="nav-settings">设置</button>
         <button class="tab-btn" id="nav-admin" style="display:none">管理</button>
         <span style="flex:1"></span>
+        <span class="user-wrap"><span id="userbox"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span>
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
-        <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-sep">·</span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-sep">·</span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
+        <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
         <div class="sort-toggle">
           <button class="secondary active" id="sort-default">默认顺序</button>
           <button class="secondary" id="sort-change">按涨跌幅</button>
@@ -406,7 +406,7 @@
     </div>
   </div>
 </main>
-<footer><span id="app-version">版本 v1.21.5 · 更新于 2026-11-23 16:03</span></footer>
+<footer><span id="app-version">版本 v1.21.6 · 更新于 2026-11-23 16:13</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -444,18 +444,18 @@ function marketStatusText() {
   const weekday = day >= 1 && day <= 5;
   function cnStatus(open1, close1, open2, close2) {
     if (!weekday) return "休市";
-    if (mins < open1) return "未开盘";
+    if (mins < open1) return "待开";
     if (mins < close1) return "盘中";
     if (mins < open2) return "午休";
     if (mins < close2) return "盘中";
-    return "已收盘";
+    return "收盘";
   }
   const a = cnStatus(570, 690, 780, 900);   // A股 09:30-11:30, 13:00-15:00
   const hk = cnStatus(570, 720, 780, 960);  // 港股 09:30-12:00, 13:00-16:00
   // 美股 sessions computed in ET (America/New_York, DST-aware); reuse per-fund session logic
   const usSess = marketSession("us", now);
   const us = usSess === "trading" ? "盘中" : usSess === "pre" ? "盘前" : (usSess === "post" || usSess === "postext") ? "盘后"
-    : usSess === "preopen" ? "未开盘" : "休市";
+    : usSess === "preopen" ? "待开" : "休市";
   return { a: a, hk: hk, us: us };
 }
 function msDotClass(status) {
