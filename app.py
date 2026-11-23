@@ -919,6 +919,11 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
         now_et = datetime.now(ET_TZ)
     cur = float(fields[1])
     prev = float(fields[26]) if len(fields) > 26 and fields[26] else cur
+    change_pct = float(fields[2]) if len(fields) > 2 and fields[2] else 0.0
+    if cur <= 0 and prev > 0:
+        # Pre-open Sina may return 0 as current; treat as prev close (0 change).
+        cur = prev
+        change_pct = 0.0
     change_pct_ext = None
     current_ext = None
     try:
@@ -939,7 +944,7 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
     except Exception:
         pass  # malformed ext data -> no ext change
     return {"name": fields[0], "prev_close": prev, "current": cur,
-            "change_pct": float(fields[2]),
+            "change_pct": change_pct,
             "current_ext": current_ext, "change_pct_ext": change_pct_ext,
             "quote_time": fields[3] if len(fields) > 3 else None}
 
@@ -972,6 +977,9 @@ async def _fetch_em_quotes(secids: list[str]) -> dict:
             for r in rows:
                 secid = want.get(str(r.get("f12") or ""))
                 cur, prev, chg = _fnum(r.get("f2")), _fnum(r.get("f18")), _fnum(r.get("f3"))
+                if secid and prev and cur is not None and cur <= 0:
+                    # Pre-open current=0; treat as prev close (0 change).
+                    cur, chg = prev, 0.0
                 if secid and cur and prev:
                     out[secid] = {"name": r.get("f14"), "prev_close": prev, "current": cur,
                                   "change_pct": chg if chg is not None else (cur - prev) / prev * 100,
@@ -1014,12 +1022,16 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
                     # HK layout (verified 2026-11-19): 0=EN name,1=CN name,2=open,3=prev close,
                     # 4=high,5=low,6=current,7=change,8=change%,17=date,18=time
                     prev, cur = float(fields[3]), float(fields[6])
+                    if cur <= 0 and prev > 0:
+                        cur = prev  # pre-open current=0 -> prev close (0 change)
                     quotes[sym] = {"name": fields[1], "prev_close": prev, "current": cur,
                                    "change_pct": (cur - prev) / prev * 100 if prev else 0.0,
                                    "quote_time": f"{fields[17]} {fields[18]}" if len(fields) > 18 else None}
                 else:
                     # A-share layout: 0=name,1=open,2=prev close,3=current,30=date,31=time
                     prev, cur = float(fields[2]), float(fields[3])
+                    if cur <= 0 and prev > 0:
+                        cur = prev  # pre-open current=0 -> prev close (0 change)
                     quotes[sym] = {"name": fields[0], "prev_close": prev, "current": cur,
                                    "change_pct": (cur - prev) / prev * 100 if prev else 0.0,
                                    "quote_time": f"{fields[30]} {fields[31]}" if len(fields) > 31 else None}
