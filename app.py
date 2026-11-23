@@ -44,7 +44,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.3"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.4"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -2069,6 +2069,12 @@ def _warm_interval(now: Optional[datetime] = None) -> int:
     """Trends warm-loop sleep: 240s in trading windows, 900s outside."""
     return 240 if _in_trading_window(now) else 900
 TRENDS_REF = "https://quote.eastmoney.com/"
+# Eastmoney trends2 hosts tried in order (v1.4.4): push2his primary,
+# push2delay alternate (same API/format incl. preClose, verified
+# 2026-11-23) when the primary throttles the server IP. Env override
+# for testing, e.g. TRENDS_HOSTS=push2delay.
+TRENDS_HOSTS = [h.strip() for h in os.environ.get(
+    "TRENDS_HOSTS", "push2his,push2delay").split(",") if h.strip()]
 _trends_sem = asyncio.Semaphore(5)
 _trends_fail_until: dict = {}   # secid -> ts until which upstream calls are skipped
 _us_prefix_cache: dict = {}     # ticker -> working Eastmoney prefix (105/106/107)
@@ -2285,8 +2291,11 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     Saturday, but Friday's session is the data the curve needs).
     v1.4.0: when Eastmoney yields nothing for today (throttled server
     IP), Tencent minute data is tried before the cache fallback; after a
-    hard failure on both sources the secid backs off for
-    TRENDS_FAIL_BACKOFF seconds (upstream skipped, cache fallback only)."""
+    hard failure on all sources the secid backs off for
+    TRENDS_FAIL_BACKOFF seconds (upstream skipped, cache fallback only).
+    v1.4.4: Eastmoney hosts are tried in TRENDS_HOSTS order (push2his,
+    then push2delay — Tencent US minute data has no usable series, so
+    US curves need the alternate Eastmoney host as their fallback)."""
     today_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
     with db() as conn:
         row = conn.execute(
@@ -2304,24 +2313,25 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
                 "ORDER BY date DESC LIMIT 1", (secid,)).fetchone()
         return json.loads(latest["payload"]) if latest else None
 
-    # Per-secid failure backoff (v1.4.0): after both upstreams fail, skip
+    # Per-secid failure backoff (v1.4.0): after all upstreams fail, skip
     # upstream calls for TRENDS_FAIL_BACKOFF so the 240s warm loop doesn't
     # hammer a throttled IP. Fresh same-date cache already returned above.
     if time.time() < _trends_fail_until.get(secid, 0):
         return _fallback()
 
     payload = None
-    hard_fail = False   # exception / no data at all (vs. data but no points yet)
-    try:
-        resp = await upstream_get(
-            "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
-            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
-            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&iscca=0",
-            referer=TRENDS_REF, timeout=15)
-        data = resp.json().get("data")
-        if not data:
-            hard_fail = True
-        else:
+    hard_fail = True   # stays True only if every Eastmoney host hard-fails
+    for host in TRENDS_HOSTS:
+        try:
+            resp = await upstream_get(
+                f"https://{host}.eastmoney.com/api/qt/stock/trends2/get"
+                f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
+                "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&iscca=0",
+                referer=TRENDS_REF, timeout=15)
+            data = resp.json().get("data")
+            if not data:
+                continue    # throttled/empty on this host: try the next
+            hard_fail = False   # host answered (points may still be empty)
             points = []
             for line in data.get("trends") or []:
                 parts = line.split(",")
@@ -2334,8 +2344,11 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
             if points:
                 payload = {"pre_close": _fnum(data.get("preClose")),
                            "points": points}
-    except Exception:
-        hard_fail = True
+                if host != TRENDS_HOSTS[0]:
+                    print(f"[trends] {secid} via {host}", flush=True)
+                break
+        except Exception:
+            continue
 
     if payload is None and date_str == today_str:
         # Eastmoney yielded nothing usable (throttled IP returns empty):
