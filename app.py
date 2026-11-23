@@ -11,13 +11,16 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
 import secrets
 import shutil
+import smtplib
 import sqlite3
 import time
+from email.message import EmailMessage
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -39,7 +42,26 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.19.2"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.20.0"  # keep in sync with the footer in static/index.html
+
+# --- Email verification codes (v1.20.0) ---
+# SMTP config comes from environment variables only (never committed).
+# When SMTP_HOST is empty the app runs in LOG MODE: codes are written to
+# the server log instead of being emailed, so the flow is testable before
+# real SMTP is configured on the deployment host.
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465") or 465)
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "").strip() or SMTP_USER
+_smtp_ssl_env = os.environ.get("SMTP_SSL", "").strip()
+SMTP_SSL = (_smtp_ssl_env == "1") if _smtp_ssl_env else (SMTP_PORT == 465)
+EMAIL_CODE_TTL = 600        # seconds a code stays valid
+EMAIL_CODE_COOLDOWN = 60    # seconds between sends (same email+purpose)
+EMAIL_CODE_DAILY_MAX = 10   # sends per email per day (all purposes)
+EMAIL_CODE_MAX_ATTEMPTS = 5
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+logger = logging.getLogger("fund-valuation")
 BACKUP_DIR = DB_PATH.parent / "backups"
 BACKUP_KEEP = 10
 # New backups are gzip-compressed (.db.gz); legacy plain .db backups from
@@ -165,6 +187,25 @@ def init_db():
     # Migration: users.is_admin (added 2026-11-20, v1.12.0)
     if "is_admin" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+    # Migration: users.email (added 2026-11-23, v1.20.0) — nullable for
+    # legacy users; unique via index (SQLite ADD COLUMN cannot take UNIQUE;
+    # a unique index still allows multiple NULLs).
+    if "email" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    # Email verification codes (v1.20.0): one active code per (email,
+    # purpose); codes stored hashed. email_code_log backs the daily cap.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS email_codes("
+        "email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, "
+        "expires_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
+        "created_at REAL NOT NULL, PRIMARY KEY(email, purpose))"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS email_code_log("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, "
+        "purpose TEXT NOT NULL, sent_at REAL NOT NULL)"
+    )
     # Login log table (added 2026-11-20, v1.12.0)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS login_log("
@@ -272,6 +313,127 @@ def _log_login(conn, username: str, user_id, success: bool, request: Request):
     )
 
 
+# --- email verification codes (v1.20.0) ---
+def _norm_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(400, "邮箱格式不正确")
+    return email
+
+
+def _code_hash(email: str, purpose: str, code: str) -> str:
+    return hashlib.sha256(f"{email}:{purpose}:{code}".encode()).hexdigest()
+
+
+def _send_code_mail(email: str, purpose: str, code: str):
+    """Send the code by SMTP, or log it when SMTP is not configured.
+
+    Codes are never logged when real SMTP is configured.
+    """
+    if not SMTP_HOST:
+        logger.warning("[email-code] to=%s purpose=%s code=%s", email, purpose, code)
+        return
+    msg = EmailMessage()
+    msg["Subject"] = "【基金自算估值】验证码"
+    msg["From"] = SMTP_FROM
+    msg["To"] = email
+    msg.set_content(
+        f"您的验证码是：{code}\n\n"
+        "验证码 10 分钟内有效，请勿泄露给他人。\n"
+        "如非本人操作，请忽略本邮件。"
+    )
+    if SMTP_SSL:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+            if SMTP_USER:
+                s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+            s.starttls()
+            if SMTP_USER:
+                s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+
+
+def _issue_code(conn, email: str, purpose: str):
+    """Rate-limit, generate, store and send a fresh code (replaces old)."""
+    now = time.time()
+    row = conn.execute(
+        "SELECT created_at FROM email_codes WHERE email=? AND purpose=?", (email, purpose)
+    ).fetchone()
+    if row and now - row["created_at"] < EMAIL_CODE_COOLDOWN:
+        retry = int(EMAIL_CODE_COOLDOWN - (now - row["created_at"])) + 1
+        raise HTTPException(429, f"发送太频繁，请 {retry} 秒后再试")
+    day_start = datetime.now(ZoneInfo("Asia/Shanghai")).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp()
+    sent_today = conn.execute(
+        "SELECT COUNT(*) AS n FROM email_code_log WHERE email=? AND sent_at>=?",
+        (email, day_start),
+    ).fetchone()["n"]
+    if sent_today >= EMAIL_CODE_DAILY_MAX:
+        raise HTTPException(429, "今日验证码发送次数已达上限，请明天再试")
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    conn.execute(
+        "INSERT INTO email_codes(email, purpose, code_hash, expires_at, attempts, created_at) "
+        "VALUES(?,?,?,?,0,?) ON CONFLICT(email, purpose) DO UPDATE SET "
+        "code_hash=excluded.code_hash, expires_at=excluded.expires_at, "
+        "attempts=0, created_at=excluded.created_at",
+        (email, purpose, _code_hash(email, purpose, code), now + EMAIL_CODE_TTL, now),
+    )
+    conn.execute(
+        "INSERT INTO email_code_log(email, purpose, sent_at) VALUES(?,?,?)",
+        (email, purpose, now),
+    )
+    conn.commit()
+    try:
+        _send_code_mail(email, purpose, code)
+    except Exception:
+        # Roll back the issued code so the user can retry immediately.
+        conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
+        conn.execute(
+            "DELETE FROM email_code_log WHERE id=(SELECT MAX(id) FROM email_code_log WHERE email=?)",
+            (email,),
+        )
+        conn.commit()
+        raise HTTPException(502, "邮件发送失败，请稍后重试")
+
+
+def _verify_code(conn, email: str, purpose: str, code: str):
+    """Verify a code; raises HTTPException on any failure.
+
+    Wrong attempts are committed immediately (the db() context would roll
+    back on raise). Success consumes (deletes) the code.
+    """
+    code = (code or "").strip()
+    row = conn.execute(
+        "SELECT code_hash, expires_at, attempts FROM email_codes WHERE email=? AND purpose=?",
+        (email, purpose),
+    ).fetchone()
+    if not row:
+        raise HTTPException(400, "验证码不存在或已失效，请重新获取")
+    if time.time() > row["expires_at"]:
+        conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
+        conn.commit()
+        raise HTTPException(400, "验证码已过期，请重新获取")
+    if row["attempts"] >= EMAIL_CODE_MAX_ATTEMPTS:
+        conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
+        conn.commit()
+        raise HTTPException(400, "验证码错误次数过多，请重新获取")
+    if not hmac.compare_digest(_code_hash(email, purpose, code), row["code_hash"]):
+        attempts = row["attempts"] + 1
+        if attempts >= EMAIL_CODE_MAX_ATTEMPTS:
+            conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
+        else:
+            conn.execute(
+                "UPDATE email_codes SET attempts=? WHERE email=? AND purpose=?",
+                (attempts, email, purpose),
+            )
+        conn.commit()
+        raise HTTPException(400, "验证码不正确")
+    conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
+    conn.commit()
+
+
 class AuthBody(BaseModel):
     username: str
     password: str
@@ -319,23 +481,108 @@ class ChangePasswordBody(BaseModel):
     new_password: str
 
 
+class SendCodeBody(BaseModel):
+    email: str
+    purpose: str  # register | reset | bind
+
+
+class RegisterBody(BaseModel):
+    username: str
+    password: str
+    email: str
+    code: str
+
+
+class ResetPasswordBody(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
+class BindEmailBody(BaseModel):
+    email: str
+    code: str
+
+
+@app.post("/api/email/send-code")
+def send_email_code(body: SendCodeBody, session: Optional[str] = Cookie(default=None)):
+    email = _norm_email(body.email)
+    purpose = (body.purpose or "").strip()
+    if purpose not in ("register", "reset", "bind"):
+        raise HTTPException(400, "purpose 不正确")
+    with db() as conn:
+        owner = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if purpose == "register":
+            if owner:
+                raise HTTPException(409, "该邮箱已注册")
+        elif purpose == "reset":
+            if not owner:
+                # Same response as a real send — don't reveal existence.
+                return {"ok": True}
+        elif purpose == "bind":
+            uid = current_user_id(session)
+            me_row = conn.execute("SELECT email FROM users WHERE id=?", (uid,)).fetchone()
+            if me_row and me_row["email"]:
+                raise HTTPException(400, "已绑定邮箱，如需更换请联系管理员")
+            if owner and owner["id"] != uid:
+                raise HTTPException(409, "该邮箱已被其他账号使用")
+        _issue_code(conn, email, purpose)
+    return {"ok": True}
+
+
 @app.post("/api/register")
-def register(body: AuthBody):
+def register(body: RegisterBody, response: Response):
     username = body.username.strip()
     if len(username) < 3 or len(username) > 32:
         raise HTTPException(400, "用户名需 3-32 个字符")
     if len(body.password) < 6:
         raise HTTPException(400, "密码至少 6 位")
+    email = _norm_email(body.email)
     with db() as conn:
+        _verify_code(conn, email, "register", body.code)
         try:
             cur = conn.execute(
-                "INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
-                (username, hash_password(body.password), now_iso()),
+                "INSERT INTO users(username, password_hash, created_at, email) VALUES(?,?,?,?)",
+                (username, hash_password(body.password), now_iso(), email),
             )
         except sqlite3.IntegrityError:
-            raise HTTPException(409, "用户名已存在")
+            raise HTTPException(409, "用户名或邮箱已存在")
         user_id = cur.lastrowid
-    return {"ok": True, "user_id": user_id, "username": username}
+        token = secrets.token_urlsafe(32)
+        conn.execute("INSERT INTO sessions(token, user_id, created_at) VALUES(?,?,?)", (token, user_id, now_iso()))
+    response.set_cookie("session", token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", path="/")
+    return {"ok": True, "user_id": user_id, "username": username, "email": email}
+
+
+@app.post("/api/password/reset")
+def reset_password(body: ResetPasswordBody):
+    email = _norm_email(body.email)
+    if len(body.new_password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    with db() as conn:
+        _verify_code(conn, email, "reset", body.code)
+        row = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if not row:
+            raise HTTPException(400, "验证码不正确")
+        conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.new_password), row["id"]))
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
+    return {"ok": True}
+
+
+@app.post("/api/email/bind")
+def bind_email(body: BindEmailBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    email = _norm_email(body.email)
+    with db() as conn:
+        me_row = conn.execute("SELECT email FROM users WHERE id=?", (uid,)).fetchone()
+        if me_row and me_row["email"]:
+            raise HTTPException(400, "已绑定邮箱，如需更换请联系管理员")
+        _verify_code(conn, email, "bind", body.code)
+        try:
+            conn.execute("UPDATE users SET email=? WHERE id=?", (email, uid))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "该邮箱已被其他账号使用")
+    return {"ok": True, "email": email}
 
 
 @app.post("/api/login")
@@ -367,8 +614,9 @@ def logout(response: Response, session: Optional[str] = Cookie(default=None)):
 def me(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
-        row = conn.execute("SELECT username, is_admin FROM users WHERE id=?", (uid,)).fetchone()
-    return {"user_id": uid, "username": row["username"], "is_admin": bool(row["is_admin"])}
+        row = conn.execute("SELECT username, is_admin, email FROM users WHERE id=?", (uid,)).fetchone()
+    return {"user_id": uid, "username": row["username"], "is_admin": bool(row["is_admin"]),
+            "email": row["email"]}
 
 
 @app.get("/api/settings")
@@ -416,36 +664,44 @@ def admin_list_users(session: Optional[str] = Cookie(default=None)):
     require_admin(session)
     with db() as conn:
         rows = conn.execute(
-            "SELECT u.id, u.username, u.is_admin, u.created_at, "
+            "SELECT u.id, u.username, u.is_admin, u.created_at, u.email, "
             "(SELECT COUNT(*) FROM user_funds WHERE user_id=u.id) AS fund_count, "
             "(SELECT MAX(created_at) FROM login_log WHERE user_id=u.id AND success=1) AS last_login "
             "FROM users u ORDER BY u.id"
         ).fetchall()
     return {"users": [
         {"id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"]),
-         "created_at": r["created_at"], "fund_count": r["fund_count"], "last_login": r["last_login"]}
+         "created_at": r["created_at"], "fund_count": r["fund_count"], "last_login": r["last_login"],
+         "email": r["email"]}
         for r in rows
     ]}
 
 
+class AdminCreateUserBody(BaseModel):
+    username: str
+    password: str
+    email: Optional[str] = None
+
+
 @app.post("/api/admin/users")
-def admin_create_user(body: AuthBody, session: Optional[str] = Cookie(default=None)):
+def admin_create_user(body: AdminCreateUserBody, session: Optional[str] = Cookie(default=None)):
     require_admin(session)
     username = body.username.strip()
     if len(username) < 3 or len(username) > 32:
         raise HTTPException(400, "用户名需 3-32 个字符")
     if len(body.password) < 6:
         raise HTTPException(400, "密码至少 6 位")
+    email = _norm_email(body.email) if (body.email or "").strip() else None
     with db() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
-                (username, hash_password(body.password), now_iso()),
+                "INSERT INTO users(username, password_hash, created_at, email) VALUES(?,?,?,?)",
+                (username, hash_password(body.password), now_iso(), email),
             )
         except sqlite3.IntegrityError:
-            raise HTTPException(409, "用户名已存在")
+            raise HTTPException(409, "用户名或邮箱已存在")
         user_id = cur.lastrowid
-    return {"ok": True, "user_id": user_id, "username": username}
+    return {"ok": True, "user_id": user_id, "username": username, "email": email}
 
 
 @app.delete("/api/admin/users/{user_id}")

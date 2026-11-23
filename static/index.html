@@ -188,9 +188,30 @@
 <main>
   <div id="auth" class="card" style="display:none">
     <h3 id="auth-title">登录</h3>
-    <input id="username" placeholder="用户名" autocomplete="username">
-    <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+    <div id="auth-login-fields">
+      <input id="username" placeholder="用户名" autocomplete="username">
+      <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+      <div class="row"><button class="secondary" id="auth-forgot">忘记密码？</button></div>
+    </div>
+    <div id="auth-register-fields" style="display:none">
+      <input id="reg-email" type="email" placeholder="邮箱" autocomplete="email">
+      <div class="row">
+        <input id="reg-code" placeholder="邮箱验证码（6 位）" autocomplete="one-time-code" inputmode="numeric">
+        <button class="secondary" id="reg-send-code" style="flex:none">发送验证码</button>
+      </div>
+      <input id="reg-username" placeholder="用户名（3-32 个字符）" autocomplete="username">
+      <input id="reg-password" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password">
+    </div>
+    <div id="auth-reset-fields" style="display:none">
+      <input id="reset-email" type="email" placeholder="注册邮箱" autocomplete="email">
+      <div class="row">
+        <input id="reset-code" placeholder="邮箱验证码（6 位）" autocomplete="one-time-code" inputmode="numeric">
+        <button class="secondary" id="reset-send-code" style="flex:none">发送验证码</button>
+      </div>
+      <input id="reset-password" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password">
+    </div>
     <div class="err" id="auth-err"></div>
+    <div class="muted" id="auth-ok"></div>
     <div class="row">
       <button id="auth-btn">登录</button>
       <button class="secondary" id="auth-switch">没有账号？去注册</button>
@@ -219,6 +240,21 @@
     </div>
 
     <div id="view-main">
+      <div class="card" id="bind-banner" style="display:none">
+        <h3>绑定邮箱</h3>
+        <div class="muted">绑定邮箱后，忘记密码时可通过邮箱验证码重置。</div>
+        <input id="bind-email" type="email" placeholder="邮箱" autocomplete="email">
+        <div class="row">
+          <input id="bind-code" placeholder="邮箱验证码（6 位）" autocomplete="one-time-code" inputmode="numeric">
+          <button class="secondary" id="bind-send-code" style="flex:none">发送验证码</button>
+        </div>
+        <div class="row">
+          <button id="bind-btn">绑定</button>
+          <button class="secondary" id="bind-dismiss">稍后再说</button>
+          <span class="muted" id="bind-ok"></span>
+        </div>
+        <div class="err" id="bind-err"></div>
+      </div>
       <div class="card">
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">加载中…</div>
@@ -275,6 +311,7 @@
         <div class="row">
           <input id="admin-new-username" placeholder="用户名（3-32 个字符）" autocomplete="off">
           <input id="admin-new-password" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password">
+          <input id="admin-new-email" type="email" placeholder="邮箱（可选）" autocomplete="off">
           <button id="admin-add-user-btn">添加用户</button>
         </div>
       </div>
@@ -328,6 +365,7 @@
       </div>
       <div class="card">
         <h3>账户</h3>
+        <div class="muted" id="account-email">邮箱：-</div>
         <input id="old-password" type="password" placeholder="旧密码" autocomplete="current-password">
         <input id="new-password" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password">
         <input id="confirm-password" type="password" placeholder="确认新密码" autocomplete="new-password">
@@ -340,7 +378,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.19.2 · 更新于 2026-11-23 12:10</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.20.0 · 更新于 2026-11-23 13:30</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -529,7 +567,7 @@ async function loadAdmin() {
     adminUsers = data.users || [];
     $("admin-user-list").innerHTML = adminUsers.map(u => {
       const badge = u.is_admin ? '<span class="admin-badge">管理员</span>' : "";
-      const sub = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只 · 最近登录 " + (u.last_login ? fmtLocalTime(u.last_login) : "无");
+      const sub = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只 · 最近登录 " + (u.last_login ? fmtLocalTime(u.last_login) : "无") + " · 邮箱 " + (u.email || "未绑定");
       const del = (u.id === myUserId || u.is_admin) ? "" : `<button class="danger" onclick="adminDeleteUser(${u.id})">删除</button>`;
       return `<div class="admin-user-row"><div class="au-main"><div class="au-name">${esc(u.username)}${badge}</div><div class="au-sub">${esc(sub)}</div></div>`
         + `<div class="au-actions"><button class="mini" onclick="adminResetPassword(${u.id})">改密码</button>${del}</div></div>`;
@@ -606,9 +644,10 @@ async function adminDeleteUser(id) {
 $("admin-add-user-btn").onclick = async () => {
   const username = $("admin-new-username").value.trim();
   const password = $("admin-new-password").value;
+  const email = $("admin-new-email").value.trim();
   try {
-    await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password }) });
-    $("admin-new-username").value = ""; $("admin-new-password").value = "";
+    await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password, email: email || null }) });
+    $("admin-new-username").value = ""; $("admin-new-password").value = ""; $("admin-new-email").value = "";
     await loadAdmin();
   } catch (e) { setAdminErr(e.message); }
 };
@@ -790,11 +829,16 @@ function renderCachedEstimates() {
     renderSettings(data);
   } catch { /* corrupted cache -> ignore, fresh load will replace it */ }
 }
-function showDash(user, admin, userId) {
-  isAdmin = !!admin; myUserId = userId ?? null; myUsername = user || "";
+let myEmail = null;
+function showDash(user, admin, userId, email) {
+  isAdmin = !!admin; myUserId = userId ?? null; myUsername = user || ""; myEmail = email || null;
   $("nav-admin").style.display = isAdmin ? "" : "none";
   $("auth").style.display = "none"; $("dash").style.display = "";
   $("userbox").textContent = user;
+  $("account-email").textContent = "邮箱：" + (myEmail || "未绑定");
+  let dismissed = false;
+  try { dismissed = !!localStorage.getItem("fv-bind-dismissed-" + myUsername); } catch {}
+  $("bind-banner").style.display = (!myEmail && !dismissed) ? "" : "none";
   syncHeaderH();
   prevSnapshot = null;
   showView("main");
@@ -803,19 +847,66 @@ function showDash(user, admin, userId) {
   loadEstimates();
   startAutoRefresh();
 }
-$("auth-switch").onclick = () => {
-  mode = mode === "login" ? "register" : "login";
-  $("auth-title").textContent = mode === "login" ? "登录" : "注册";
-  $("auth-btn").textContent = mode === "login" ? "登录" : "注册";
-  $("auth-switch").textContent = mode === "login" ? "没有账号？去注册" : "已有账号？去登录";
-  $("auth-err").textContent = "";
+function setAuthMode(m) {
+  mode = m;
+  $("auth-title").textContent = m === "login" ? "登录" : (m === "register" ? "注册" : "重置密码");
+  $("auth-btn").textContent = m === "login" ? "登录" : (m === "register" ? "注册" : "重置密码");
+  $("auth-switch").textContent = m === "login" ? "没有账号？去注册" : "已有账号？去登录";
+  $("auth-login-fields").style.display = m === "login" ? "" : "none";
+  $("auth-register-fields").style.display = m === "register" ? "" : "none";
+  $("auth-reset-fields").style.display = m === "reset" ? "" : "none";
+  $("auth-err").textContent = ""; $("auth-ok").textContent = "";
+}
+$("auth-switch").onclick = () => setAuthMode(mode === "login" ? "register" : "login");
+$("auth-forgot").onclick = () => setAuthMode("reset");
+function startCodeCountdown(btn) {
+  let left = 60; btn.disabled = true; btn.textContent = left + " 秒后重发";
+  const t = setInterval(() => {
+    left--;
+    if (left <= 0) { clearInterval(t); btn.disabled = false; btn.textContent = "发送验证码"; }
+    else btn.textContent = left + " 秒后重发";
+  }, 1000);
+}
+async function sendCode(email, purpose, btn, errEl, okEl) {
+  errEl.textContent = ""; if (okEl) okEl.textContent = "";
+  try {
+    await api("/api/email/send-code", { method: "POST", body: JSON.stringify({ email, purpose }) });
+    if (okEl) okEl.textContent = "验证码已发送，请查收邮箱（10 分钟内有效）";
+    startCodeCountdown(btn);
+  } catch (e) { errEl.textContent = e.message; }
+}
+$("reg-send-code").onclick = () => sendCode($("reg-email").value.trim(), "register", $("reg-send-code"), $("auth-err"), $("auth-ok"));
+$("reset-send-code").onclick = () => sendCode($("reset-email").value.trim(), "reset", $("reset-send-code"), $("auth-err"), $("auth-ok"));
+$("bind-send-code").onclick = () => sendCode($("bind-email").value.trim(), "bind", $("bind-send-code"), $("bind-err"), $("bind-ok"));
+$("bind-dismiss").onclick = () => {
+  try { localStorage.setItem("fv-bind-dismissed-" + myUsername, "1"); } catch {}
+  $("bind-banner").style.display = "none";
+};
+$("bind-btn").onclick = async () => {
+  try {
+    const r = await api("/api/email/bind", { method: "POST", body: JSON.stringify({ email: $("bind-email").value.trim(), code: $("bind-code").value.trim() }) });
+    myEmail = r.email;
+    $("account-email").textContent = "邮箱：" + myEmail;
+    $("bind-banner").style.display = "none";
+  } catch (e) { $("bind-err").textContent = e.message; }
 };
 $("auth-btn").onclick = async () => {
   try {
-    const body = JSON.stringify({ username: $("username").value.trim(), password: $("password").value });
-    if (mode === "register") await api("/api/register", { method: "POST", body });
-    await api("/api/login", { method: "POST", body });
-    const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id);
+    if (mode === "register") {
+      await api("/api/register", { method: "POST", body: JSON.stringify({
+        username: $("reg-username").value.trim(), password: $("reg-password").value,
+        email: $("reg-email").value.trim(), code: $("reg-code").value.trim() }) });
+    } else if (mode === "reset") {
+      await api("/api/password/reset", { method: "POST", body: JSON.stringify({
+        email: $("reset-email").value.trim(), code: $("reset-code").value.trim(),
+        new_password: $("reset-password").value }) });
+      setAuthMode("login");
+      $("auth-ok").textContent = "密码已重置，请用新密码登录";
+      return;
+    } else {
+      await api("/api/login", { method: "POST", body: JSON.stringify({ username: $("username").value.trim(), password: $("password").value }) });
+    }
+    const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id, me.email);
   } catch (e) { $("auth-err").textContent = e.message; }
 };
 $("logout-btn").onclick = async () => { await api("/api/logout", { method: "POST" }); try { localStorage.removeItem(estimatesCacheKey()); localStorage.removeItem(historyCacheKey()); } catch {} myUsername = ""; $("userbox").textContent = ""; showAuth(); };
@@ -1459,7 +1550,7 @@ async function loadEstimates() {
 }
 $("refresh-btn").onclick = loadEstimates;
 syncHeaderH();
-(async () => { try { const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id); } catch { showAuth(); } })();
+(async () => { try { const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id, me.email); } catch { showAuth(); } })();
 </script>
 </body>
 </html>
