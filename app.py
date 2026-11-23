@@ -39,7 +39,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.18.2"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.19.0"  # keep in sync with the footer in static/index.html
 BACKUP_DIR = DB_PATH.parent / "backups"
 BACKUP_KEEP = 10
 # New backups are gzip-compressed (.db.gz); legacy plain .db backups from
@@ -148,6 +148,10 @@ def init_db():
             isin TEXT,
             yahoo_symbol TEXT,
             resolved_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS fund_stock_position(
+            fund_code TEXT PRIMARY KEY,
+            stock_pct REAL,
+            fetched_at REAL NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -1754,12 +1758,16 @@ async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: 
     return None
 
 
-def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int) -> list:
+def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int,
+                residual_pct: float = 0.0) -> list:
     """Fund intraday estimate curve from holdings' minute trends:
     pct(t) = sum(weight% * stock change%(t)) / 100 on the union minute
     grid (Asia/Shanghai day from start_ts), forward-filled per stock
     (excluded before its first point), no renormalization — same
-    convention as /api/estimates. Downsampled to 5-minute buckets."""
+    convention as /api/estimates. With residual_pct > 0 (P0 fill), the
+    undisclosed stock weight additionally moves at the disclosed
+    holdings' weighted-average change at each timestamp, mirroring
+    _live_est_pct. Downsampled to 5-minute buckets."""
     per_stock = []  # (weight, [(ts, chg_pct), ...])
     for h in holdings:
         if not h["weight"]:
@@ -1779,13 +1787,18 @@ def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int) -> list:
     buckets = {}
     for ts in grid:
         total, any_data = 0.0, False
+        wchg, quoted_w = 0.0, 0.0
         for i, (w, pts) in enumerate(per_stock):
             while idx[i] < len(pts) and pts[idx[i]][0] <= ts:
                 last[i] = pts[idx[i]][1]
                 idx[i] += 1
             if last[i] is not None:
                 total += w * last[i] / 100
+                wchg += w * last[i]
+                quoted_w += w
                 any_data = True
+        if any_data and residual_pct > 0 and quoted_w > 0:
+            total += residual_pct * (wchg / quoted_w) / 100
         if any_data:
             # Bucket timestamp = bucket start (5-min grid); the value is the
             # last computed point inside the bucket. Beijing session opens
@@ -1877,17 +1890,35 @@ async def resolve_fund_index(fund_code: str) -> Optional[dict]:
     return {"index_name": index_name, "secid": secid} if secid else None
 
 
-def _live_est_pct(holdings: list, syms: list, quotes: dict):
+def _residual_pct(coverage: float, stock_position: Optional[float]) -> float:
+    """Undisclosed stock weight (% of NAV): total stock position minus the
+    disclosed top-10 coverage, floored at 0. Unknown position -> 0 (old
+    no-fill behavior)."""
+    if stock_position is None:
+        return 0.0
+    return max(stock_position - coverage, 0.0)
+
+
+def _live_est_pct(holdings: list, syms: list, quotes: dict,
+                  stock_position: Optional[float] = None):
     """Main estimate from live quotes: sum(weight% * change%) / 100 over
-    quoted holdings (no renormalization). Single source for both
-    /api/estimates and the final point of /api/history/today, so the
-    curve end and the card number are the same computation."""
-    est_pct, coverage = 0.0, 0.0
+    quoted holdings (no renormalization), plus P0 residual fill: the
+    undisclosed stock weight (total stock position - top-10 coverage)
+    moves at the disclosed holdings' weighted-average change instead of
+    being assumed flat. Single source for both /api/estimates and the
+    final point of /api/history/today, so the curve end and the card
+    number are the same computation."""
+    est_pct, coverage, quoted_w, wchg = 0.0, 0.0, 0.0, 0.0
     for h, sym in zip(holdings, syms):
         coverage += h["weight"]
         q = quotes.get(sym) if sym else None
         if q:
             est_pct += h["weight"] * q["change_pct"] / 100
+            quoted_w += h["weight"]
+            wchg += h["weight"] * q["change_pct"]
+    residual = _residual_pct(coverage, stock_position)
+    if residual > 0 and quoted_w > 0:
+        est_pct += residual * (wchg / quoted_w) / 100
     return est_pct, coverage
 
 
@@ -2293,10 +2324,14 @@ async def _compute_estimates(uid):
             hold = {"holdings": [], "report_label": None, "report_date": None, "stale": True}
         mmap = await fetch_stock_market_map(r["fund_code"])
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
-        return (r, nav, hold, syms)
+        try:
+            stock_position = await fetch_stock_position(r["fund_code"])
+        except Exception:
+            stock_position = None
+        return (r, nav, hold, syms, stock_position)
 
     per_fund = await asyncio.gather(*[_fund_inputs(r) for r in rows])
-    all_symbols = [s for (_, _, _, syms) in per_fund for s in syms if s]
+    all_symbols = [s for (_, _, _, syms, _) in per_fund for s in syms if s]
     # Bond funds (no stock holdings) are estimated from the 10Y treasury
     # ETF (511260) daily change; always fetch its quote alongside.
     all_symbols.append("sh511260")
@@ -2304,7 +2339,7 @@ async def _compute_estimates(uid):
     q_stale = quotes_stale()
     # Industries/sectors for the union of holding codes (A-share via F10,
     # DB-cached 30d; overseas via manual table; failures yield no sector).
-    ind_codes = sorted({h["code"] for (_, _, hold, _) in per_fund
+    ind_codes = sorted({h["code"] for (_, _, hold, _, _) in per_fund
                         for h in hold["holdings"] if h["code"]})
     ind_results = await asyncio.gather(
         *[fetch_industry(c) for c in ind_codes], return_exceptions=True)
@@ -2317,9 +2352,10 @@ async def _compute_estimates(uid):
     fund_types = {r["fund_code"]: (v if isinstance(v, str) else None)
                   for r, v in zip(rows, type_results)}
     out = []
-    for r, nav, hold, syms in per_fund:
+    for r, nav, hold, syms, stock_position in per_fund:
         est_pct, est_pct_ext, coverage, quote_time, skipped = 0.0, 0.0, 0.0, None, []
         has_us, has_ext = False, False
+        quoted_w_ext, wchg_ext = 0.0, 0.0
         detail = []
         for h, sym in zip(hold["holdings"], syms):
             coverage += h["weight"]
@@ -2332,9 +2368,12 @@ async def _compute_estimates(uid):
                     has_us = True
                     if chg_ext is not None:
                         has_ext = True
-                    est_pct_ext += h["weight"] * (chg_ext if chg_ext is not None else q["change_pct"]) / 100
+                    chg_used = chg_ext if chg_ext is not None else q["change_pct"]
                 else:
-                    est_pct_ext += h["weight"] * q["change_pct"] / 100
+                    chg_used = q["change_pct"]
+                est_pct_ext += h["weight"] * chg_used / 100
+                quoted_w_ext += h["weight"]
+                wchg_ext += h["weight"] * chg_used
                 qt = q["quote_time"]
                 if qt and (quote_time is None or qt.replace("/", "-") > quote_time.replace("/", "-")):
                     quote_time = qt
@@ -2343,9 +2382,14 @@ async def _compute_estimates(uid):
             else:
                 skipped.append(h["code"])
                 detail.append({**h, "change_pct": None, "change_pct_ext": None})
+        # P0 residual fill for the ext estimate too: undisclosed stock
+        # weight moves at the disclosed holdings' ext weighted average.
+        residual = _residual_pct(coverage, stock_position)
+        if residual > 0 and quoted_w_ext > 0:
+            est_pct_ext += residual * (wchg_ext / quoted_w_ext) / 100
         # Main estimate: same helper the history endpoint uses for its
         # final curve point (same quotes, same formula).
-        est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes)
+        est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes, stock_position)
         # ETF feeder funds have no usable stock holdings (est would be a
         # meaningless 0.00%): use the tracking index's latest change.
         feeder_applied = False
@@ -2434,6 +2478,8 @@ async def _compute_estimates(uid):
             "est_nav_ext": round(est_nav_ext, 4) if est_nav_ext else None,
             "est_change_pct_ext": round(est_pct_ext, 2) if show_ext else None,
             "coverage_pct": round(coverage, 2),
+            "stock_position_pct": round(stock_position, 2) if stock_position is not None else None,
+            "residual_pct": round(_residual_pct(raw_coverage, stock_position), 2),
             "report_label": hold["report_label"], "report_date": hold["report_date"],
             "quote_time": quote_time,
             "stale": False if no_stock_holdings else (nav["stale"] or hold["stale"] or q_stale),
@@ -2534,7 +2580,11 @@ async def _compute_series(uid):
         hold = await fetch_holdings(code)
         mmap = await fetch_stock_market_map(code)
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
-        return code, fr["fund_name"], hold["holdings"], mmap, syms
+        try:
+            stock_position = await fetch_stock_position(code)
+        except Exception:
+            stock_position = None
+        return code, fr["fund_name"], hold["holdings"], mmap, syms, stock_position
 
     # Fault-tolerant: one fund's upstream failure must not blank every
     # curve (a 500 here leaves all sparklines empty).
@@ -2544,12 +2594,12 @@ async def _compute_series(uid):
     for fr, res in zip(fund_rows, raw_inputs):
         if isinstance(res, Exception):
             print(f"[history] inputs failed for {fr['fund_code']}: {res!r}")
-            per_fund.append((fr["fund_code"], fr["fund_name"], [], None, []))
+            per_fund.append((fr["fund_code"], fr["fund_name"], [], None, [], None))
         else:
             per_fund.append(res)
     # One trends fetch per unique holding code across all funds.
     uniq = {}
-    for _, _, holdings, mmap, _ in per_fund:
+    for _, _, holdings, mmap, _, _ in per_fund:
         for h in holdings:
             uniq.setdefault(h["code"], (mmap, h.get("name")))
     fetched = await asyncio.gather(*[
@@ -2559,14 +2609,16 @@ async def _compute_series(uid):
                       for c, v in zip(uniq.keys(), fetched)}
     # Live quotes from the same 45s cache /api/estimates reads, for the
     # final curve point (curve end == card estimate by construction).
-    all_symbols = [s for (_, _, _, _, syms) in per_fund for s in syms if s]
+    all_symbols = [s for (_, _, _, _, syms, _) in per_fund for s in syms if s]
     all_symbols.append("sh511260")  # bond-fund estimate source (see _compute_estimates)
     quotes = await fetch_quotes(all_symbols)
     now_ts = int(time.time())
     series = {}
-    for code, fund_name, holdings, _, syms in per_fund:
+    for code, fund_name, holdings, _, syms, stock_position in per_fund:
       try:
-        pts = _fund_curve(holdings, trends_by_code, start_ts)
+        raw_cov = sum(h["weight"] for h in holdings)
+        pts = _fund_curve(holdings, trends_by_code, start_ts,
+                          _residual_pct(raw_cov, stock_position))
         feeder_tr = None
         if not pts and _is_feeder(fund_name, holdings):
             # ETF feeder fund: curve from its tracking index (weight 100%).
@@ -2596,7 +2648,7 @@ async def _compute_series(uid):
         if pts:
             # Final point = live estimate from the same quotes/formula as
             # /api/estimates (feeder funds: tracking index latest change).
-            est_pct, coverage = _live_est_pct(holdings, syms, quotes)
+            est_pct, coverage = _live_est_pct(holdings, syms, quotes, stock_position)
             if coverage == 0 and _is_feeder(fund_name, holdings):
                 if feeder_tr is None:
                     idx = await resolve_fund_index(code)
@@ -2715,19 +2767,31 @@ def _cache_fresh(fetched_at, ttl: int) -> bool:
         return False
 
 
-async def fetch_returns_all() -> list:
+RANK_CATS = {"all", "gp", "hh", "zq", "zs", "qdii", "fof"}
+
+
+async def fetch_returns_all(ft: str = "all") -> list:
+    """Full rankhandler dataset for one fund category (ft=all/gp/hh/zq/zs/
+    qdii/fof). Page count comes from the response's allRecords (5000 rows
+    per page); parse in a thread so the event loop stays responsive."""
     async def one_page(page):
         resp = await upstream_get(
-            "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0"
+            f"https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft={ft}&rs=&gs=0"
             f"&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi={page}&pn=5000&dx=1&v=0.123456",
             referer=RANK_REF, timeout=60,
         )
-        # 5000-row pages: parse in a thread so the event loop stays responsive
-        return await asyncio.to_thread(parse_rank_rows, resp.text)
+        return resp.text
 
+    first = await one_page(1)
+    m = re.search(r"allRecords:(\d+)", first)
+    total = int(m.group(1)) if m else 5000
+    pages = max(1, math.ceil(total / 5000))
+    texts = [first]
+    if pages > 1:
+        texts += await asyncio.gather(*(one_page(p) for p in range(2, pages + 1)))
     rows = []
-    for batch in await asyncio.gather(*(one_page(p) for p in range(1, 6))):
-        rows += batch
+    for t in texts:
+        rows += await asyncio.to_thread(parse_rank_rows, t)
     if not rows:
         raise ValueError("empty rank data")
     return rows
@@ -2811,6 +2875,51 @@ async def fetch_stock_market_map(code: str):
     return hit[0] if hit else None
 
 
+def parse_stock_position(text: str) -> Optional[float]:
+    """Latest 股票占净比 (%) from pingzhongdata Data_assetAllocation
+    (quarterly series; verified 2026-11-23: 024481 -> 84.55 at 2026-09-30).
+    None when absent/unparseable."""
+    m = re.search(r"Data_assetAllocation\s*=\s*(\{.*?\});", text, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+        for s in data.get("series", []):
+            if s.get("name") == "股票占净比":
+                vals = [v for v in s.get("data", []) if isinstance(v, (int, float))]
+                return float(vals[-1]) if vals else None
+    except Exception:
+        return None
+    return None
+
+
+async def fetch_stock_position(code: str) -> Optional[float]:
+    """Fund's total stock position (% of NAV) from the latest quarterly
+    asset-allocation disclosure. DB-cached 24h (same cadence as holdings);
+    failures cached as NULL and retried after a day. None -> caller falls
+    back to the old no-fill estimate; never raises."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT stock_pct, fetched_at FROM fund_stock_position WHERE fund_code=?",
+            (code,)).fetchone()
+    if row and time.time() - row["fetched_at"] < HOLDINGS_TTL:
+        return row["stock_pct"]
+    pct = None
+    try:
+        pct = parse_stock_position(await fetch_pingzhong_text(code))
+    except Exception:
+        pct = None
+    if pct is None and row and row["stock_pct"] is not None:
+        return row["stock_pct"]  # keep last known value on upstream failure
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO fund_stock_position(fund_code, stock_pct, fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(fund_code) DO UPDATE SET stock_pct=excluded.stock_pct, "
+            "fetched_at=excluded.fetched_at",
+            (code, pct, time.time()))
+    return pct
+
+
 def is_us_holding(code: str, market_map: dict) -> bool:
     """US holding per pingzhongdata market prefix (105/106/107) or US ISIN.
 
@@ -2845,7 +2954,9 @@ async def compute_qdii_us() -> dict:
         us_w = sum(h["weight"] for h in hs if is_us_holding(h["code"], market_map))
         return {
             "code": r["code"], "name": r["name"],
-            "us_pct": round(us_w / total_w * 100, 1),
+            # absolute share: US weight as % of fund NAV (v1.18.3; was
+            # relative to the disclosed top-10 total)
+            "us_pct": round(us_w, 1),
             "coverage": round(total_w, 2), "y1": r["y1"],
             "report_label": hold["report_label"],
         }
@@ -2908,7 +3019,8 @@ async def compute_vol_top() -> dict:
 
     results = await asyncio.gather(*(one(c, e) for c, e in pool.items()))
     items = [x for x in results if x]
-    items.sort(key=lambda x: x["vol"], reverse=True)
+    # ascending: lower volatility ranks first (v1.18.3)
+    items.sort(key=lambda x: x["vol"])
     return {"updated_at": now_iso(), "total": len(pool),
             "pool_size": len(pool), "items": items[:30]}
 
@@ -2927,7 +3039,9 @@ def _rank_lock(key: str) -> asyncio.Lock:
 
 
 # Typical full-compute durations in seconds (measured) for warming ETAs.
-_RANK_ETA = {"returns_all": 100, "vol_top": 200, "qdii_us_v2": 240}
+_RANK_ETA = {"returns_all": 100, "vol_top_v2": 200, "qdii_us_v3": 240,
+             "returns_gp": 60, "returns_hh": 80, "returns_zq": 60,
+             "returns_zs": 60, "returns_qdii": 60, "returns_fof": 60}
 # In-memory per-board compute state: {"state": "computing", "started_at": epoch}
 _rank_state: dict = {}
 _rank_tasks: dict = {}
@@ -2941,9 +3055,9 @@ def _rank_mark_idle(key: str):
     _rank_state[key] = {"state": "idle", "started_at": None}
 
 
-async def _compute_returns_payload() -> dict:
-    rows = await fetch_returns_all()
-    return {"rows": rows, "updated_at": now_iso()}
+async def _compute_returns_payload(cat: str = "all") -> dict:
+    rows = await fetch_returns_all(cat)
+    return {"rows": rows, "updated_at": now_iso(), "cat": cat}
 
 
 async def _get_or_compute(key: str, ttl: int, compute) -> tuple:
@@ -3010,8 +3124,8 @@ def _warming_response(key: str) -> JSONResponse:
 
 _RANK_BOARDS = [
     ("returns_all", RETURNS_TTL, _compute_returns_payload),
-    ("vol_top", VOL_TTL, compute_vol_top),
-    ("qdii_us_v2", QDII_US_TTL, compute_qdii_us),
+    ("vol_top_v2", VOL_TTL, compute_vol_top),
+    ("qdii_us_v3", QDII_US_TTL, compute_qdii_us),
 ]
 
 
@@ -3041,13 +3155,18 @@ async def _rank_warm_loop():
 
 
 @app.get("/api/rank/returns")
-async def rank_returns(period: str = "1y", session: Optional[str] = Cookie(default=None)):
+async def rank_returns(period: str = "1y", cat: str = "all",
+                       session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
     if period not in PERIOD_FIELDS:
         raise HTTPException(400, "period 不支持")
-    got = await _board_payload("returns_all", RETURNS_TTL, _compute_returns_payload)
+    if cat not in RANK_CATS:
+        cat = "all"
+    key = "returns_all" if cat == "all" else f"returns_{cat}"
+    got = await _board_payload(key, RETURNS_TTL,
+                               lambda cat=cat: _compute_returns_payload(cat))
     if got is None:
-        return _warming_response("returns_all")
+        return _warming_response(key)
     payload, stale = got
     field = PERIOD_FIELDS[period]
     rows = sorted(payload["rows"], key=lambda r: (r[field] is None, -(r[field] or 0)))
@@ -3055,16 +3174,16 @@ async def rank_returns(period: str = "1y", session: Optional[str] = Cookie(defau
     for i, r in enumerate(rows[:30]):
         items.append({"rank": i + 1, **{k: r[k] for k in
                       ("code", "name", "date", "nav", "daily", "w1", "m1", "m3", "m6", "y1", "ytd")}})
-    return {"period": period, "updated_at": payload["updated_at"],
+    return {"period": period, "cat": cat, "updated_at": payload["updated_at"],
             "total": len(payload["rows"]), "stale": stale, "items": items}
 
 
 @app.get("/api/rank/qdii-us")
 async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
-    got = await _board_payload("qdii_us_v2", QDII_US_TTL, compute_qdii_us)
+    got = await _board_payload("qdii_us_v3", QDII_US_TTL, compute_qdii_us)
     if got is None:
-        return _warming_response("qdii_us_v2")
+        return _warming_response("qdii_us_v3")
     payload, stale = got
     items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
     return {"updated_at": payload["updated_at"], "total": payload["total"], "stale": stale,
@@ -3075,9 +3194,9 @@ async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
 @app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.12.1 path)
 async def rank_vol(session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
-    got = await _board_payload("vol_top", VOL_TTL, compute_vol_top)
+    got = await _board_payload("vol_top_v2", VOL_TTL, compute_vol_top)
     if got is None:
-        return _warming_response("vol_top")
+        return _warming_response("vol_top_v2")
     payload, stale = got
     items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
     return {"updated_at": payload["updated_at"], "total": payload["total"],

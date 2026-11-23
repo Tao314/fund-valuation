@@ -232,6 +232,15 @@
           <button class="chip" data-board="us">美股占比（QDII）</button>
           <button class="chip" data-board="vol">波动率</button>
         </div>
+        <div class="chip-row" id="rank-cats">
+          <button class="chip active" data-cat="all">全部</button>
+          <button class="chip" data-cat="gp">股票型</button>
+          <button class="chip" data-cat="hh">混合型</button>
+          <button class="chip" data-cat="zq">债券型</button>
+          <button class="chip" data-cat="zs">指数型</button>
+          <button class="chip" data-cat="qdii">QDII</button>
+          <button class="chip" data-cat="fof">FOF</button>
+        </div>
         <div class="chip-row" id="rank-periods">
           <button class="chip" data-period="daily">昨日</button>
           <button class="chip" data-period="1w">近1周</button>
@@ -322,7 +331,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.18.2 · 更新于 2026-11-23 10:40</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.19.0 · 更新于 2026-11-23 11:36</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -595,7 +604,8 @@ $("admin-add-user-btn").onclick = async () => {
   } catch (e) { setAdminErr(e.message); }
 };
 /* ---- ranking view (v1.11.0) ---- */
-let rankBoard = "returns", rankPeriod = "1y";
+let rankBoard = "returns", rankPeriod = "1y", rankCat = "all";
+const CAT_LABELS = { all: "全部", gp: "股票型", hh: "混合型", zq: "债券型", zs: "指数型", qdii: "QDII", fof: "FOF" };
 const rankMem = {};  // in-memory cache per board+period for this session
 const PERIOD_KEY = { daily: "daily", "1w": "w1", "1m": "m1", "3m": "m3", "6m": "m6", "1y": "y1", ytd: "ytd" };
 function fmtLocalTime(iso) {
@@ -610,15 +620,23 @@ function rankRow(it, valHtml, sub) {
 }
 const RANK_NOTES = {
   returns: "东方财富全市场基金（约 2 万只），按所选周期涨幅从高到低取前 30",
-  us: "QDII 基金（225 只）中，按最新披露前十大持仓的美股占比从高到低取前 30；前十大覆盖率低于 5% 的不入榜",
+  us: "QDII 基金中，按最新披露前十大持仓的美股权重占基金净值比例从高到低取前 30；前十大覆盖率低于 5% 的不入榜",
 };
-function updateRankNote(poolSize) {
-  $("rank-note").textContent = rankBoard === "vol"
-    ? "涨幅榜 7 个周期前 30 合并去重（共 " + (poolSize != null ? poolSize : "—") + " 只）中，按近 1 年年化波动率从高到低取前 30"
-    : (RANK_NOTES[rankBoard] || "");
+function updateRankNote(data) {
+  let note;
+  if (rankBoard === "vol") {
+    const poolSize = data ? data.pool_size : null;
+    note = "涨幅榜 7 个周期前 30 合并去重（共 " + (poolSize != null ? poolSize : "—") + " 只）中，按近 1 年年化波动率从低到高取前 30（波动越小越靠前）";
+  } else if (rankBoard === "returns" && rankCat !== "all") {
+    const total = data && data.total != null ? "共 " + data.total + " 只，" : "";
+    note = CAT_LABELS[rankCat] + "基金" + total + "按所选周期涨幅从高到低取前 30";
+  } else {
+    note = RANK_NOTES[rankBoard] || "";
+  }
+  $("rank-note").textContent = note;
 }
 function renderRank(data) {
-  updateRankNote(data.pool_size);
+  updateRankNote(data);
   const items = data.items || [];
   let html = "";
   if (rankBoard === "returns") {
@@ -649,7 +667,7 @@ function etaText(sec) { return sec < 60 ? "不到 1 分钟" : "约 " + Math.ceil
 async function loadRank() {
   stopRankPoll();
   updateRankNote(null);
-  const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod : rankBoard;
+  const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod + ":" + rankCat : rankBoard;
   $("rank-err").textContent = "";
   if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
   $("rank-list").innerHTML = '<div class="muted">加载中…</div>';
@@ -657,12 +675,12 @@ async function loadRank() {
   await fetchRank(cacheKey);
 }
 async function fetchRank(cacheKey) {
-  const board = rankBoard, period = rankPeriod;
+  const board = rankBoard, period = rankPeriod, cat = rankCat;
   try {
-    const url = board === "returns" ? "/api/rank/returns?period=" + period
+    const url = board === "returns" ? "/api/rank/returns?period=" + period + "&cat=" + cat
       : board === "us" ? "/api/rank/qdii-us" : "/api/rank/vol";
     const data = await api(url);
-    if (board !== rankBoard || period !== rankPeriod) return;  // user switched meanwhile
+    if (board !== rankBoard || period !== rankPeriod || cat !== rankCat) return;  // user switched meanwhile
     if (data.warming) {
       $("rank-list").innerHTML = '<div class="muted rank-warming">数据正在准备中，预计还需' + etaText(data.eta_seconds || 60) + '<span class="dot">…</span></div>';
       $("rank-updated").textContent = "";
@@ -684,6 +702,14 @@ document.querySelectorAll("#rank-boards .chip").forEach(b => {
     rankBoard = b.dataset.board;
     document.querySelectorAll("#rank-boards .chip").forEach(x => x.classList.toggle("active", x === b));
     $("rank-periods").style.display = rankBoard === "returns" ? "" : "none";
+    $("rank-cats").style.display = rankBoard === "returns" ? "" : "none";
+    loadRank();
+  };
+});
+document.querySelectorAll("#rank-cats .chip").forEach(b => {
+  b.onclick = () => {
+    rankCat = b.dataset.cat;
+    document.querySelectorAll("#rank-cats .chip").forEach(x => x.classList.toggle("active", x === b));
     loadRank();
   };
 });
@@ -1021,7 +1047,7 @@ function tradingMinutesAt(ts, segs) {
   }
   return acc;
 }
-function sparklineHtml(f) {
+function sparklineHtml(f, published) {
   const raw = historySeries[f.fund_code];
   const hasPts = Array.isArray(raw) && raw.length >= 2;
   const segs = sparkSegments(f);
@@ -1056,7 +1082,14 @@ function sparklineHtml(f) {
   };
   const Y = v => YB - (v + bound) / (2 * bound) * (YB - YT);
   const last = hasPts ? vals[vals.length - 1] : 0;
-  const color = last >= 0 ? "#C9362B" : "#07845B";
+  // Color follows the value the card displays (the 自算估值 row / big
+  // number = est_change_pct), not the series' last point: historySeries
+  // and estimates refresh on separate cycles, so a stale series could
+  // paint the curve green while the card number is already red.
+  // Published cards keep the curve's own last point (the curve then
+  // depicts the published day's estimate path).
+  const colorVal = (!published && f.est_change_pct != null) ? f.est_change_pct : last;
+  const color = colorVal >= 0 ? "#C9362B" : "#07845B";
   // One continuous line: segment joins are adjacent on the compressed
   // axis, so the line connects across lunch breaks / market handoffs.
   // Empty frame (no points yet): no line, no area, no end dot.
@@ -1211,7 +1244,7 @@ function renderFunds(data) {
       </div>
       <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${metaParts.join(" · ")}</div>
       ${rows}
-      ${f.no_stock_holdings ? "" : sparklineHtml(f)}
+      ${f.no_stock_holdings ? "" : sparklineHtml(f, published)}
       </div>`;
     });
   });
