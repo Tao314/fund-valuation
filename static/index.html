@@ -532,6 +532,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.8</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">同花顺兜底补齐：A股日线（东财日线失败时）、A股实时行情（新浪失败时）、基金行业配置（F10 行业失败时，仅显示行业与占比）；港美股日线/行情、基金搜索、排行榜仍无独立兜底</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.7</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">接入同花顺官方接口作净值/持仓/股票仓位兜底（东财失败时自动切换）；「数据接口」页按数据类型分组卡片展示，一眼看出每组有无兜底、是否异常；用户管理按注册顺序编号</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.6</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">数据流异常时页面底部自动提示、恢复后消失（200 空数据的软限流也算异常）；管理页新增「数据接口」子页（全部上游接口与最近状态）；系统状态页增加系统文件目录树</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.5</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">分时数据增加 Yahoo 兜底，东财双主机被限流时美股曲线仍可出图</div></div></div>
@@ -549,7 +550,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.7 · 更新于 2026-11-24 00:10</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.8 · 更新于 2026-11-24 00:25</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;

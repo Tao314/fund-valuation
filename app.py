@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.7"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.8"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -1299,6 +1299,12 @@ _SOURCE_CATALOG = [
      "基金前十大持仓（东财 jjcc 失败时兜底）", "兜底"),
     ("fuyao_asset", "同花顺资产配置", "同花顺",
      "股票仓位（东财 pingzhongdata 失败时兜底）", "兜底"),
+    ("fuyao_kline", "同花顺日线", "同花顺",
+     "A股日线收盘价（东财日线失败时兜底，仅A股）", "兜底"),
+    ("fuyao_snapshot", "同花顺A股快照", "同花顺",
+     "A股实时行情（新浪失败时兜底，仅A股）", "兜底"),
+    ("fuyao_industry", "同花顺行业配置", "同花顺",
+     "基金行业配置（东财 F10 行业失败时兜底，基金层面口径）", "兜底"),
 ]
 _SOURCE_KEYS = [c[0] for c in _SOURCE_CATALOG]
 # Data-type groups for the 数据接口 page (v1.4.7): each group shows its
@@ -1308,11 +1314,11 @@ _SOURCE_GROUPS = [
     ("基金持仓", ["em_holdings", "fuyao_holdings"]),
     ("股票仓位", ["em_pingzhong", "fuyao_asset"]),
     ("分时曲线", ["em_trends", "yahoo_trends", "tencent"]),
-    ("股票行情", ["sina", "em_ulist"]),
-    ("股票日线", ["em_kline"]),
+    ("股票行情", ["sina", "em_ulist", "fuyao_snapshot"]),
+    ("股票日线", ["em_kline", "fuyao_kline"]),
     ("基金搜索", ["em_search"]),
     ("排行榜", ["em_rank"]),
-    ("行业板块", ["em_f10"]),
+    ("行业板块", ["em_f10", "fuyao_industry"]),
     ("其他", ["em_suggest", "em_jbgk", "ipapi"]),
 ]
 # Core data paths for the 数据流异常判定： live quotes + official NAV +
@@ -1364,6 +1370,12 @@ def _classify_source(url: str) -> str:
             return "fuyao_holdings"
         if "portfolio/asset-allocation" in u:
             return "fuyao_asset"
+        if "prices/historical" in u:
+            return "fuyao_kline"
+        if "prices/snapshot" in u:
+            return "fuyao_snapshot"
+        if "portfolio/industry-allocation" in u:
+            return "fuyao_industry"
         return "other"
     return "other"
 
@@ -1558,7 +1570,8 @@ def _validate_upstream_payload(url: str, resp, now: Optional[datetime] = None):
             if isinstance(node, dict) and isinstance(node.get(code), dict):
                 return True, None  # rows<10 (US placeholder) judged by caller
             return False, _EMPTY_PAYLOAD_ERR
-        if key in ("fuyao_nav", "fuyao_holdings", "fuyao_asset"):
+        if key in ("fuyao_nav", "fuyao_holdings", "fuyao_asset",
+                   "fuyao_kline", "fuyao_snapshot", "fuyao_industry"):
             data = _resp_json(resp)
             if data is _JSON_INVALID or not isinstance(data, dict):
                 return False, _BAD_JSON_ERR
@@ -1846,7 +1859,9 @@ async def fetch_mrf_nav(code: str, name: str = "") -> dict:
 
 # ------------------------------------------------- fuyao fallback (v1.4.7)
 # Tonghuashun official API as an independent fallback for NAV / holdings /
-# stock position. Eastmoney stays primary; these run only when the
+# stock position (v1.4.7) plus A-share daily closes / A-share snapshot /
+# fund industry allocation (v1.4.8). Eastmoney stays primary; these run
+# only when the
 # Eastmoney call failed or returned no data, and only when FUYAO_API_KEY
 # is configured. All calls go through upstream_get (stats + payload
 # validation); the key travels in the X-api-key header, never in URLs.
@@ -1984,6 +1999,140 @@ async def fetch_stock_position_fuyao(code: str) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+def _fuyao_thscode(secid: str) -> Optional[str]:
+    """Fuyao thscode for an A-share Eastmoney secid ("1.600519" ->
+    "600519.SH", "0.000001" -> "000001.SZ"). None for anything else
+    (HK/US/JP/KR/TW, indices, BJ 4/8/92 codes): fuyao has no fallback
+    for those markets."""
+    prefix, _, code = (secid or "").partition(".")
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    if prefix == "1":
+        return f"{code}.SH"
+    if prefix == "0" and not (code.startswith("92") or code[0] in "48"):
+        return f"{code}.SZ"
+    return None
+
+
+async def fetch_daily_closes_fuyao(secid: str) -> dict:
+    """{date: close} A-share daily closes from fuyao (v1.4.8 fallback
+    for the Eastmoney kline API; same forward-adjusted basis, fqt=1).
+    {} for non-A-share secids or on any failure."""
+    thscode = _fuyao_thscode(secid)
+    if not thscode:
+        return {}
+    try:
+        end = datetime.now(CN_TZ)
+        start = end - timedelta(days=240)
+        node = await _fuyao_get(
+            f"/api/a-share/prices/historical?thscode={thscode}&interval=1d"
+            f"&adjust=forward&start={int(start.timestamp() * 1000)}"
+            f"&end={int(end.timestamp() * 1000)}")
+        out = {}
+        for it in node.get("item") or []:
+            if not isinstance(it, dict):
+                continue
+            d = _fuyao_date(it.get("date_ms"))
+            try:
+                c = float(it.get("close_price"))
+            except (TypeError, ValueError):
+                continue
+            if d and c > 0:
+                out[d] = c
+        return out
+    except Exception:
+        return {}
+
+
+async def fetch_snapshot_fuyao(symbols: list[str]) -> dict:
+    """A-share quotes from fuyao snapshot (v1.4.8 fallback when Sina
+    produced nothing for these symbols). Takes Sina symbols (sh/sz +
+    6 digits), returns {sina_symbol: quote} in the Sina quote shape.
+    Fuyao items carry no stock name; name stays None (callers use the
+    holding's own name). {} on failure."""
+    ths_of = {}
+    for s in symbols:
+        m = re.fullmatch(r"(sh|sz)(\d{6})", s or "")
+        if m:
+            ths_of[f"{m.group(2)}.{'SH' if m.group(1) == 'sh' else 'SZ'}"] = s
+    if not ths_of:
+        return {}
+    try:
+        node = await _fuyao_get(
+            "/api/a-share/prices/snapshot?thscodes=" + ",".join(ths_of))
+        qtime = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        out = {}
+        for it in node.get("item") or []:
+            if not isinstance(it, dict):
+                continue
+            sym = ths_of.get(str(it.get("thscode") or ""))
+            if not sym:
+                continue
+            try:
+                cur = float(it.get("last_price"))
+                prev = float(it.get("prev_price"))
+            except (TypeError, ValueError):
+                continue
+            if cur <= 0 and prev > 0:
+                cur = prev  # pre-open: treat as prev close (0 change)
+            if prev > 0 and cur > 0:
+                chg = it.get("price_change_ratio_pct")
+                out[sym] = {"name": None, "prev_close": prev, "current": cur,
+                            "change_pct": float(chg) if isinstance(chg, (int, float))
+                            else (cur - prev) / prev * 100,
+                            "quote_time": qtime}
+        return out
+    except Exception:
+        return {}
+
+
+# Fuyao fund industry allocation is a quarterly disclosure; cache the
+# derived sector in memory (success 1 day, failure 10 minutes).
+_fuyao_ind_cache: dict = {}
+_FUYAO_IND_TTL = 86400
+_FUYAO_IND_FAIL_TTL = 600
+
+
+async def fetch_industry_allocation_fuyao(code: str) -> Optional[dict]:
+    """Sector dict from fuyao fund industry allocation (v1.4.8 fallback
+    when per-stock F10 industries resolve nothing). Fund-level 口径：
+    the largest industry of the newest report period that carries a
+    non-zero ratio. share_pct is fuyao's ratio_pct (% of fund assets,
+    A-share holdings only per fuyao); change_pct stays None — there is
+    no per-stock mapping to weight a live change from. None on failure."""
+    now = time.time()
+    hit = _fuyao_ind_cache.get(code)
+    if hit:
+        ts, sector = hit
+        if now - ts < (_FUYAO_IND_TTL if sector else _FUYAO_IND_FAIL_TTL):
+            return sector
+    sector = None
+    try:
+        node = await _fuyao_get(
+            f"/api/fund/portfolio/industry-allocation?thscode={code}.OF")
+        by_period: dict = {}
+        for it in node.get("item") or []:
+            if not isinstance(it, dict):
+                continue
+            try:
+                ratio = float(it.get("ratio_pct"))
+            except (TypeError, ValueError):
+                continue
+            name = str(it.get("industry_name") or "").strip()
+            period = str(it.get("report_period") or "")
+            if name and ratio > 0:
+                by_period.setdefault(period, []).append((ratio, name))
+        for period in sorted(by_period, reverse=True):
+            ratio, name = max(by_period[period])
+            sector = {"name": _short_industry(name),
+                      "share_pct": round(ratio, 1), "change_pct": None}
+            break
+    except Exception:
+        sector = None
+    _fuyao_ind_cache[code] = (now, sector)
+    return sector
 
 
 async def fetch_nav(code: str, name: str = "") -> dict:
@@ -2510,6 +2659,7 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
     if not sina_syms:
         _quote_cache.update(at=now, quotes={**cached, **quotes})
         return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
+    sina_failed = False
     try:
         resp = await upstream_get("https://hq.sinajs.cn/list=" + ",".join(sina_syms), referer="https://finance.sina.com.cn/")
         text = resp.content.decode("gbk", errors="replace")
@@ -2542,12 +2692,19 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
                                    "quote_time": f"{fields[30]} {fields[31]}" if len(fields) > 31 else None}
             except (ValueError, IndexError):
                 continue
-        _quote_cache.update(at=now, quotes={**cached, **quotes})
-        return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
     except Exception:
-        if quotes:  # Eastmoney part succeeded even if Sina failed
-            _quote_cache.update(at=now, quotes={**cached, **quotes})
-        return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
+        sina_failed = True
+    # A-share symbols Sina produced nothing for (hard failure, or empty
+    # lines under throttling) fall back to fuyao snapshot (v1.4.8). HK/US
+    # have no fuyao coverage and keep whatever is cached.
+    if FUYAO_ENABLED:
+        missing_a = [s for s in sina_syms
+                     if s not in quotes and re.fullmatch(r"(sh|sz)\d{6}", s)]
+        if missing_a:
+            quotes.update(await fetch_snapshot_fuyao(missing_a))
+    if quotes or not sina_failed:
+        _quote_cache.update(at=now, quotes={**cached, **quotes})
+    return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
 
 
 def _schedule_quote_refresh(symbols: list[str]) -> None:
@@ -3765,6 +3922,11 @@ async def _compute_estimates(uid):
                 "change_pct": round(sec_num[main_ind] / sec_den[main_ind], 2)
                 if sec_den.get(main_ind) else None,
             }
+        elif raw_coverage > 0 and FUYAO_ENABLED:
+            # No per-stock industry resolved at all (F10 down / unknown
+            # codes) -> fund-level fuyao industry allocation (v1.4.8).
+            # Display only: name + disclosed ratio, no live change.
+            sector = await fetch_industry_allocation_fuyao(r["fund_code"])
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
         # Ext estimate only when the fund holds US stocks with valid ext data
         # (change_pct_ext is None during US regular hours -> null then too).
@@ -4313,8 +4475,9 @@ async def fetch_nav_history(code: str, days: int = BETA_WINDOW) -> list:
 async def fetch_daily_closes(secid: str) -> dict:
     """{date: close} daily closes for one secid from the Eastmoney kline
     API (klt=101, fqt=1), DB-cached in stock_daily_cache. A cache younger
-    than a day is served as-is; upstream failure returns whatever is
-    cached (possibly {})."""
+    than a day is served as-is. When Eastmoney fails or returns nothing,
+    A-share secids fall back to fuyao daily closes (v1.4.8, written to
+    the same cache); other markets return whatever is cached."""
     with db() as conn:
         rows = conn.execute(
             "SELECT date, close, fetched_at FROM stock_daily_cache WHERE secid=?",
@@ -4323,6 +4486,7 @@ async def fetch_daily_closes(secid: str) -> dict:
     if rows and time.time() - max(r["fetched_at"] for r in rows) < BETA_TTL:
         return cached
     beg = (datetime.now(CN_TZ) - timedelta(days=240)).strftime("%Y%m%d")
+    fresh = {}
     try:
         async with _kline_sem:
             resp = await upstream_get(
@@ -4331,16 +4495,19 @@ async def fetch_daily_closes(secid: str) -> dict:
                 f"&klt=101&fqt=1&beg={beg}&end=20500101",
                 referer=TRENDS_REF, timeout=15)
         klines = ((resp.json().get("data") or {}).get("klines")) or []
+        for row in klines:
+            f = row.split(",")
+            if len(f) >= 3:
+                try:
+                    fresh[f[0]] = float(f[2])
+                except ValueError:
+                    continue
     except Exception:
-        return cached
-    fresh = {}
-    for row in klines:
-        f = row.split(",")
-        if len(f) >= 3:
-            try:
-                fresh[f[0]] = float(f[2])
-            except ValueError:
-                continue
+        fresh = {}
+    if not fresh and FUYAO_ENABLED:
+        # Eastmoney kline failed/empty -> fuyao fallback (v1.4.8, A-share
+        # only; other markets keep whatever is cached).
+        fresh = await fetch_daily_closes_fuyao(secid)
     if fresh:
         now = time.time()
         with db() as conn:
