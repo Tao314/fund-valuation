@@ -73,6 +73,21 @@
   .ss-row .t { color: #98A2B3; font-size: 11.5px; }
   .ss-row .bad { color: #C9362B; font-weight: 600; }
   .ss-row .ok { color: #07845B; font-weight: 600; }
+  .dataflow-banner { display: block; margin: 0 auto 10px; max-width: 520px; background: #C9362B; color: #fff; font-size: 13px; font-weight: 600; border-radius: 8px; padding: 8px 12px; text-align: center; box-sizing: border-box; }
+  .ds-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
+  .ds-dot.ok { background: #07845B; }
+  .ds-dot.bad { background: #C9362B; }
+  .ds-dot.none { background: #98A2B3; }
+  .ds-role { display: inline-block; font-size: 10px; border-radius: 6px; padding: 1px 6px; vertical-align: middle; margin-left: 6px; }
+  .ds-role.main { background: #EBF1FF; color: #2563EB; }
+  .ds-role.fallback { background: #ECEEF2; color: #667085; }
+  .ds-err { color: #C9362B; word-break: break-all; }
+  .ft-dir > summary { cursor: pointer; list-style: none; }
+  .ft-dir > summary::-webkit-details-marker { display: none; }
+  .ft-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #475467; padding: 3px 0; border-bottom: 1px solid #F0F2F5; min-width: 0; }
+  .ft-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .ft-size { color: #98A2B3; white-space: nowrap; font-variant-numeric: tabular-nums; flex: none; }
+  .ft-children { padding-left: 14px; }
   .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EAECF0; flex-wrap: wrap; }
   .cat-item .cat-name { flex: 1; font-weight: 600; font-size: 14px; min-width: 80px; }
   footer { text-align: center; color: #98A2B3; font-size: 11px; padding: 16px; }
@@ -357,6 +372,7 @@
         <button class="tab-btn" id="admin-tab-logs">登录记录</button>
         <button class="tab-btn" id="admin-tab-backup">系统备份</button>
         <button class="tab-btn" id="admin-tab-status">系统状态</button>
+        <button class="tab-btn" id="admin-tab-sources">数据接口</button>
       </div>
       <div id="admin-panel-users">
         <div class="card">
@@ -400,6 +416,17 @@
             <span class="muted" id="status-updated">加载中…</span>
           </div>
           <div id="status-body" style="margin-top:8px"><div class="muted">加载中…</div></div>
+        </div>
+      </div>
+      <div id="admin-panel-sources" style="display:none">
+        <div class="card">
+          <h3>数据接口</h3>
+          <div class="row">
+            <button id="sources-refresh-btn">刷新</button>
+            <span class="muted" id="sources-updated">加载中…</span>
+          </div>
+          <div class="muted" style="margin-top:6px">状态为服务进程内统计（成功/失败次数自本次启动起累计，重启后清零）。</div>
+          <div id="sources-body" style="margin-top:8px"><div class="muted">加载中…</div></div>
         </div>
       </div>
     </div>
@@ -494,6 +521,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.6</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">数据流异常时页面底部自动提示、恢复后消失（200 空数据的软限流也算异常）；管理页新增「数据接口」子页（全部上游接口与最近状态）；系统状态页增加系统文件目录树</div></div></div>
+          <div class="es-row"><div class="es-ver">v1.4.5</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">分时数据增加 Yahoo 兜底，东财双主机被限流时美股曲线仍可出图</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.4</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">分时数据增加东财备用主机，修复美股基金曲线在主源限流时无数据</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.3</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">管理页新增「系统状态」：基金数据统计、后台任务与预计完成时间、下次任务、最近 24 小时错误日志</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.2</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">排行榜基金数据预热补全（限速队列、新进榜优先、失败退避），加入自选即秒出估值与可信度</div></div></div>
@@ -508,7 +537,7 @@
     </div>
   </div>
 </main>
-<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.4 · 更新于 2026-11-23 23:05</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.6 · 更新于 2026-11-23 23:50</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -715,16 +744,47 @@ function showAdminSubTab(name) {
   $("admin-panel-logs").style.display = name === "logs" ? "" : "none";
   $("admin-panel-backup").style.display = name === "backup" ? "" : "none";
   $("admin-panel-status").style.display = name === "status" ? "" : "none";
+  $("admin-panel-sources").style.display = name === "sources" ? "" : "none";
   $("admin-tab-users").className = "tab-btn" + (name === "users" ? " active" : "");
   $("admin-tab-logs").className = "tab-btn" + (name === "logs" ? " active" : "");
   $("admin-tab-backup").className = "tab-btn" + (name === "backup" ? " active" : "");
   $("admin-tab-status").className = "tab-btn" + (name === "status" ? " active" : "");
+  $("admin-tab-sources").className = "tab-btn" + (name === "sources" ? " active" : "");
   if (name === "status") startStatusTimer(); else stopStatusTimer();
+  if (name === "sources") loadDataSources();
 }
 $("admin-tab-users").onclick = () => showAdminSubTab("users");
 $("admin-tab-logs").onclick = () => showAdminSubTab("logs");
 $("admin-tab-backup").onclick = () => showAdminSubTab("backup");
 $("admin-tab-status").onclick = () => showAdminSubTab("status");
+$("admin-tab-sources").onclick = () => showAdminSubTab("sources");
+/* ---- data sources (v1.4.6, admin only) ---- */
+$("sources-refresh-btn").onclick = () => loadDataSources();
+async function loadDataSources() {
+  if (!isAdmin) return;
+  $("sources-body").innerHTML = '<div class="muted">加载中…</div>';
+  try {
+    const d = await api("/api/admin/data-sources");
+    $("sources-updated").textContent = "更新于 " + fmtLocalTime(d.now) + (d.data_flow_ok === false ? " · 数据流异常" : " · 数据流正常");
+    $("sources-body").innerHTML = renderDataSources(d);
+  } catch (e) {
+    $("sources-body").innerHTML = '<div class="muted">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+function renderDataSources(d) {
+  const t = iso => iso ? fmtLocalTime(iso) : "—";
+  return (d.sources || []).map(s => {
+    const dotCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "none");
+    const stCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "");
+    const roleCls = s.role === "主源" ? "main" : "fallback";
+    return `<div class="ss-row"><b>${esc(s.name)}</b><span class="ds-role ${roleCls}">${esc(s.role)}</span>`
+      + `<br>${esc(s.purpose)}`
+      + `<br><span class="ds-dot ${dotCls}"></span><span class="${stCls}">${esc(s.last_status)}</span>`
+      + `<span class="t"> · ${esc(s.provider)} · 最近 ${t(s.last_time)} · 成功 ${s.success_count} · 失败 ${s.fail_count}</span>`
+      + (s.last_error ? `<br><span class="ds-err">${esc(s.last_error)}</span>` : "")
+      + `</div>`;
+  }).join("") || '<div class="muted">暂无接口数据</div>';
+}
 /* ---- system status (v1.4.3, admin only) ---- */
 let statusTimer = null;
 function startStatusTimer() {
@@ -795,7 +855,29 @@ function renderSystemStatus(d) {
     h += errs.groups.map(g => row(`<b>${esc(g.source)}</b> · ${g.count} 次 · <span class="t">最近 ${t(g.last_at)}</span>`)).join("");
     h += errs.latest.map(e => row(`<span class="t">${t(e.ts)}</span> <b>${esc(e.source)}</b> ${esc(e.message)}`)).join("");
   }
+  const files = d.files || {};
+  h += "<h4>系统文件</h4>";
+  if (files.tree) {
+    h += renderFileTree(files.tree, true);
+    if (files.truncated) h += '<div class="muted">条目过多，仅显示前 ' + files.total_entries + ' 项</div>';
+  } else {
+    h += '<div class="muted">暂无文件信息</div>';
+  }
   return h;
+}
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + " MB";
+  return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+}
+function renderFileTree(node, isRoot) {
+  const label = (node.is_dir ? "▸ " : "") + node.name + (node.is_dir ? "/" : "");
+  const rowHtml = `<div class="ft-row"><span class="ft-name" title="${esc(node.path || node.name)}">${esc(label)}</span><span class="ft-size">${fmtSize(node.size)}</span></div>`;
+  if (!node.is_dir) return rowHtml;
+  const kids = (node.children || []).map(c => renderFileTree(c, false)).join("");
+  return `<details class="ft-dir"${isRoot ? " open" : ""}><summary>${rowHtml}</summary><div class="ft-children">${kids || '<div class="muted">（空）</div>'}</div></details>`;
 }
 function setAdminErr(msg) { const e = $("admin-err"); if (e) e.textContent = msg || ""; }
 function fmtOnlineDur(sec) {
@@ -1874,6 +1956,12 @@ function setSortMode(mode) {
 }
 $("sort-default").onclick = () => setSortMode("default");
 $("sort-change").onclick = () => setSortMode("change");
+function applyDataFlow(ok) {
+  // Footer banner (v1.4.6): shown only when the backend judges every
+  // critical data path blocked; hidden again as soon as data flows.
+  const b = $("dataflow-banner");
+  if (b) b.style.display = ok === false ? "" : "none";
+}
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
@@ -1884,6 +1972,7 @@ async function loadEstimates() {
     const histP = loadHistory();  // parallel; never rejects
     const data = await api("/api/estimates");
     window.estimateData = data;
+    applyDataFlow(data.data_flow_ok);
     if (data.refresh_seconds && data.refresh_seconds !== refreshSeconds) {
       refreshSeconds = data.refresh_seconds;
       startAutoRefresh(); resetCountdown();
@@ -1903,7 +1992,7 @@ async function loadEstimates() {
 $("refresh-btn").onclick = loadEstimates;
 syncHeaderH();
 (async () => {
-  try { const cfg = await api("/api/config"); emailAuth = !!cfg.email_auth; } catch { emailAuth = false; }
+  try { const cfg = await api("/api/config"); emailAuth = !!cfg.email_auth; applyDataFlow(cfg.data_flow_ok); } catch { emailAuth = false; }
   applyEmailAuthUI();
   try { const me = await api("/api/me"); showDash(me.username, me.is_admin, me.user_id, me.email, me.email_auth); } catch { showAuth(); }
 })();

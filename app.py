@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -44,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.4"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.6"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -649,7 +650,8 @@ class BindEmailBody(BaseModel):
 def public_config():
     # Unauthenticated bootstrap config for the frontend (the register form
     # is shown before login, so /api/me alone cannot carry this flag).
-    return {"email_auth": EMAIL_AUTH, "version": APP_VERSION}
+    return {"email_auth": EMAIL_AUTH, "version": APP_VERSION,
+            "data_flow_ok": _data_flow_ok()}
 
 
 @app.post("/api/email/send-code")
@@ -834,10 +836,15 @@ def _fetch_ip_geo(ip: str):
             )
             data = resp.json()
         if data.get("status") != "success":
+            _record_source("http://ip-api.com/json/", False,
+                           f"status={data.get('status')}")
             return None
+        _record_source("http://ip-api.com/json/", True)
         return (data.get("country") or "", data.get("regionName") or "",
                 data.get("city") or "")
-    except Exception:
+    except Exception as e:
+        _record_source("http://ip-api.com/json/", False,
+                       f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1236,6 +1243,323 @@ async def admin_restore_backup(name: str, session: Optional[str] = Cookie(defaul
 
 
 # ---------------------------------------------------------------- upstream
+# ------------------------------------------------- upstream source stats (v1.4.6)
+# In-memory per-interface success/failure tracking for the admin 数据接口
+# page and the 数据流异常 banner. Every upstream_get call is classified by
+# URL into one catalog entry; stats live in process memory only (a restart
+# zeroes them — the page says so). Success = the response actually
+# carries the data asked for (see _validate_upstream_payload): an
+# HTTP 200 with an empty body / null data — Eastmoney's soft-throttle
+# signature — counts as FAILURE, while legitimately-empty answers
+# (search with no hits, pre-open trends, ...) stay success.
+_SOURCE_CATALOG = [
+    # key, name, provider, purpose, role（主源/兜底）
+    ("em_search", "东财基金搜索", "东方财富",
+     "基金搜索、基金类型（FTYPE，QDII/债基判定）", "主源"),
+    ("em_nav", "东财官方净值 lsjz", "东方财富",
+     "基金官方净值与涨跌幅（含 β 回测净值历史）", "主源"),
+    ("em_holdings", "东财前十大持仓 jjcc", "东方财富",
+     "基金最新披露前十大重仓股与报告期", "主源"),
+    ("em_pingzhong", "东财 pingzhongdata", "东方财富",
+     "股票仓位（未披露补齐）、持仓市场映射", "主源"),
+    ("em_trends", "东财分时 trends2", "东方财富",
+     "股票分钟分时（估值曲线）；push2his 主机、push2delay 备用主机", "主源"),
+    ("em_ulist", "东财批量行情 ulist", "东方财富",
+     "日/韩/台股持仓批量行情（新浪不覆盖）", "主源"),
+    ("em_f10", "东财 F10 行业", "东方财富",
+     "A股持仓行业（板块识别，证监会行业）", "主源"),
+    ("em_kline", "东财股票日线", "东方财富",
+     "股票日线收盘价（β 校准/可信度回测）", "主源"),
+    ("em_rank", "东财排行榜 rankhandler", "东方财富",
+     "全市场基金涨跌数据（涨幅榜/波动率榜池子）", "主源"),
+    ("em_suggest", "东财代码联想", "东方财富",
+     "指数与日/韩/台股代码解析", "主源"),
+    ("em_jbgk", "东财 F10 基金概况", "东方财富",
+     "联接基金跟踪标的、互认基金 ISIN 查询", "主源"),
+    ("sina", "新浪行情", "新浪",
+     "A/港/美股持仓实时行情（含盘前盘后，估值核心）", "主源"),
+    ("yahoo_nav", "Yahoo 净值", "Yahoo Finance",
+     "香港互认基金净值（东财无此数据）", "主源"),
+    ("yahoo_trends", "Yahoo 分时", "Yahoo Finance",
+     "股票 1 分钟分时（东财双主机被限流时接管曲线）", "兜底"),
+    ("tencent", "腾讯分时", "腾讯",
+     "股票分钟分时（东财限流时兜底，A/港股）", "兜底"),
+    ("ipapi", "IP 归属地", "ip-api.com",
+     "登录 IP 省市（管理页用户列表）", "主源"),
+]
+_SOURCE_KEYS = [c[0] for c in _SOURCE_CATALOG]
+# Core data paths for the 数据流异常判定： live quotes + official NAV +
+# holdings + intraday trends. Fallback sources (Yahoo/Tencent) don't count
+# here — the banner means "every primary path is blocked".
+_CRITICAL_SOURCES = ("sina", "em_nav", "em_holdings", "em_trends", "em_ulist")
+_FLOW_WINDOW = 600          # seconds, data-flow judgement window
+_FLOW_MIN_FAILS = 5         # failures in window (with zero successes) -> abnormal
+_FLOW_CONSEC_FAILS = 3      # consecutive failures on one critical source
+_source_stats: dict = {}    # key -> {ok, fail, last_ok, last_fail, last_error, consec_fail, events}
+
+
+def _classify_source(url: str) -> str:
+    u = url or ""
+    if "fundsuggest.eastmoney.com" in u:
+        return "em_search"
+    if "api.fund.eastmoney.com/f10/lsjz" in u:
+        return "em_nav"
+    if "FundArchivesDatas" in u:
+        return "em_holdings"
+    if "pingzhongdata" in u:
+        return "em_pingzhong"
+    if "trends2/get" in u:
+        return "em_trends"
+    if "ulist.np/get" in u:
+        return "em_ulist"
+    if "CompanySurvey" in u:
+        return "em_f10"
+    if "kline/get" in u:
+        return "em_kline"
+    if "rankhandler" in u:
+        return "em_rank"
+    if "searchapi.eastmoney.com" in u:
+        return "em_suggest"
+    if "jbgk_" in u:
+        return "em_jbgk"
+    if "hq.sinajs.cn" in u:
+        return "sina"
+    if "finance.yahoo.com" in u:
+        return "yahoo_trends" if "interval=1m" in u else "yahoo_nav"
+    if "ifzq.gtimg.cn" in u:
+        return "tencent"
+    if "ip-api.com" in u:
+        return "ipapi"
+    return "other"
+
+
+def _record_source(url: str, ok: bool, err: Optional[str] = None):
+    """Record one upstream call outcome. Never raises."""
+    try:
+        key = _classify_source(url)
+        now = time.time()
+        st = _source_stats.setdefault(key, {
+            "ok": 0, "fail": 0, "last_ok": None, "last_fail": None,
+            "last_error": None, "consec_fail": 0, "events": []})
+        if ok:
+            st["ok"] += 1
+            st["last_ok"] = now
+            st["consec_fail"] = 0
+        else:
+            st["fail"] += 1
+            st["last_fail"] = now
+            st["consec_fail"] += 1
+            st["last_error"] = (err or "")[:300] or None
+        st["events"].append((now, ok))
+        # keep the event log bounded to roughly the judgement window
+        cutoff = now - _FLOW_WINDOW - 60
+        while st["events"] and st["events"][0][0] < cutoff:
+            st["events"].pop(0)
+    except Exception:
+        pass
+
+
+_EMPTY_PAYLOAD_ERR = "200 空数据（疑似软限流）"
+_BAD_JSON_ERR = "200 非 JSON 响应（疑似软限流）"
+_JSON_INVALID = object()
+
+
+def _resp_json(resp):
+    try:
+        return resp.json()
+    except Exception:
+        return _JSON_INVALID
+
+
+def _cn_market_open(now: datetime) -> bool:
+    """Weekday 09:30-16:30 Asia/Shanghai: A/HK (and JP/KR/TW) sessions
+    have started, so an empty intraday payload is suspicious rather
+    than pre-open."""
+    mins = now.hour * 60 + now.minute
+    return now.weekday() < 5 and 9 * 60 + 30 <= mins <= 16 * 60 + 30
+
+
+def _validate_upstream_payload(url: str, resp, now: Optional[datetime] = None):
+    """(ok, err) for one HTTP-200 upstream response, judged per interface.
+
+    Success means the response carries the data the caller asked for.
+    Eastmoney's soft throttling answers 200 with an empty body or null
+    data — that is a failure here even though HTTP succeeded.
+    Legitimately-empty answers stay success: fund search / code suggest
+    with no hits, lsjz pages past the end of NAV history, intraday
+    trends outside the relevant market session (pre-open), F10 pages
+    whose industry field is simply absent, jjcc pages of funds with no
+    stock holdings (the disclosure page itself is the data).
+    `now` is Asia/Shanghai-aware and injectable for tests. Never raises:
+    on any validator error the old rule applies (non-empty = success),
+    so statistics can never break a data call.
+    """
+    try:
+        key = _classify_source(url)
+        now = now or datetime.now(CN_TZ)
+        body = resp.content or b""
+        if not body.strip():
+            return False, _EMPTY_PAYLOAD_ERR
+        text = resp.text or ""
+        if key == "em_search":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            if isinstance(data, dict) and isinstance(data.get("Datas"), list):
+                return True, None  # empty list = legitimate no-hit search
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_nav":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            items = ((data or {}).get("Data") or {}).get("LSJZList") \
+                if isinstance(data, dict) else None
+            if isinstance(items, list) and items:
+                return True, None
+            page = parse_qs(urlparse(url).query).get("pageIndex", ["1"])[0]
+            if isinstance(items, list) and str(page) != "1":
+                return True, None  # past the end of NAV history
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_holdings":
+            m = re.search(r'content:"(.*)"\s*[,}]', text, re.S)
+            if (m and m.group(1).strip()) or "<table" in text:
+                return True, None  # disclosure page answered (rows may be 0)
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_pingzhong":
+            if any(s in text for s in ("Data_assetAllocation", "stockCodesNew",
+                                       "Data_netWorthTrend", "Data_grandTotal")):
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_trends":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID or not isinstance(data, dict):
+                return False, _BAD_JSON_ERR
+            node = data.get("data")
+            trends = node.get("trends") if isinstance(node, dict) else None
+            if isinstance(trends, list) and trends:
+                return True, None
+            secid = parse_qs(urlparse(url).query).get("secid", [""])[0]
+            if secid.split(".", 1)[0] in ("105", "106", "107"):
+                if us_session(now.astimezone(ET_TZ)) == "trading":
+                    return False, _EMPTY_PAYLOAD_ERR
+            elif _cn_market_open(now):
+                return False, _EMPTY_PAYLOAD_ERR
+            return True, None  # pre-open / off-session: empty is normal
+        if key == "em_ulist":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            diff = ((data or {}).get("data") or {}).get("diff") \
+                if isinstance(data, dict) else None
+            if isinstance(diff, list) and diff:
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_f10":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            if isinstance(data, dict) and "jbzl" in data:
+                return True, None  # industry field may legitimately be absent
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_kline":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            klines = ((data or {}).get("data") or {}).get("klines") \
+                if isinstance(data, dict) else None
+            if isinstance(klines, list) and klines:
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_rank":
+            if "allRecords" in text:
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "em_suggest":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            if isinstance(data, dict) and "QuotationCodeTable" in data:
+                return True, None  # Data may be empty = no match
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "sina":
+            if any(s.strip() for s in re.findall(r'hq_str_\w+="([^"]*)"', text)):
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "yahoo_nav":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            if "/v1/finance/search" in url:
+                if isinstance(data, dict) and isinstance(data.get("quotes"), list):
+                    return True, None  # empty list = legitimate no match
+                return False, _EMPTY_PAYLOAD_ERR
+            chart = (data or {}).get("chart") if isinstance(data, dict) else None
+            result = chart.get("result") if isinstance(chart, dict) else None
+            if isinstance(result, list) and result:
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
+        if key == "yahoo_trends":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID or not isinstance(data, dict):
+                return False, _BAD_JSON_ERR
+            chart = data.get("chart")
+            if not isinstance(chart, dict):
+                return False, _EMPTY_PAYLOAD_ERR
+            result = chart.get("result")
+            if isinstance(result, list) and result and (result[0].get("timestamp") or []):
+                return True, None
+            if urlparse(url).path.endswith((".SS", ".SZ", ".HK")):
+                if _cn_market_open(now):
+                    return False, _EMPTY_PAYLOAD_ERR
+            elif us_session(now.astimezone(ET_TZ)) == "trading":
+                return False, _EMPTY_PAYLOAD_ERR
+            return True, None  # off-session: no points yet is normal
+        if key == "tencent":
+            data = _resp_json(resp)
+            if data is _JSON_INVALID:
+                return False, _BAD_JSON_ERR
+            node = (data or {}).get("data") if isinstance(data, dict) else None
+            code = parse_qs(urlparse(url).query).get("code", [""])[0]
+            if isinstance(node, dict) and isinstance(node.get(code), dict):
+                return True, None  # rows<10 (US placeholder) judged by caller
+            return False, _EMPTY_PAYLOAD_ERR
+        # em_jbgk / ipapi / other: the page may legitimately lack the
+        # field being looked for; any non-empty body means it answered.
+        return True, None
+    except Exception:
+        return True, None
+
+
+def _data_flow_ok() -> bool:
+    """False only when every critical data path looks blocked: within the
+    last 10 minutes the critical sources produced failures and zero
+    successes (>=5 failures total, or >=3 failures with one critical
+    source failing >=3 times in a row). A single success anywhere in the
+    window means data is flowing. No calls yet (fresh start) -> True."""
+    now = time.time()
+    fails = successes = 0
+    consec_bad = False
+    for key in _CRITICAL_SOURCES:
+        st = _source_stats.get(key)
+        if not st:
+            continue
+        if st["consec_fail"] >= _FLOW_CONSEC_FAILS:
+            consec_bad = True
+        for ts, ok in st["events"]:
+            if now - ts <= _FLOW_WINDOW:
+                if ok:
+                    successes += 1
+                else:
+                    fails += 1
+    if successes > 0:
+        return True
+    if fails >= _FLOW_MIN_FAILS:
+        return False
+    if consec_bad and fails >= _FLOW_CONSEC_FAILS:
+        return False
+    return True
+
+
 async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10) -> httpx.Response:
     headers = {"User-Agent": UA}
     if referer:
@@ -1244,13 +1568,22 @@ async def upstream_get(url: str, referer: Optional[str] = None, timeout: float =
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()
-            return resp
     except Exception as e:
+        _record_source(url, False, f"{type(e).__name__}: {e}")
         # Single choke point for upstream failures -> admin 系统状态
         # error log (deduped inside log_error, so expected fallbacks
         # like trends2 throttling don't flood it).
         log_error("upstream", f"{url.split('?')[0]} -> {type(e).__name__}: {e}")
         raise
+    # HTTP succeeded; the payload still has to carry data. A 200 with an
+    # empty/throttled payload records as failure for the 数据接口 page and
+    # the 数据流异常 judgement, but the response is returned unchanged —
+    # callers already handle empty payloads (fallback chains unchanged).
+    ok, err = _validate_upstream_payload(url, resp)
+    _record_source(url, ok, err)
+    if not ok:
+        log_error("upstream", f"{url.split('?')[0]} -> {err}")
+    return resp
 
 
 def _is_fund_entry(d: dict) -> bool:
@@ -2232,6 +2565,24 @@ def _tencent_code(secid: str) -> Optional[str]:
     return None
 
 
+def _yahoo_symbol(secid: str) -> Optional[str]:
+    """Yahoo Finance symbol for an Eastmoney secid, or None when Yahoo
+    has no reliable equivalent (JP/KR/TW 176/177/178, CSI indices 2.,
+    Beijing 4/8/92 under prefix 0.). US: bare ticker with Yahoo's dash
+    convention (BRK.B -> BRK-B); HK: 4-digit padded + .HK (00700 ->
+    0700.HK, 09988 -> 9988.HK); SH 1. -> .SS; SZ 0/3 under 0. -> .SZ."""
+    prefix, _, code = secid.partition(".")
+    if prefix in ("105", "106", "107"):
+        return code.upper().replace(".", "-")
+    if prefix == "116":
+        return code.lstrip("0").zfill(4) + ".HK"
+    if prefix == "1":
+        return code + ".SS"
+    if prefix == "0" and code[:1] in ("0", "3"):
+        return code + ".SZ"
+    return None
+
+
 async def _fetch_tencent_trends(secid: str, date_str: str) -> Optional[dict]:
     """Minute closes from Tencent as an Eastmoney fallback (v1.4.0).
     Tencent's minute query only serves the current session, so callers
@@ -2280,6 +2631,58 @@ async def _fetch_tencent_trends(secid: str, date_str: str) -> Optional[dict]:
     return {"pre_close": pre_close, "points": points}
 
 
+async def _fetch_yahoo_trends(secid: str, date_str: str) -> Optional[dict]:
+    """Minute closes from the Yahoo Finance chart API as a
+    non-Eastmoney fallback (v1.4.5). s-sj2's IP is throttled on both
+    Eastmoney trends hosts (502/empty) and Tencent's US minute data is
+    a single point, so US curves need this path; Yahoo also covers HK
+    and A-shares. range=1d serves the current/last session only, so
+    callers must restrict this to date_str == today (same restriction
+    as Tencent). Timestamps are absolute unix seconds (no tz
+    conversion needed); null closes (lunch breaks, halts) are
+    forward-filled and leading nulls dropped. pre_close from
+    meta.chartPreviousClose (verified 2026-11-23: NVDA 125.53 and
+    600519.SS 1485.75 both match Eastmoney/Tencent prev close)."""
+    symbol = _yahoo_symbol(secid)
+    if not symbol:
+        return None
+    result = None
+    for host in ("query1", "query2"):
+        try:
+            resp = await upstream_get(
+                f"https://{host}.finance.yahoo.com/v8/finance/chart/{symbol}"
+                "?interval=1m&range=1d&includePrePost=false",
+                timeout=15)
+            found = (resp.json().get("chart") or {}).get("result")
+            if found:
+                result = found[0]
+                break
+        except Exception:
+            continue
+    if not result:
+        return None
+    meta = result.get("meta") or {}
+    pre_close = _fnum(meta.get("chartPreviousClose")) or _fnum(meta.get("previousClose"))
+    timestamps = result.get("timestamp") or []
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    points = []
+    last = None
+    for ts, close in zip(timestamps, closes):
+        c = _fnum(close)
+        if c is None:
+            if last is None:
+                continue    # leading nulls: no price yet this session
+            c = last
+        last = c
+        points.append([int(ts), c])
+    if len(points) < 2:
+        return None
+    points.sort()
+    print(f"[trends] {secid} via yahoo", flush=True)
+    return {"pre_close": pre_close, "points": points}
+
+
 async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     """Minute closes for one stock: {"pre_close": float|None,
     "points": [[ts, close], ...]}. DB-cached per (secid, date); today's
@@ -2295,7 +2698,9 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     TRENDS_FAIL_BACKOFF seconds (upstream skipped, cache fallback only).
     v1.4.4: Eastmoney hosts are tried in TRENDS_HOSTS order (push2his,
     then push2delay — Tencent US minute data has no usable series, so
-    US curves need the alternate Eastmoney host as their fallback)."""
+    US curves need the alternate Eastmoney host as their fallback).
+    v1.4.5: when both Eastmoney hosts fail (s-sj2 IP throttled on
+    both), Yahoo Finance 1m chart data is tried before Tencent."""
     today_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
     with db() as conn:
         row = conn.execute(
@@ -2352,11 +2757,17 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
 
     if payload is None and date_str == today_str:
         # Eastmoney yielded nothing usable (throttled IP returns empty):
-        # try Tencent before giving up (v1.4.0).
+        # try Yahoo first (v1.4.5 — Tencent has no usable US series),
+        # then Tencent (v1.4.0), before giving up.
         try:
-            payload = await _fetch_tencent_trends(secid, date_str)
+            payload = await _fetch_yahoo_trends(secid, date_str)
         except Exception:
             payload = None
+        if payload is None:
+            try:
+                payload = await _fetch_tencent_trends(secid, date_str)
+            except Exception:
+                payload = None
 
     if payload and payload.get("points"):
         if not payload.get("pre_close") and \
@@ -3226,12 +3637,14 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
         computed_at, payload = hit
         if time.time() - computed_at > _EST_TTL and uid not in _est_tasks:
             _est_tasks[uid] = asyncio.create_task(_refresh_estimates(uid))
-        return payload
+        # data_flow_ok is attached per response (never baked into the
+        # cached payload) so the banner reflects the current judgement.
+        return {**payload, "data_flow_ok": _data_flow_ok()}
     gen = _est_gen.get(uid, 0)
     payload = await _compute_estimates(uid)
     if _est_gen.get(uid, 0) == gen:
         _est_cache[uid] = (time.time(), payload)
-    return payload
+    return {**payload, "data_flow_ok": _data_flow_ok()}
 
 
 # Per-user cache of the computed curve series: a full recompute touches
@@ -4407,6 +4820,82 @@ def _board_ttl(key: str) -> Optional[int]:
     return None
 
 
+_FILE_TREE_SKIP = {"venv", "__pycache__", ".git"}
+_FILE_TREE_MAX = 500    # entry cap so the payload can never explode
+
+
+def _system_files() -> dict:
+    """Directory tree of the system dir (BASE_DIR) with real byte sizes
+    for the admin 系统状态 page (v1.4.6). Skips venv/__pycache__/.git,
+    caps at _FILE_TREE_MAX entries. Dir size = recursive total of the
+    entries included. Returns {tree, total_entries, truncated}."""
+    counter = {"n": 0, "truncated": False}
+
+    def walk(path: Path, rel: str) -> dict:
+        node = {"name": path.name, "path": rel, "is_dir": True,
+                "size": 0, "children": []}
+        try:
+            entries = sorted(path.iterdir(),
+                             key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            return node
+        for p in entries:
+            if counter["n"] >= _FILE_TREE_MAX:
+                counter["truncated"] = True
+                break
+            if p.name in _FILE_TREE_SKIP:
+                continue
+            counter["n"] += 1
+            child_rel = f"{rel}/{p.name}" if rel else p.name
+            if p.is_dir() and not p.is_symlink():
+                child = walk(p, child_rel)
+                node["children"].append(child)
+                node["size"] += child["size"]
+            else:
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    size = 0
+                node["children"].append({
+                    "name": p.name, "path": child_rel, "is_dir": False,
+                    "size": size, "children": []})
+                node["size"] += size
+        return node
+
+    tree = walk(BASE_DIR, "")
+    tree["name"] = BASE_DIR.name
+    return {"tree": tree, "total_entries": counter["n"],
+            "truncated": counter["truncated"]}
+
+
+@app.get("/api/admin/data-sources")
+def admin_data_sources(session: Optional[str] = Cookie(default=None)):
+    """Upstream interface catalog with last-call status for the admin
+    数据接口 page (v1.4.6). Stats are in-memory since process start."""
+    require_admin(session)
+    items = []
+    for key, name, provider, purpose, role in _SOURCE_CATALOG:
+        st = _source_stats.get(key)
+        if not st or (not st["ok"] and not st["fail"]):
+            status, last_time, last_error = "无记录", None, None
+            ok_n = fail_n = 0
+        else:
+            ok_n, fail_n = st["ok"], st["fail"]
+            if (st["last_ok"] or 0) >= (st["last_fail"] or 0):
+                status, last_time, last_error = "成功", _iso(st["last_ok"]), None
+            else:
+                status, last_time = "失败", _iso(st["last_fail"])
+                last_error = st["last_error"]
+        items.append({
+            "key": key, "name": name, "provider": provider,
+            "purpose": purpose, "role": role, "last_status": status,
+            "last_time": last_time, "last_error": last_error,
+            "success_count": ok_n, "fail_count": fail_n,
+        })
+    return {"version": APP_VERSION, "now": _iso(time.time()),
+            "data_flow_ok": _data_flow_ok(), "sources": items}
+
+
 @app.get("/api/admin/system-status")
 def admin_system_status(session: Optional[str] = Cookie(default=None)):
     """Full system visibility for the admin 系统状态 page (v1.4.3):
@@ -4567,7 +5056,8 @@ def admin_system_status(session: Optional[str] = Cookie(default=None)):
     }
     return {"version": APP_VERSION, "now": _iso(now), "stats": stats,
             "boards": boards, "workers": workers,
-            "next_tasks": next_tasks, "errors": errors}
+            "next_tasks": next_tasks, "errors": errors,
+            "files": _system_files()}
 
 
 @app.get("/api/rank/returns")
