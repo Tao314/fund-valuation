@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.6"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.7"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -61,6 +61,12 @@ except ValueError:
     PREWARM_PER_MIN = 1.0
 if PREWARM_PER_MIN <= 0:
     PREWARM_PER_MIN = 1.0
+# Tonghuashun fuyao official API (v1.4.7): independent fallback source for
+# fund NAV / holdings / stock position when Eastmoney fails. The key comes
+# from the environment only (never committed); unset = fallback disabled.
+FUYAO_API_KEY = os.environ.get("FUYAO_API_KEY", "").strip()
+FUYAO_ENABLED = bool(FUYAO_API_KEY)
+FUYAO_BASE = "https://fuyao.aicubes.cn"
 # SMTP config comes from environment variables only (never committed).
 # When SMTP_HOST is empty the app runs in LOG MODE: codes are written to
 # the server log instead of being emailed, so the flow is testable before
@@ -898,10 +904,10 @@ def admin_list_users(session: Optional[str] = Cookie(default=None)):
             "(SELECT MAX(last_seen_at) FROM sessions WHERE user_id=u.id) AS last_seen_at, "
             "(SELECT ip FROM login_log WHERE user_id=u.id AND success=1 ORDER BY id DESC LIMIT 1) AS last_ip_ok, "
             "(SELECT ip FROM login_log WHERE user_id=u.id ORDER BY id DESC LIMIT 1) AS last_ip_any "
-            "FROM users u ORDER BY u.id"
+            "FROM users u ORDER BY u.created_at, u.id"
         ).fetchall()
         users = []
-        for r in rows:
+        for seq, r in enumerate(rows, start=1):
             last_seen = _parse_iso(r["last_seen_at"])
             online = bool(last_seen and (now - last_seen).total_seconds() <= ONLINE_WINDOW_SECONDS)
             last_logins = [x["created_at"] for x in conn.execute(
@@ -910,6 +916,7 @@ def admin_list_users(session: Optional[str] = Cookie(default=None)):
             ).fetchall()]
             last_ip = r["last_ip_ok"] or r["last_ip_any"]
             users.append({
+                "seq": seq,
                 "id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"]),
                 "created_at": r["created_at"], "fund_count": r["fund_count"],
                 "last_login": r["last_login"], "email": r["email"],
@@ -1286,8 +1293,28 @@ _SOURCE_CATALOG = [
      "股票分钟分时（东财限流时兜底，A/港股）", "兜底"),
     ("ipapi", "IP 归属地", "ip-api.com",
      "登录 IP 省市（管理页用户列表）", "主源"),
+    ("fuyao_nav", "同花顺净值", "同花顺",
+     "基金官方净值（东财 lsjz 失败时兜底，涨跌幅按相邻净值自算）", "兜底"),
+    ("fuyao_holdings", "同花顺持仓", "同花顺",
+     "基金前十大持仓（东财 jjcc 失败时兜底）", "兜底"),
+    ("fuyao_asset", "同花顺资产配置", "同花顺",
+     "股票仓位（东财 pingzhongdata 失败时兜底）", "兜底"),
 ]
 _SOURCE_KEYS = [c[0] for c in _SOURCE_CATALOG]
+# Data-type groups for the 数据接口 page (v1.4.7): each group shows its
+# primary + fallback sources together so missing fallbacks are visible.
+_SOURCE_GROUPS = [
+    ("基金净值", ["em_nav", "fuyao_nav", "yahoo_nav"]),
+    ("基金持仓", ["em_holdings", "fuyao_holdings"]),
+    ("股票仓位", ["em_pingzhong", "fuyao_asset"]),
+    ("分时曲线", ["em_trends", "yahoo_trends", "tencent"]),
+    ("股票行情", ["sina", "em_ulist"]),
+    ("股票日线", ["em_kline"]),
+    ("基金搜索", ["em_search"]),
+    ("排行榜", ["em_rank"]),
+    ("行业板块", ["em_f10"]),
+    ("其他", ["em_suggest", "em_jbgk", "ipapi"]),
+]
 # Core data paths for the 数据流异常判定： live quotes + official NAV +
 # holdings + intraday trends. Fallback sources (Yahoo/Tencent) don't count
 # here — the banner means "every primary path is blocked".
@@ -1330,6 +1357,14 @@ def _classify_source(url: str) -> str:
         return "tencent"
     if "ip-api.com" in u:
         return "ipapi"
+    if "fuyao.aicubes.cn" in u:
+        if "performance/nav" in u:
+            return "fuyao_nav"
+        if "portfolio/holdings" in u:
+            return "fuyao_holdings"
+        if "portfolio/asset-allocation" in u:
+            return "fuyao_asset"
+        return "other"
     return "other"
 
 
@@ -1523,6 +1558,24 @@ def _validate_upstream_payload(url: str, resp, now: Optional[datetime] = None):
             if isinstance(node, dict) and isinstance(node.get(code), dict):
                 return True, None  # rows<10 (US placeholder) judged by caller
             return False, _EMPTY_PAYLOAD_ERR
+        if key in ("fuyao_nav", "fuyao_holdings", "fuyao_asset"):
+            data = _resp_json(resp)
+            if data is _JSON_INVALID or not isinstance(data, dict):
+                return False, _BAD_JSON_ERR
+            if data.get("code") != 0:
+                return False, f"fuyao code={data.get('code')} {data.get('message') or ''}".strip()
+            node = data.get("data")
+            if not isinstance(node, dict):
+                return False, _EMPTY_PAYLOAD_ERR
+            items = node.get("item")
+            if key == "fuyao_holdings":
+                # item may legitimately be [] (fund holds no stocks)
+                if isinstance(items, list):
+                    return True, None
+                return False, _EMPTY_PAYLOAD_ERR
+            if isinstance(items, list) and items:
+                return True, None
+            return False, _EMPTY_PAYLOAD_ERR
         # em_jbgk / ipapi / other: the page may legitimately lack the
         # field being looked for; any non-empty body means it answered.
         return True, None
@@ -1560,13 +1613,16 @@ def _data_flow_ok() -> bool:
     return True
 
 
-async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10) -> httpx.Response:
-    headers = {"User-Agent": UA}
+async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10,
+                       headers: Optional[dict] = None) -> httpx.Response:
+    hdrs = {"User-Agent": UA}
     if referer:
-        headers["Referer"] = referer
+        hdrs["Referer"] = referer
+    if headers:
+        hdrs.update(headers)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
+            resp = await client.get(url, headers=hdrs)
             resp.raise_for_status()
     except Exception as e:
         _record_source(url, False, f"{type(e).__name__}: {e}")
@@ -1788,6 +1844,148 @@ async def fetch_mrf_nav(code: str, name: str = "") -> dict:
         raise HTTPException(502, f"净值数据暂时不可用（{code}）")
 
 
+# ------------------------------------------------- fuyao fallback (v1.4.7)
+# Tonghuashun official API as an independent fallback for NAV / holdings /
+# stock position. Eastmoney stays primary; these run only when the
+# Eastmoney call failed or returned no data, and only when FUYAO_API_KEY
+# is configured. All calls go through upstream_get (stats + payload
+# validation); the key travels in the X-api-key header, never in URLs.
+async def _fuyao_get(path: str) -> dict:
+    resp = await upstream_get(FUYAO_BASE + path,
+                              headers={"X-api-key": FUYAO_API_KEY})
+    data = resp.json()
+    if not isinstance(data, dict) or data.get("code") != 0:
+        raise ValueError(f"fuyao error: {(data or {}).get('message')}")
+    return data.get("data") or {}
+
+
+def _fuyao_date(ms) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(float(ms) / 1000, tz=CN_TZ).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+async def fetch_nav_fuyao(code: str) -> Optional[dict]:
+    """NAV dict (same shape as fetch_nav's lsjz result) from fuyao.
+    Fuyao returns unit NAVs only (no change%), so jzzzl is computed from
+    consecutive NAVs. None on any failure."""
+    try:
+        node = await _fuyao_get(
+            f"/api/fund/performance/nav?thscode={code}.OF&range=month&nav_type=unit")
+        items = [it for it in (node.get("item") or [])
+                 if isinstance(it, dict) and it.get("unit_nav") is not None]
+        items.sort(key=lambda it: it.get("nav_date") or 0)
+        if not items:
+            return None
+        last = items[-1]
+        prev = items[-2] if len(items) > 1 else None
+        prev2 = items[-3] if len(items) > 2 else None
+        dwjz = float(last["unit_nav"])
+        prev_dwjz = float(prev["unit_nav"]) if prev else None
+        prev2_dwjz = float(prev2["unit_nav"]) if prev2 else None
+
+        def _chg(cur, base):
+            return round((cur / base - 1) * 100, 2) if cur and base else 0.0
+
+        return {
+            "nav_date": _fuyao_date(last.get("nav_date")), "dwjz": dwjz,
+            "jzzzl": _chg(dwjz, prev_dwjz),
+            "prev_nav_date": _fuyao_date(prev.get("nav_date")) if prev else None,
+            "prev_dwjz": prev_dwjz,
+            "prev_jzzzl": _chg(prev_dwjz, prev2_dwjz) if prev else None,
+        }
+    except Exception:
+        return None
+
+
+async def fetch_nav_history_fuyao(code: str, days: int) -> list:
+    """[(date, jzzzl)] newest first from fuyao (range=year), change%
+    computed from consecutive unit NAVs. [] on failure."""
+    try:
+        node = await _fuyao_get(
+            f"/api/fund/performance/nav?thscode={code}.OF&range=year&nav_type=unit")
+        items = [it for it in (node.get("item") or [])
+                 if isinstance(it, dict) and it.get("unit_nav") is not None]
+        items.sort(key=lambda it: it.get("nav_date") or 0)
+        rows = []
+        for i in range(1, len(items)):
+            cur, base = float(items[i]["unit_nav"]), float(items[i - 1]["unit_nav"])
+            if base:
+                rows.append((_fuyao_date(items[i].get("nav_date")),
+                             round((cur / base - 1) * 100, 2)))
+        return rows[::-1][:days]
+    except Exception:
+        return []
+
+
+def _fuyao_holding_code(item: dict) -> Optional[str]:
+    """Map a fuyao holding item to the internal holding-code format used
+    by the jjcc parser (A: 6-digit, HK: 5-digit, US: ticker, others bare)."""
+    ticker = str(item.get("ticker") or "").strip()
+    thscode = str(item.get("thscode") or "").strip()
+    if not ticker and "." in thscode:
+        ticker = thscode.split(".", 1)[0]
+    if not ticker:
+        return None
+    suffix = thscode.rsplit(".", 1)[-1].upper() if "." in thscode else ""
+    if suffix == "HK" and ticker.isdigit():
+        return ticker.zfill(5)
+    if ticker.isalpha():
+        return ticker.upper()  # US ticker
+    return ticker
+
+
+async def _fuyao_holdings_raw(code: str):
+    """(parsed holdings dict, stock_ratio_pct|None) from fuyao, or
+    (None, None) on failure. Parsed dict matches parse_holdings output."""
+    try:
+        node = await _fuyao_get(f"/api/fund/portfolio/holdings?thscode={code}.OF")
+        items = [it for it in (node.get("item") or []) if isinstance(it, dict)]
+        items.sort(key=lambda it: it.get("investment_rank")
+                   if isinstance(it.get("investment_rank"), (int, float)) else 999)
+        holdings = []
+        for it in items:
+            hcode = _fuyao_holding_code(it)
+            try:
+                weight = float(it.get("hold_ratio"))
+            except (TypeError, ValueError):
+                continue
+            if hcode:
+                holdings.append({"code": hcode,
+                                 "name": str(it.get("stock_name") or "").strip(),
+                                 "weight": weight})
+        report_date = _fuyao_date(items[0].get("end_date_ms")) if items else None
+        label = None
+        if report_date:
+            y, m = int(report_date[:4]), int(report_date[5:7])
+            label = f"{y}年{(m - 1) // 3 + 1}季度"
+        ratio = node.get("stock_ratio_pct")
+        return ({"holdings": holdings[:10], "report_label": label,
+                 "report_date": report_date},
+                float(ratio) if isinstance(ratio, (int, float)) else None)
+    except Exception:
+        return None, None
+
+
+async def fetch_stock_position_fuyao(code: str) -> Optional[float]:
+    """Stock position % from fuyao: holdings endpoint's stock_ratio_pct
+    first (same disclosure as the holdings), then asset-allocation."""
+    _parsed, ratio = await _fuyao_holdings_raw(code)
+    if ratio is not None:
+        return ratio
+    try:
+        node = await _fuyao_get(f"/api/fund/portfolio/asset-allocation?thscode={code}.OF")
+        items = [it for it in (node.get("item") or []) if isinstance(it, dict)]
+        for it in items:
+            v = it.get("stock_ratio_pct")
+            if isinstance(v, (int, float)):
+                return float(v)
+    except Exception:
+        pass
+    return None
+
+
 async def fetch_nav(code: str, name: str = "") -> dict:
     if _is_mrf_code(code):  # MRF: Eastmoney lsjz is empty, use Yahoo
         return await fetch_mrf_nav(code, name)
@@ -1823,6 +2021,22 @@ async def fetch_nav(code: str, name: str = "") -> dict:
             )
         return {**nav, "stale": False}
     except Exception:
+        # Eastmoney lsjz failed/empty -> fuyao fallback (v1.4.7), cached
+        # the same way so the rest of the system can't tell the source.
+        if FUYAO_ENABLED:
+            nav = await fetch_nav_fuyao(code)
+            if nav and nav["dwjz"]:
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO nav_cache(fund_code, nav_date, dwjz, jzzzl, prev_nav_date, prev_dwjz, prev_jzzzl, fetched_at) "
+                        "VALUES(?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(fund_code) DO UPDATE SET nav_date=excluded.nav_date, dwjz=excluded.dwjz, jzzzl=excluded.jzzzl, "
+                        "prev_nav_date=excluded.prev_nav_date, prev_dwjz=excluded.prev_dwjz, prev_jzzzl=excluded.prev_jzzzl, "
+                        "fetched_at=excluded.fetched_at",
+                        (code, nav["nav_date"], nav["dwjz"], nav["jzzzl"],
+                         nav["prev_nav_date"], nav["prev_dwjz"], nav["prev_jzzzl"], time.time()),
+                    )
+                return {**nav, "stale": False}
         if row:
             return {**_nav_from_row(row), "stale": True}
         raise HTTPException(502, f"净值数据暂时不可用（{code}）")
@@ -1900,6 +2114,18 @@ async def fetch_holdings(code: str) -> dict:
             )
         return {**parsed, "stale": False}
     except Exception:
+        # Eastmoney jjcc failed/empty -> fuyao fallback (v1.4.7). Only a
+        # non-empty result is cached (mirrors the jjcc empty check).
+        if FUYAO_ENABLED:
+            parsed, _ratio = await _fuyao_holdings_raw(code)
+            if parsed and parsed["holdings"]:
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO holdings_cache(fund_code, holdings_json, report_label, report_date, fetched_at) VALUES(?,?,?,?,?) "
+                        "ON CONFLICT(fund_code) DO UPDATE SET holdings_json=excluded.holdings_json, report_label=excluded.report_label, report_date=excluded.report_date, fetched_at=excluded.fetched_at",
+                        (code, json.dumps(parsed["holdings"], ensure_ascii=False), parsed["report_label"], parsed["report_date"], time.time()),
+                    )
+                return {**parsed, "stale": False}
         if row:
             return {"holdings": json.loads(row["holdings_json"]), "report_label": row["report_label"],
                     "report_date": row["report_date"], "stale": True}
@@ -4022,6 +4248,9 @@ async def fetch_stock_position(code: str) -> Optional[float]:
         pct = parse_stock_position(await fetch_pingzhong_text(code))
     except Exception:
         pct = None
+    if pct is None and FUYAO_ENABLED:
+        # pingzhongdata failed/absent -> fuyao fallback (v1.4.7)
+        pct = await fetch_stock_position_fuyao(code)
     if pct is None and row and row["stock_pct"] is not None:
         return row["stock_pct"]  # keep last known value on upstream failure
     with db() as conn:
@@ -4055,21 +4284,29 @@ async def fetch_nav_history(code: str, days: int = BETA_WINDOW) -> list:
     """[(date, jzzzl)] newest first from lsjz (20 rows/page, max 6 pages)."""
     rows = []
     page = 1
-    while len(rows) < days and page <= 6:
-        resp = await upstream_get(
-            f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}"
-            f"&pageIndex={page}&pageSize=20",
-            referer=f"https://fund.eastmoney.com/f10/jjjz_{code}.html",
-        )
-        items = resp.json()["Data"]["LSJZList"]
-        if not items:
-            break
-        for it in items:
-            try:
-                rows.append((it["FSRQ"], float(it["JZZZL"] or 0)))
-            except (TypeError, ValueError, KeyError):
-                continue
-        page += 1
+    try:
+        while len(rows) < days and page <= 6:
+            resp = await upstream_get(
+                f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}"
+                f"&pageIndex={page}&pageSize=20",
+                referer=f"https://fund.eastmoney.com/f10/jjjz_{code}.html",
+            )
+            items = resp.json()["Data"]["LSJZList"]
+            if not items:
+                break
+            for it in items:
+                try:
+                    rows.append((it["FSRQ"], float(it["JZZZL"] or 0)))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            page += 1
+    except Exception:
+        if rows:
+            return rows[:days]  # partial lsjz history beats a source switch
+        if FUYAO_ENABLED:
+            # lsjz fully down -> fuyao fallback (v1.4.7)
+            return await fetch_nav_history_fuyao(code, days)
+        raise
     return rows[:days]
 
 
@@ -4871,12 +5108,18 @@ def _system_files() -> dict:
 @app.get("/api/admin/data-sources")
 def admin_data_sources(session: Optional[str] = Cookie(default=None)):
     """Upstream interface catalog with last-call status for the admin
-    数据接口 page (v1.4.6). Stats are in-memory since process start."""
+    数据接口 page (v1.4.6; grouped by data type in v1.4.7). Stats are
+    in-memory since process start. Fuyao entries show 未配置 when no
+    FUYAO_API_KEY is set. `sources` (flat) is kept for compatibility."""
     require_admin(session)
+    by_key = {}
     items = []
     for key, name, provider, purpose, role in _SOURCE_CATALOG:
         st = _source_stats.get(key)
-        if not st or (not st["ok"] and not st["fail"]):
+        if key.startswith("fuyao_") and not FUYAO_ENABLED:
+            status, last_time, last_error = "未配置", None, None
+            ok_n = fail_n = 0
+        elif not st or (not st["ok"] and not st["fail"]):
             status, last_time, last_error = "无记录", None, None
             ok_n = fail_n = 0
         else:
@@ -4886,14 +5129,35 @@ def admin_data_sources(session: Optional[str] = Cookie(default=None)):
             else:
                 status, last_time = "失败", _iso(st["last_fail"])
                 last_error = st["last_error"]
-        items.append({
+        item = {
             "key": key, "name": name, "provider": provider,
             "purpose": purpose, "role": role, "last_status": status,
             "last_time": last_time, "last_error": last_error,
             "success_count": ok_n, "fail_count": fail_n,
+        }
+        by_key[key] = item
+        items.append(item)
+    groups = []
+    for gname, keys in _SOURCE_GROUPS:
+        members = [by_key[k] for k in keys if k in by_key]
+        # group status over sources that actually ran （未配置 excluded):
+        # any success -> 正常； failures only -> 异常； nothing ran -> 无记录
+        ran = [m for m in members if m["last_status"] in ("成功", "失败")]
+        if any(m["last_status"] == "成功" for m in ran):
+            gstatus = "正常"
+        elif ran:
+            gstatus = "异常"
+        else:
+            gstatus = "无记录"
+        groups.append({
+            "group": gname,
+            "has_fallback": any(m["role"] == "兜底" for m in members),
+            "group_status": gstatus,
+            "sources": members,
         })
     return {"version": APP_VERSION, "now": _iso(time.time()),
-            "data_flow_ok": _data_flow_ok(), "sources": items}
+            "data_flow_ok": _data_flow_ok(), "fuyao_configured": FUYAO_ENABLED,
+            "sources": items, "groups": groups}
 
 
 @app.get("/api/admin/system-status")

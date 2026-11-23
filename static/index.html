@@ -82,6 +82,16 @@
   .ds-role.main { background: #EBF1FF; color: #2563EB; }
   .ds-role.fallback { background: #ECEEF2; color: #667085; }
   .ds-err { color: #C9362B; word-break: break-all; }
+  .ds-overview { font-size: 12.5px; color: #475467; margin-bottom: 10px; }
+  .ds-group { background: #FFFFFF; border: 1px solid #EAECF0; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.04); padding: 10px 12px; margin-bottom: 10px; overflow: hidden; }
+  .ds-group-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+  .ds-group-name { font-size: 14px; font-weight: 600; color: #202939; }
+  .ds-badge { display: inline-block; font-size: 10.5px; font-weight: 600; line-height: 1.5; padding: 0 7px; border-radius: 999px; white-space: nowrap; }
+  .ds-badge.ok { background: #07845B; color: #fff; }
+  .ds-badge.bad { background: #C9362B; color: #fff; }
+  .ds-badge.none { background: #ECEEF2; color: #667085; }
+  .ds-badge.fb { background: #EBF1FF; color: #2563EB; }
+  .ds-badge.nofb { background: #FEF3C7; color: #B45309; }
   .ft-dir > summary { cursor: pointer; list-style: none; }
   .ft-dir > summary::-webkit-details-marker { display: none; }
   .ft-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #475467; padding: 3px 0; border-bottom: 1px solid #F0F2F5; min-width: 0; }
@@ -189,6 +199,7 @@
   .admin-user-row:last-child { border-bottom: 0; }
   .admin-user-row .au-main { flex: 1; min-width: 140px; }
   .admin-user-row .au-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
+  .admin-user-row .au-seq { color: #98A2B3; font-weight: 600; margin-right: 4px; }
   .admin-user-row .au-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
   .admin-user-row .au-actions { display: inline-flex; gap: 6px; flex: none; vertical-align: middle; margin-left: 4px; }
   .admin-user-row.changed { box-shadow: inset 3px 0 0 #F59E0B; }
@@ -521,6 +532,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.7</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">接入同花顺官方接口作净值/持仓/股票仓位兜底（东财失败时自动切换）；「数据接口」页按数据类型分组卡片展示，一眼看出每组有无兜底、是否异常；用户管理按注册顺序编号</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.6</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">数据流异常时页面底部自动提示、恢复后消失（200 空数据的软限流也算异常）；管理页新增「数据接口」子页（全部上游接口与最近状态）；系统状态页增加系统文件目录树</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.5</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">分时数据增加 Yahoo 兜底，东财双主机被限流时美股曲线仍可出图</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.4</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">分时数据增加东财备用主机，修复美股基金曲线在主源限流时无数据</div></div></div>
@@ -537,7 +549,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.6 · 更新于 2026-11-23 23:50</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.7 · 更新于 2026-11-24 00:10</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -771,19 +783,38 @@ async function loadDataSources() {
     $("sources-body").innerHTML = '<div class="muted">读取失败：' + esc(e.message) + '</div>';
   }
 }
-function renderDataSources(d) {
+function dsSourceRow(s) {
   const t = iso => iso ? fmtLocalTime(iso) : "—";
-  return (d.sources || []).map(s => {
-    const dotCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "none");
-    const stCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "");
-    const roleCls = s.role === "主源" ? "main" : "fallback";
-    return `<div class="ss-row"><b>${esc(s.name)}</b><span class="ds-role ${roleCls}">${esc(s.role)}</span>`
-      + `<br>${esc(s.purpose)}`
-      + `<br><span class="ds-dot ${dotCls}"></span><span class="${stCls}">${esc(s.last_status)}</span>`
-      + `<span class="t"> · ${esc(s.provider)} · 最近 ${t(s.last_time)} · 成功 ${s.success_count} · 失败 ${s.fail_count}</span>`
-      + (s.last_error ? `<br><span class="ds-err">${esc(s.last_error)}</span>` : "")
+  const dotCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "none");
+  const stCls = s.last_status === "成功" ? "ok" : (s.last_status === "失败" ? "bad" : "");
+  const roleCls = s.role === "主源" ? "main" : "fallback";
+  return `<div class="ss-row"><b>${esc(s.name)}</b><span class="ds-role ${roleCls}">${esc(s.role)}</span>`
+    + `<br>${esc(s.purpose)}`
+    + `<br><span class="ds-dot ${dotCls}"></span><span class="${stCls}">${esc(s.last_status)}</span>`
+    + `<span class="t"> · ${esc(s.provider)} · 最近 ${t(s.last_time)} · 成功 ${s.success_count} · 失败 ${s.fail_count}</span>`
+    + (s.last_error ? `<br><span class="ds-err">${esc(s.last_error)}</span>` : "")
+    + `</div>`;
+}
+function renderDataSources(d) {
+  const groups = d.groups || [];
+  if (!groups.length) {  // old backend shape: flat list
+    return (d.sources || []).map(dsSourceRow).join("") || '<div class="muted">暂无接口数据</div>';
+  }
+  const nOk = groups.filter(g => g.group_status === "正常").length;
+  const nBad = groups.filter(g => g.group_status === "异常").length;
+  const nNoFb = groups.filter(g => !g.has_fallback).length;
+  let h = `<div class="ds-overview">共 ${groups.length} 组 · ${nOk} 组正常 · ${nBad} 组异常 · ${nNoFb} 组无兜底（待补）</div>`;
+  h += groups.map(g => {
+    const badgeCls = g.group_status === "正常" ? "ok" : (g.group_status === "异常" ? "bad" : "none");
+    const fbBadge = g.has_fallback
+      ? '<span class="ds-badge fb">有兜底</span>'
+      : '<span class="ds-badge nofb">无兜底·待补</span>';
+    return `<div class="ds-group"><div class="ds-group-head"><span class="ds-group-name">${esc(g.group)}</span>`
+      + `<span class="ds-badge ${badgeCls}">${esc(g.group_status)}</span>${fbBadge}</div>`
+      + (g.sources || []).map(dsSourceRow).join("")
       + `</div>`;
-  }).join("") || '<div class="muted">暂无接口数据</div>';
+  }).join("");
+  return h;
 }
 /* ---- system status (v1.4.3, admin only) ---- */
 let statusTimer = null;
@@ -915,7 +946,7 @@ async function loadAdmin() {
       const sub3 = "注册 " + (fmtLocalTime(u.created_at) || "-") + " · 自选 " + u.fund_count + " 只";
       const del = (u.id === myUserId || u.is_admin) ? "" : `<button class="danger" onclick="adminDeleteUser(${u.id})">删除</button>`;
       const actions = `<span class="au-actions"><button class="mini" onclick="adminResetPassword(${u.id})">改密码</button>${del}</span>`;
-      return `<div class="admin-user-row${ch ? " changed" : ""}"><div class="au-main"><div class="au-name">${esc(u.username)}${badge} ${status} ${actions}</div>`
+      return `<div class="admin-user-row${ch ? " changed" : ""}"><div class="au-main"><div class="au-name"><span class="au-seq">#${u.seq || "-"}</span>${esc(u.username)}${badge} ${status} ${actions}</div>`
         + `<div class="au-sub">${ch ? '<span class="badge">已更新</span>' : ""}${esc(sub1)}</div><div class="au-sub">${esc(sub2)}</div><div class="au-sub">${esc(sub3)}</div></div></div>`;
     };
     const onlineUsers = adminUsers.filter(u => u.online);
