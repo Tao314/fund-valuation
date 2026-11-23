@@ -90,6 +90,13 @@ rm -rf /opt/fund-valuation
 
 删完即干净。install.sh 装的 python3、python3-venv 等系统包可保留，不影响其他服务；反代（Nginx/Caddy）里的站点配置需自行删除。
 
+## 备份与恢复
+
+- 备份存放在数据库同目录的 `backups/` 下（`fund-backup-YYYYMMDD-HHMMSS.db` + 同名 `.json` 元信息），为 SQLite 在线一致性拷贝（backup API，WAL 安全）。
+- 每天 0 点（Asia/Shanghai）自动备份；启动时若无任何备份会先补一份。自动、手动、恢复前备份合计保留最近 10 份，超出自动删除。
+- 仅管理员可用（管理页「系统备份」）：立即备份、下载任意备份、恢复备份。恢复前会自动备份当前数据；恢复后自动执行全部数据库迁移（建表 + 加列），旧版本备份可直接恢复到新系统，版本不一致不阻断恢复。
+- 恢复后会话以恢复后的数据库为准，当前会话不在其中时需重新登录。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -100,7 +107,7 @@ rm -rf /opt/fund-valuation
 | GET | /api/me | 当前用户 |
 | GET | /api/search?q= | 基金搜索（需登录） |
 | GET | /api/watchlist | 我的基金列表 |
-| POST | /api/watchlist | 添加基金 {fund_code}，代码须 6 位数字 |
+| POST | /api/watchlist | 添加基金 {fund_code, fund_name?, category?}，代码须 6 位数字；立即返回，名称解析与估值重算在后台进行 |
 | DELETE | /api/watchlist/{id} | 删除（仅本人记录） |
 | POST | /api/watchlist/reorder | 在单个分类内重排 {category, ids: [id, ...]}，ids 须与该分类全部基金一致，否则 400；不影响分类顺序 |
 | POST | /api/categories/reorder | 重排分类顺序 {names: [分类名, ...]}，基金随分类整组移动 |
@@ -112,6 +119,10 @@ rm -rf /opt/fund-valuation
 | POST | /api/settings | 保存自动刷新间隔 {refresh_seconds}，须 10-600 秒，否则 400 |
 | POST | /api/change-password | 修改密码 {old_password, new_password}，新密码至少 6 位；旧密码错误 400；成功后其他会话失效，当前会话保留 |
 | GET | /api/estimates | 列表 + 自算估值（含 category 字段、categories 分类顺序数组和 refresh_seconds 自动刷新间隔） |
+| GET | /api/admin/backups | 备份列表（仅管理员） |
+| POST | /api/admin/backups | 立即手动备份（仅管理员） |
+| GET | /api/admin/backups/{name}/download | 下载备份文件（仅管理员） |
+| POST | /api/admin/backups/{name}/restore | 恢复备份（仅管理员；恢复前自动备份当前数据，恢复后自动迁移） |
 
 排序规则：先按分类顺序（user_categories 表，未分类永远最后），分类内按基金 sort_order。调基金顺序只在所属分类内生效，不动分类顺序；调分类顺序整组移动，组内基金顺序不变。
 
@@ -131,6 +142,11 @@ rm -rf /opt/fund-valuation
 - `install.sh` Debian 13 一键安装（venv + systemd 服务）
 
 ## 版本演变
+
+### v1.17.0（2026-11-23）
+
+- 添加/删除基金改为快速响应：前端乐观更新即时显示，名称解析、估值与曲线重算、趋势预热全部后台进行，接口不再等待上游
+- 新增系统备份与恢复（仅管理员）：每天 0 点自动备份、保留最近 10 份，支持手动备份、下载与恢复；恢复自动执行数据库迁移，旧备份可恢复到新系统
 
 ### v1.16.4（2026-11-23）
 

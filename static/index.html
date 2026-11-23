@@ -255,6 +255,14 @@
         <h3>登录记录</h3>
         <div id="admin-login-logs"></div>
       </div>
+      <div class="card">
+        <h3>系统备份</h3>
+        <div class="row">
+          <button id="backup-now-btn">立即备份</button>
+          <span class="muted">每天 0 点自动备份，保留最近 10 份；恢复前会自动备份当前数据</span>
+        </div>
+        <div id="backup-list" style="margin-top:8px"></div>
+      </div>
     </div>
 
     <div id="view-settings" style="display:none">
@@ -305,7 +313,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.16.4 · 更新于 2026-11-23 09:24</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.17.0 · 更新于 2026-11-23 09:50</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -502,7 +510,48 @@ async function loadAdmin() {
       + `<span class="lg-ip">${esc(l.ip || "")}</span></div>`
     ).join("") || '<div class="muted">暂无记录</div>';
   } catch (e) { setAdminErr(e.message); }
+  loadBackups();
 }
+/* ---- system backup (v1.17.0, admin only) ---- */
+const BACKUP_KIND_LABEL = { auto: "自动", manual: "手动", "pre-restore": "恢复前" };
+function fmtSize(bytes) {
+  if (bytes == null) return "-";
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " B";
+}
+async function loadBackups() {
+  if (!isAdmin) return;
+  try {
+    const data = await api("/api/admin/backups");
+    $("backup-list").innerHTML = (data.backups || []).map(b =>
+      `<div class="admin-user-row"><div class="au-main"><div class="au-name">${esc(fmtLocalTime(b.created_at) || b.name)}</div>`
+      + `<div class="au-sub">${esc(BACKUP_KIND_LABEL[b.kind] || b.kind || "")} · ${fmtSize(b.size_bytes)}${b.app_version ? " · " + esc(b.app_version) : ""}</div></div>`
+      + `<div class="au-actions"><button class="mini" onclick="downloadBackup('${esc(b.name)}')">下载</button>`
+      + `<button class="danger" onclick="restoreBackup('${esc(b.name)}')">恢复</button></div></div>`
+    ).join("") || '<div class="muted">暂无备份</div>';
+  } catch (e) { setAdminErr(e.message); }
+}
+function downloadBackup(name) {
+  window.location.href = "/api/admin/backups/" + encodeURIComponent(name) + "/download";
+}
+async function restoreBackup(name) {
+  if (!confirm("恢复备份「" + name + "」？\n当前数据将被替换（恢复前会自动备份当前数据）。\n恢复后可能需要重新登录。")) return;
+  try {
+    await api("/api/admin/backups/" + encodeURIComponent(name) + "/restore", { method: "POST" });
+    alert("恢复成功，页面将重新加载。");
+    location.reload();
+  } catch (e) { setAdminErr(e.message); }
+}
+$("backup-now-btn").onclick = async () => {
+  const btn = $("backup-now-btn");
+  try {
+    btn.disabled = true; btn.textContent = "备份中…";
+    await api("/api/admin/backups", { method: "POST" });
+    await loadBackups();
+  } catch (e) { setAdminErr(e.message); }
+  finally { btn.disabled = false; btn.textContent = "立即备份"; }
+};
 async function adminResetPassword(id) {
   const u = adminUsers.find(x => x.id === id); if (!u) return;
   const pw = prompt("为用户「" + u.username + "」设置新密码（至少 6 位）");
@@ -702,35 +751,84 @@ async function runSearch() {
   const { results } = await api("/api/search?q=" + encodeURIComponent(lastSearchQ));
   $("results").innerHTML = results.map(r => addedCodes.has(r.code)
     ? `<button disabled>${r.code} ${esc(r.name)} 已添加</button><button class="remove-btn" onclick="removeFromSearch('${r.code}')">移除</button>`
-    : `<button onclick="addFund('${r.code}', this)">${r.code} ${esc(r.name)} ＋</button>`).join("") || '<span class="muted">无结果</span>';
+    : `<button data-name="${esc(r.name)}" onclick="addFund('${r.code}', this)">${r.code} ${esc(r.name)} ＋</button>`).join("") || '<span class="muted">无结果</span>';
 }
 $("search-btn").onclick = async () => {
   try { lastSearchQ = $("search-q").value.trim(); await runSearch(); }
   catch (e) { setErr(e.message); }
 };
+// Optimistic watchlist mutations (v1.17.0): update the local payload and
+// re-render immediately, then sync with the server in the background;
+// failures roll back (add) or resync (remove) and surface the error.
+function optimisticAdd(code, name) {
+  if (!window.estimateData) return null;
+  const placeholder = {
+    id: -1, fund_code: code, fund_name: name || code, category: addCatSel,
+    nav_date: null, dwjz: null, jzzzl: null,
+    prev_nav_date: null, prev_dwjz: null, prev_jzzzl: null,
+    est_nav: null, est_change_pct: null, est_nav_ext: null, est_change_pct_ext: null,
+    coverage_pct: 0, report_label: null, report_date: null, quote_time: null,
+    stale: false, skipped_holdings: [], holdings: [], sector: null,
+  };
+  window.estimateData.funds = [...(window.estimateData.funds || []), placeholder];
+  // A brand-new category is auto-created server-side; mirror it locally or
+  // buildGroups would drop the placeholder (category not in the list yet).
+  if (addCatSel && Array.isArray(window.estimateData.categories)
+      && !window.estimateData.categories.includes(addCatSel)) {
+    window.estimateData.categories = [...window.estimateData.categories, addCatSel];
+  }
+  addedCodes.add(code);
+  renderFunds(window.estimateData);
+  renderSettings(window.estimateData);
+  return placeholder;
+}
+function optimisticRemove(id) {
+  if (!window.estimateData) return;
+  window.estimateData.funds = (window.estimateData.funds || []).filter(f => f.id !== id);
+  addedCodes = new Set(window.estimateData.funds.map(f => f.fund_code));
+  renderFunds(window.estimateData);
+  renderSettings(window.estimateData);
+}
 async function addFund(code, btn) {
+  const name = btn ? (btn.dataset.name || "") : "";
+  const placeholder = optimisticAdd(code, name);
   try {
     if (btn) { btn.disabled = true; btn.textContent = "添加中…"; }
-    await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code, category: addCatSel }) });
-    await loadEstimates();
-    if (!addedCodes.has(code)) { await new Promise(r => setTimeout(r, 1500)); await loadEstimates(); }
-    if (lastSearchQ) await runSearch();
-  } catch (e) { setErr(e.message); if (btn) { btn.disabled = false; } }
+    const r = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code, fund_name: name, category: addCatSel }) });
+    if (placeholder) placeholder.id = r.id;  // settings buttons work before refresh lands
+    loadEstimates();
+    // An auto-refresh already in flight may land with pre-add data and
+    // drop the placeholder; one delayed re-check guarantees convergence.
+    setTimeout(() => { if (!addedCodes.has(code)) loadEstimates(); }, 2500);
+    if (lastSearchQ) runSearch();
+  } catch (e) {
+    if (placeholder) optimisticRemove(placeholder.id);
+    setErr(e.message);
+    if (btn) { btn.disabled = false; btn.textContent = code + " " + name + " ＋"; }
+  }
 }
 async function removeFromSearch(code) {
   const f = currentFunds.find(x => x.fund_code === code);
   if (!f) return;
   if (!confirm("从自选移除基金「" + f.fund_name + "」？")) return;
+  optimisticRemove(f.id);
   try {
     await api("/api/watchlist/" + f.id, { method: "DELETE" });
-    await loadEstimates();
-    if (lastSearchQ) await runSearch();
-  } catch (e) { setErr(e.message); }
+    loadEstimates();
+    setTimeout(() => { if (addedCodes.has(code)) loadEstimates(); }, 2500);
+    if (lastSearchQ) runSearch();
+  } catch (e) { setErr(e.message); loadEstimates(); }
 }
 async function delFund(id, name) {
   if (!confirm("从自选移除基金「" + name + "」？")) return;
-  try { await api("/api/watchlist/" + id, { method: "DELETE" }); await loadEstimates(); }
-  catch (e) { setErr(e.message); }
+  const f = currentFunds.find(x => x.id === id);
+  optimisticRemove(id);
+  try {
+    await api("/api/watchlist/" + id, { method: "DELETE" });
+    loadEstimates();
+    if (f) setTimeout(() => { if (addedCodes.has(f.fund_code)) loadEstimates(); }, 2500);
+  }
+  catch (e) { setErr(e.message); loadEstimates(); }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : "flat"}">${s}</span>`; }
 // Estimate accuracy vs published change (percentage points, neutral color)

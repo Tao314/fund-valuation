@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -37,6 +38,10 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
+APP_VERSION = "v1.17.0"  # keep in sync with the footer in static/index.html
+BACKUP_DIR = DB_PATH.parent / "backups"
+BACKUP_KEEP = 10
+BACKUP_NAME_RE = re.compile(r"^fund-backup-\d{8}-\d{6}\.db$")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 FUND_CODE_RE = re.compile(r"^\d{6}$")
 QUOTE_TTL = 45          # seconds, in-memory global cache
@@ -51,7 +56,8 @@ async def lifespan(_app):
     # in-memory quote cache hot so first page loads don't wait on Sina.
     tasks = [asyncio.create_task(_rank_warm_loop()),
              asyncio.create_task(_quote_warm_loop()),
-             asyncio.create_task(_trends_warm_loop())]
+             asyncio.create_task(_trends_warm_loop()),
+             asyncio.create_task(_backup_loop())]
     try:
         yield
     finally:
@@ -253,6 +259,8 @@ class AuthBody(BaseModel):
 class AddFundBody(BaseModel):
     fund_code: str
     category: str = ""
+    fund_name: str = ""  # from the frontend's search result; resolved in
+    # the background when omitted so the mutation never waits on upstream
 
 
 class ReorderBody(BaseModel):
@@ -467,6 +475,194 @@ def admin_login_logs(limit: int = 200, session: Optional[str] = Cookie(default=N
          "ip": r["ip"], "user_agent": (r["user_agent"] or "")[:120], "created_at": r["created_at"]}
         for r in rows
     ]}
+
+
+# ---------------------------------------------------------------- backup
+# System backup & restore (admin only). A backup is a consistent SQLite
+# copy (sqlite3 backup API, WAL-safe) in BACKUP_DIR plus a .json sidecar
+# with metadata. Retention: newest BACKUP_KEEP across all kinds. Restore
+# copies the backup INTO the live DB via the backup API (no file swap, so
+# WAL stays consistent), then re-runs init_db() so every migration
+# applies — old backups restore into new code. Version is recorded for
+# information only and never blocks a restore.
+
+def _backup_entry(path: Path) -> dict:
+    meta = {}
+    sidecar = path.with_suffix(".json")
+    if sidecar.is_file():
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+    if not meta.get("created_at"):
+        # Sidecar missing/corrupt (e.g. a .db copied in by hand): derive
+        # the timestamp from the filename.
+        try:
+            dt = datetime.strptime(path.stem, "fund-backup-%Y%m%d-%H%M%S").replace(tzinfo=CN_TZ)
+            meta["created_at"] = dt.isoformat()
+        except ValueError:
+            meta["created_at"] = datetime.fromtimestamp(path.stat().st_mtime, CN_TZ).isoformat()
+    return {
+        "name": path.name,
+        "created_at": meta.get("created_at", ""),
+        "kind": meta.get("kind") or "manual",
+        "size_bytes": path.stat().st_size,
+        "app_version": meta.get("app_version") or "",
+    }
+
+
+def _list_backups() -> list:
+    if not BACKUP_DIR.is_dir():
+        return []
+    paths = [p for p in BACKUP_DIR.glob("*.db") if BACKUP_NAME_RE.fullmatch(p.name)]
+    # Timestamped names sort chronologically; newest first.
+    return [_backup_entry(p) for p in sorted(paths, key=lambda p: p.name, reverse=True)]
+
+
+def _prune_backups():
+    entries = _list_backups()
+    for e in entries[BACKUP_KEEP:]:
+        p = BACKUP_DIR / e["name"]
+        p.unlink(missing_ok=True)
+        p.with_suffix(".json").unlink(missing_ok=True)
+
+
+def _make_backup(kind: str) -> dict:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    created = datetime.now(CN_TZ)
+    stamp = created
+    while True:  # same-second collisions bump the filename stamp
+        name = f"fund-backup-{stamp:%Y%m%d-%H%M%S}.db"
+        dest = BACKUP_DIR / name
+        if not dest.exists():
+            break
+        stamp += timedelta(seconds=1)
+    src = sqlite3.connect(DB_PATH)
+    try:
+        dst = sqlite3.connect(dest)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    meta = {"created_at": created.isoformat(), "app_version": APP_VERSION,
+            "kind": kind, "size_bytes": dest.stat().st_size}
+    dest.with_suffix(".json").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _prune_backups()
+    return {"name": name, **meta}
+
+
+def _restore_backup(name: str) -> dict:
+    """Validate + restore one backup into the live DB. Returns the
+    pre-restore backup entry. Raises ValueError on an unusable file."""
+    path = BACKUP_DIR / name
+    try:
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            has_users = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        raise ValueError("备份文件不是有效的 SQLite 数据库")
+    if ok != "ok":
+        raise ValueError("备份文件完整性校验失败")
+    if not has_users:
+        raise ValueError("备份文件缺少 users 表，不是有效的系统备份")
+    # Snapshot the target first: the pre-restore backup below prunes to
+    # BACKUP_KEEP and could delete the very file being restored (when it
+    # is among the oldest), which would leave sqlite3.connect() to create
+    # an empty DB and copy that over the live one.
+    tmp = BACKUP_DIR / (name + ".restore-tmp")
+    shutil.copyfile(path, tmp)
+    try:
+        pre = _make_backup("pre-restore")
+        src = sqlite3.connect(tmp)
+        try:
+            dst = sqlite3.connect(DB_PATH)
+            try:
+                dst.execute("PRAGMA busy_timeout=10000")
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    finally:
+        tmp.unlink(missing_ok=True)
+    init_db()  # apply all migrations so old backups work on new code
+    return pre
+
+
+async def _backup_loop():
+    """Daily 00:00 (Asia/Shanghai) automatic backup; creates one initial
+    backup at startup when none exists so the feature is visibly on."""
+    await asyncio.sleep(15)
+    try:
+        if not _list_backups():
+            entry = await asyncio.to_thread(_make_backup, "auto")
+            print(f"[backup] initial backup {entry['name']}", flush=True)
+    except Exception as e:
+        print(f"[backup] initial backup failed: {e!r}", flush=True)
+    while True:
+        now = datetime.now(CN_TZ)
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        await asyncio.sleep(max(1.0, (nxt - now).total_seconds()))
+        try:
+            entry = await asyncio.to_thread(_make_backup, "auto")
+            print(f"[backup] daily backup {entry['name']}", flush=True)
+        except Exception as e:
+            print(f"[backup] daily backup failed: {e!r}", flush=True)
+
+
+@app.get("/api/admin/backups")
+def admin_list_backups(session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    return {"backups": _list_backups()}
+
+
+@app.post("/api/admin/backups")
+async def admin_create_backup(session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    entry = await asyncio.to_thread(_make_backup, "manual")
+    return {"ok": True, "backup": entry}
+
+
+@app.get("/api/admin/backups/{name}/download")
+def admin_download_backup(name: str, session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    if not BACKUP_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "备份文件名不合法")
+    path = BACKUP_DIR / name
+    if not path.is_file():
+        raise HTTPException(404, "备份不存在")
+    return FileResponse(path, filename=name, media_type="application/octet-stream")
+
+
+@app.post("/api/admin/backups/{name}/restore")
+async def admin_restore_backup(name: str, session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    if not BACKUP_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "备份文件名不合法")
+    if not (BACKUP_DIR / name).is_file():
+        raise HTTPException(404, "备份不存在")
+    try:
+        pre = await asyncio.to_thread(_restore_backup, name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # Data was replaced wholesale: drop every in-memory cache (DB-backed
+    # caches like holdings/nav/trends/industry came with the restore).
+    _quote_cache.update(at=0.0, quotes={})
+    _est_cache.clear()
+    _series_cache.clear()
+    for t in list(_est_tasks.values()) + list(_series_tasks.values()):
+        t.cancel()
+    _est_tasks.clear()
+    _series_tasks.clear()
+    return {"ok": True, "restored": name, "pre_restore_backup": pre["name"],
+            "note": "已恢复；会话来自恢复后的数据库，如当前会话不在其中请重新登录"}
 
 
 # ---------------------------------------------------------------- upstream
@@ -1597,6 +1793,57 @@ def get_watchlist(session: Optional[str] = Cookie(default=None)):
     return {"funds": [dict(r) for r in sort_funds(rows, cats)]}
 
 
+async def _resolve_fund_name(item_id: int, code: str):
+    """Fill in a placeholder fund name (inserted as the bare code) via the
+    search API, in the background. Only replaces the placeholder, so a
+    name supplied by the frontend is never overwritten."""
+    try:
+        resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={code}")
+        name = next((d["NAME"] for d in resp.json().get("Datas", []) if d.get("CODE") == code and _is_fund_entry(d)), None)
+        if name:
+            with db() as conn:
+                conn.execute(
+                    "UPDATE user_funds SET fund_name=? WHERE id=? AND fund_name=?",
+                    (name, item_id, code),
+                )
+    except Exception as e:
+        print(f"[watchlist] name resolve failed for {code}: {e!r}", flush=True)
+
+
+async def _warm_fund_trends(code: str):
+    """Warm holdings + minute trends for one newly added fund (mirrors
+    _trends_warm_loop for a single fund) so its first curve is instant."""
+    try:
+        hold = await fetch_holdings(code)
+        mmap = await fetch_stock_market_map(code)
+        date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        await asyncio.gather(*[
+            fetch_holding_trends(h["code"], mmap, date_str, h.get("name"))
+            for h in hold["holdings"] if h["weight"]])
+    except Exception as e:
+        print(f"[watchlist] trends warm failed for {code}: {e!r}", flush=True)
+
+
+def _schedule_user_refresh(uid, warm_code=None):
+    """After a watchlist mutation: invalidate the user's cached payloads
+    and recompute them in the background (superseding any in-flight
+    refresh) so the mutation itself returns immediately."""
+    _est_gen[uid] = _est_gen.get(uid, 0) + 1
+    _series_gen[uid] = _series_gen.get(uid, 0) + 1
+    _est_cache.pop(uid, None)
+    _series_cache.pop(uid, None)
+    t = _est_tasks.get(uid)
+    if t is not None and not t.done():
+        t.cancel()
+    _est_tasks[uid] = asyncio.create_task(_refresh_estimates(uid))
+    t = _series_tasks.get(uid)
+    if t is not None and not t.done():
+        t.cancel()
+    _series_tasks[uid] = asyncio.create_task(_refresh_series(uid))
+    if warm_code:
+        asyncio.create_task(_warm_fund_trends(warm_code))
+
+
 @app.post("/api/watchlist")
 async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
@@ -1608,11 +1855,10 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     category = (body.category or "").strip()
     if len(category) > 20:
         raise HTTPException(400, "分类名最多 20 个字符")
-    # Resolve fund name via search API (also validates the code exists)
-    resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={code}")
-    name = next((d["NAME"] for d in resp.json().get("Datas", []) if d.get("CODE") == code and _is_fund_entry(d)), None)
-    if not name:
-        raise HTTPException(404, "未找到该基金代码")
+    # Fast path: the frontend sends the name from its search result, so no
+    # upstream call blocks the mutation. Without a name we insert the code
+    # as a placeholder and resolve the real name in the background.
+    name = (body.fund_name or "").strip()[:60] or code
     with db() as conn:
         try:
             cur = conn.execute(
@@ -1628,20 +1874,21 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
                 )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "该基金已在列表中")
-    _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
-    _est_cache.pop(uid, None)  # watchlist changed: recompute estimates next call
-    return {"ok": True, "id": cur.lastrowid, "fund_code": code, "fund_name": name, "category": category}
+    item_id = cur.lastrowid
+    if name == code:
+        asyncio.create_task(_resolve_fund_name(item_id, code))
+    _schedule_user_refresh(uid, warm_code=code)
+    return {"ok": True, "id": item_id, "fund_code": code, "fund_name": name, "category": category}
 
 
 @app.delete("/api/watchlist/{item_id}")
-def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)):
+async def delete_watchlist(item_id: int, session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     with db() as conn:
         cur = conn.execute("DELETE FROM user_funds WHERE id=? AND user_id=?", (item_id, uid))
     if cur.rowcount == 0:
         raise HTTPException(404, "记录不存在")
-    _series_cache.pop(uid, None)  # watchlist changed: recompute curves next call
-    _est_cache.pop(uid, None)  # watchlist changed: recompute estimates next call
+    _schedule_user_refresh(uid)
     return {"ok": True}
 
 
@@ -1779,6 +2026,7 @@ def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cook
 # after a server start hits the cache.
 _est_cache = {}   # uid -> (computed_at_epoch, payload dict)
 _est_tasks = {}   # uid -> asyncio.Task running _refresh_estimates
+_est_gen = {}     # uid -> mutation counter; stale computes don't overwrite
 _EST_TTL = 30
 
 
@@ -1909,26 +2157,53 @@ async def _compute_estimates(uid):
 
 
 async def _refresh_estimates(uid):
+    gen = _est_gen.get(uid, 0)
     try:
         payload = await _compute_estimates(uid)
-        _est_cache[uid] = (time.time(), payload)
+        if _est_gen.get(uid, 0) == gen:  # not superseded by a mutation
+            _est_cache[uid] = (time.time(), payload)
     except Exception as e:
         print(f"[estimates] background refresh failed for uid {uid}: {e!r}")
     finally:
-        _est_tasks.pop(uid, None)
+        if _est_tasks.get(uid) is asyncio.current_task():
+            _est_tasks.pop(uid, None)
+
+
+async def _await_refresh(tasks: dict, uid):
+    """Wait for an in-flight background refresh (following superseding
+    tasks) so a cache-miss request reuses it instead of duplicating the
+    compute. Re-raises only if this request itself is cancelled."""
+    while True:
+        t = tasks.get(uid)
+        if t is None or t.done():
+            return
+        try:
+            await asyncio.shield(t)
+            return
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            continue  # superseded by a newer refresh; wait for that one
+        except Exception:
+            return
 
 
 @app.get("/api/estimates")
 async def estimates(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     hit = _est_cache.get(uid)
+    if hit is None:
+        await _await_refresh(_est_tasks, uid)
+        hit = _est_cache.get(uid)
     if hit is not None:
         computed_at, payload = hit
         if time.time() - computed_at > _EST_TTL and uid not in _est_tasks:
             _est_tasks[uid] = asyncio.create_task(_refresh_estimates(uid))
         return payload
+    gen = _est_gen.get(uid, 0)
     payload = await _compute_estimates(uid)
-    _est_cache[uid] = (time.time(), payload)
+    if _est_gen.get(uid, 0) == gen:
+        _est_cache[uid] = (time.time(), payload)
     return payload
 
 
@@ -1939,6 +2214,7 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
 # recomputes; no entry -> computed synchronously.
 _series_cache = {}   # uid -> (computed_at_epoch, series dict)
 _series_tasks = {}   # uid -> asyncio.Task running _refresh_series
+_series_gen = {}     # uid -> mutation counter; stale computes don't overwrite
 _SERIES_TTL = 20
 
 
@@ -2046,26 +2322,34 @@ async def _compute_series(uid):
 
 
 async def _refresh_series(uid):
+    gen = _series_gen.get(uid, 0)
     try:
         series = await _compute_series(uid)
-        _series_cache[uid] = (time.time(), series)
+        if _series_gen.get(uid, 0) == gen:  # not superseded by a mutation
+            _series_cache[uid] = (time.time(), series)
     except Exception as e:
         print(f"[history] background refresh failed for uid {uid}: {e!r}")
     finally:
-        _series_tasks.pop(uid, None)
+        if _series_tasks.get(uid) is asyncio.current_task():
+            _series_tasks.pop(uid, None)
 
 
 @app.get("/api/history/today")
 async def history_today(session: Optional[str] = Cookie(default=None)):
     uid = current_user_id(session)
     hit = _series_cache.get(uid)
+    if hit is None:
+        await _await_refresh(_series_tasks, uid)
+        hit = _series_cache.get(uid)
     if hit is not None:
         computed_at, series = hit
         if time.time() - computed_at > _SERIES_TTL and uid not in _series_tasks:
             _series_tasks[uid] = asyncio.create_task(_refresh_series(uid))
         return {"series": series}
+    gen = _series_gen.get(uid, 0)
     series = await _compute_series(uid)
-    _series_cache[uid] = (time.time(), series)
+    if _series_gen.get(uid, 0) == gen:
+        _series_cache[uid] = (time.time(), series)
     return {"series": series}
 
 
