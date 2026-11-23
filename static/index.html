@@ -84,7 +84,10 @@
   .fund-card .fc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 13px; line-height: 1.4; color: #667085; flex-wrap: wrap; }
   .fund-card .fc-row .fc-label { white-space: nowrap; font-size: 12px; font-weight: 400; color: #667085; }
   .fund-card .fc-row .fc-note { color: #98A2B3; }
-  .fund-card .fc-row .fc-cred { color: #98A2B3; font-size: 11px; margin-left: 4px; }
+  .fund-card .fc-row .fc-cred { display: inline-block; font-size: 11px; font-weight: 600; line-height: 1.5; padding: 0 7px; margin-left: 5px; border-radius: 999px; vertical-align: middle; white-space: nowrap; }
+  .fund-card .fc-row .fc-cred-hi { background: #07845B; color: #fff; }
+  .fund-card .fc-row .fc-cred-mid { background: transparent; color: #B45309; border: 1px solid #D97706; }
+  .fund-card .fc-row .fc-cred-lo { background: #F2F3F5; color: #98A2B3; }
   .fund-card .fc-row .fc-val { white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: auto; }
   .fund-card .fc-row .fc-val b { font-size: 15px; font-weight: 600; color: #202939; }
   .fund-card .fc-row .up, .fund-card .fc-row .down, .fund-card .fc-row .flat { font-size: 13px; font-weight: 500; }
@@ -115,7 +118,7 @@
   .sort-toggle button.active { background: #2563EB; color: #fff; font-weight: 600; }
   .sort-toggle button:active { background: #E5E7EB; }
   .sort-toggle button.active:active { background: #1D4ED8; }
-  /* compact top toolbar (v1.10.6): two slim rows instead of big buttons */
+  /* compact top toolbar (v1.2.0): two slim rows instead of big buttons */
   .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; flex-wrap: wrap; }
   /* row1 items keep natural size and wrap to the next line instead of
      shrinking/clipping or pushing the card wider than the viewport */
@@ -131,7 +134,7 @@
   @keyframes fv-spin { to { transform: rotate(360deg); } }
   .logout-btn { background: transparent; color: #667085; font-size: 12px; padding: 4px 6px; min-height: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
   .logout-btn:active { background: transparent; color: #374151; }
-  /* ranking view (v1.11.0) */
+  /* ranking view (v1.2.0) */
   .chip-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 6px; scrollbar-width: none; }
   .chip-row::-webkit-scrollbar { display: none; }
   .chip { min-height: 28px; height: 28px; padding: 0 10px; font-size: 12px; border-radius: 999px; background: #F2F3F5; color: #667085; white-space: nowrap; flex: none; }
@@ -153,7 +156,7 @@
   .rank-warming { text-align: center; padding: 18px 0; }
   .rank-warming .dot { animation: rank-pulse 1.2s ease-in-out infinite; }
   @keyframes rank-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
-  /* admin view (v1.12.0) */
+  /* admin view (v1.2.0) */
   .admin-badge { display: inline-block; background: #EBF1FF; color: #2563EB; font-size: 10px; font-weight: 600; border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
   .admin-user-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid #F0F2F5; flex-wrap: wrap; }
   .admin-user-row:last-child { border-bottom: 0; }
@@ -174,7 +177,7 @@
   .log-row .lg-ok { color: #07845B; font-weight: 600; white-space: nowrap; }
   .log-row .lg-fail { color: #C9362B; font-weight: 600; white-space: nowrap; }
   .log-row .lg-ip { color: #667085; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* settings watchlist rows (v1.12.2): flex rows so controls never overflow on mobile */
+  /* settings watchlist rows (v1.2.0): flex rows so controls never overflow on mobile */
   .wl-group { background: #F5F6F8; color: #202939; font-weight: 600; font-size: 14px; padding: 8px; border-radius: 8px; margin: 12px 0 2px; }
   .wl-row { padding: 9px 0; border-bottom: 1px solid #F0F2F5; }
   .wl-line1 { display: flex; align-items: flex-start; gap: 8px; }
@@ -184,13 +187,32 @@
   .wl-row select.cat { flex: none; max-width: 110px; }
   .wl-ops { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
   .wl-ops button.mini { margin-right: 0; }
+  /* evolution view (v1.4.0): TrueNAV algorithm versions + software versions */
+  .evo-head h3 { margin: 0; }
+  .evo-sub { font-size: 12px; color: #667085; margin-top: 2px; line-height: 1.5; }
+  .evo-ver { border: 1px solid #EAECF0; border-radius: 10px; padding: 10px 12px; margin-top: 8px; }
+  .evo-ver .ev-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .evo-ver .ev-name { font-size: 15px; font-weight: 700; color: #2563EB; }
+  .evo-ver .ev-cur { background: #07845B; color: #fff; font-size: 10px; font-weight: 600; border-radius: 999px; padding: 1px 7px; }
+  .evo-ver .ev-date { font-size: 11px; color: #98A2B3; }
+  .evo-ver .ev-mae { margin-left: auto; font-size: 13px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .evo-ver .ev-desc { font-size: 12.5px; color: #475467; line-height: 1.55; margin-top: 4px; }
+  .evo-chart { margin-top: 12px; }
+  .evo-chart svg { width: 100%; height: auto; display: block; }
+  .evo-note { font-size: 11px; color: #98A2B3; line-height: 1.6; margin-top: 6px; }
+  .evo-soft .es-row { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
+  .evo-soft .es-row:last-child { border-bottom: none; }
+  .evo-soft .es-ver { flex: none; width: 52px; font-weight: 700; font-size: 13px; color: #202939; }
+  .evo-soft .es-main { flex: 1; min-width: 0; }
+  .evo-soft .es-date { font-size: 11px; color: #98A2B3; }
+  .evo-soft .es-desc { font-size: 12.5px; color: #475467; line-height: 1.55; margin-top: 2px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
-  /* toolbar row1 (4 tabs + username + logout) must fit one line at
+  /* toolbar row1 (5 tabs + username + logout) must fit one line at
      390px and wrap cleanly below that instead of overflowing the card */
-  @media (max-width: 429px) { .toolbar-row1 { gap: 6px; } .tab-btn { padding: 0 8px; } }
+  @media (max-width: 429px) { .toolbar-row1 { gap: 5px; } .tab-btn { padding: 0 7px; } }
   @media (max-width: 359px) { .fund-card { padding: 10px 12px; } .fund-card .fc-chg { font-size: 16px; } .fund-card .fc-row { font-size: 12px; } .fund-card .fc-row .fc-val b { font-size: 14px; } .tab-btn { padding: 0 6px; } }
-  @media (min-width: 360px) and (max-width: 389px) { .fund-card { padding: 10px 12px; } }
+  @media (min-width: 360px) and (max-width: 389px) { .fund-card { padding: 10px 12px; } .toolbar-row1 { gap: 4px; } .tab-btn { font-size: 12px; padding: 0 6px; } }
   @media (min-width: 390px) and (max-width: 429px) { .fund-card { padding: 12px; } .fund-card .fc-chg { font-size: 20px; } .fund-card .fc-row { font-size: 13px; } }
 </style>
 </head>
@@ -239,6 +261,7 @@
         <button class="tab-btn active" id="nav-main">估值</button>
         <button class="tab-btn" id="nav-rank">排行榜</button>
         <button class="tab-btn" id="nav-settings">设置</button>
+        <button class="tab-btn" id="nav-evo">演变</button>
         <button class="tab-btn" id="nav-admin" style="display:none">管理</button>
         <span style="flex:1"></span>
         <span class="user-wrap"><span id="userbox"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span>
@@ -404,9 +427,60 @@
         <div class="muted">修改后其他设备上的登录会失效，当前设备保持登录。</div>
       </div>
     </div>
+
+    <div id="view-evo" style="display:none">
+      <div class="card">
+        <div class="evo-head">
+          <div>
+            <h3>TrueNAV 算法</h3>
+            <div class="evo-sub">本站自研估值算法，独立版本号迭代；每版上线前都用历史净值回测验证，误差越小越可信。</div>
+          </div>
+        </div>
+        <div class="evo-ver">
+          <div class="ev-top"><span class="ev-name">TrueNAV 1.0</span><span class="ev-date">2026-11-19</span><span class="ev-mae">MAE 1.003%</span></div>
+          <div class="ev-desc">前十大重仓股按实时涨跌加权估算。</div>
+        </div>
+        <div class="evo-ver">
+          <div class="ev-top"><span class="ev-name">TrueNAV 1.1</span><span class="ev-date">2026-11-23</span><span class="ev-mae">MAE 0.676%</span></div>
+          <div class="ev-desc">未披露股票仓位按已披露持仓的涨跌补齐，不再默认不动。</div>
+        </div>
+        <div class="evo-ver">
+          <div class="ev-top"><span class="ev-name">TrueNAV 1.2</span><span class="ev-cur">当前</span><span class="ev-date">2026-11-23</span><span class="ev-mae">MAE 0.643%</span></div>
+          <div class="ev-desc">用历史净值对估算做校准，修正经理调仓带来的偏差；卡片上的可信度标签按回测误差分高/中/低。</div>
+        </div>
+        <div class="evo-chart">
+          <svg viewBox="0 0 320 180" role="img" aria-label="TrueNAV 各版本回测平均误差曲线">
+            <text x="10" y="14" font-size="11" fill="#667085">回测平均误差 MAE（%，越低越准）</text>
+            <line x1="40" y1="140" x2="300" y2="140" stroke="#EAECF0" stroke-width="1"/>
+            <line x1="40" y1="90" x2="300" y2="90" stroke="#F0F2F5" stroke-width="1"/>
+            <polyline points="70,39 170,105 270,111" fill="none" stroke="#2563EB" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+            <circle cx="70" cy="39" r="4" fill="#2563EB"/>
+            <circle cx="170" cy="105" r="4" fill="#2563EB"/>
+            <circle cx="270" cy="111" r="4" fill="#07845B"/>
+            <text x="70" y="28" font-size="12" font-weight="700" fill="#202939" text-anchor="middle">1.003</text>
+            <text x="170" y="94" font-size="12" font-weight="700" fill="#202939" text-anchor="middle">0.676</text>
+            <text x="270" y="100" font-size="12" font-weight="700" fill="#07845B" text-anchor="middle">0.643</text>
+            <text x="70" y="158" font-size="11" fill="#667085" text-anchor="middle">TrueNAV 1.0</text>
+            <text x="170" y="158" font-size="11" fill="#667085" text-anchor="middle">TrueNAV 1.1</text>
+            <text x="270" y="158" font-size="11" fill="#667085" text-anchor="middle">TrueNAV 1.2</text>
+          </svg>
+          <div class="evo-note">回测口径：6 只样本基金、最近 120 个净值日、同一批 walk-forward 测试日（n=594），三版本同窗对比，详见仓库 backtest-report.md。</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>软件版本演变</h3>
+        <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.0</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">TrueNAV 1.1/1.2 估值提准与可信度标签、邮箱注册、系统备份与恢复、收益波动比榜、腾讯分时兜底、演变页</div></div></div>
+          <div class="es-row"><div class="es-ver">v1.3.0</div><div class="es-main"><div class="es-date">2026-11-21</div><div class="es-desc">板块识别与板块涨跌、曲线对称轴与秒显、行业查询限速修复</div></div></div>
+          <div class="es-row"><div class="es-ver">v1.2.0</div><div class="es-main"><div class="es-date">2026-11-20</div><div class="es-desc">当日估值曲线、排行榜、QDII 盘前/盘后估值、日韩台股持仓、秒开缓存</div></div></div>
+          <div class="es-row"><div class="es-ver">v1.1.0</div><div class="es-main"><div class="es-date">2026-11-19</div><div class="es-desc">首版上线：前十大自算估值、多用户自选与分类、设置页、卡片式手机界面</div></div></div>
+        </div>
+        <div class="evo-note">版本规则：一天一个正式版本，次号按发版日递增；TrueNAV 算法版本单独编号。© 2026 Tao314，TrueNAV 算法归作者所有，未经授权不得商用或修改（CC BY-NC-ND 4.0）。</div>
+      </div>
+    </div>
   </div>
 </main>
-<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.22.0 · 更新于 2026-11-23 16:57</span></footer>
+<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.0 · 更新于 2026-11-23 17:54</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -588,11 +662,13 @@ function showView(name) {
   $("view-rank").style.display = name === "rank" ? "" : "none";
   $("view-admin").style.display = name === "admin" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
+  $("view-evo").style.display = name === "evo" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
   $("nav-admin").className = "tab-btn" + (name === "admin" ? " active" : "");
   $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
+  $("nav-evo").className = "tab-btn" + (name === "evo" ? " active" : "");
   if (name === "rank") loadRank(); else stopRankPoll();
   if (name === "admin") loadAdmin();
 }
@@ -600,7 +676,8 @@ $("nav-main").onclick = () => showView("main");
 $("nav-rank").onclick = () => showView("rank");
 $("nav-admin").onclick = () => showView("admin");
 $("nav-settings").onclick = () => showView("settings");
-/* ---- admin view (v1.12.0) ---- */
+$("nav-evo").onclick = () => showView("evo");
+/* ---- admin view (v1.2.0) ---- */
 let isAdmin = false, myUserId = null, adminUsers = [], myUsername = "";
 let adminSubTab = "users";
 function showAdminSubTab(name) {
@@ -683,7 +760,7 @@ async function loadAdmin() {
   } catch (e) { setAdminErr(e.message); }
   loadBackups();
 }
-/* ---- system backup (v1.17.0, admin only) ---- */
+/* ---- system backup (v1.4.0, admin only) ---- */
 const BACKUP_KIND_LABEL = { auto: "自动", manual: "手动", "pre-restore": "恢复前" };
 function fmtSize(bytes) {
   if (bytes == null) return "-";
@@ -751,7 +828,7 @@ $("admin-add-user-btn").onclick = async () => {
     await loadAdmin();
   } catch (e) { setAdminErr(e.message); }
 };
-/* ---- ranking view (v1.11.0) ---- */
+/* ---- ranking view (v1.2.0) ---- */
 let rankBoard = "returns", rankPeriod = "1y", rankCat = "all", rankWindow = "1y";
 const CAT_LABELS = { all: "全部", gp: "股票型", hh: "混合型", zq: "债券型", zs: "指数型", qdii: "QDII", fof: "FOF" };
 const WINDOW_LABELS = { "1m": "近1月", "3m": "近3月", "6m": "近6月", "1y": "近1年" };
@@ -1043,7 +1120,7 @@ $("search-btn").onclick = async () => {
   try { lastSearchQ = $("search-q").value.trim(); await runSearch(); }
   catch (e) { setErr(e.message); }
 };
-// Optimistic watchlist mutations (v1.17.0): update the local payload and
+// Optimistic watchlist mutations (v1.4.0): update the local payload and
 // re-render immediately, then sync with the server in the background;
 // failures roll back (add) or resync (remove) and surface the error.
 function optimisticAdd(code, name) {
@@ -1455,7 +1532,8 @@ function renderFunds(data) {
       // 昨日净值 (still 已确认 — it is the official NAV for that date).
       const navLabel = f.nav_date === lastTradingDay() ? "今日净值" : "昨日净值";
       const prevRow = f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : "";
-      const credTag = f.credibility ? `<span class="fc-cred">可信度·${f.credibility}</span>` : "";
+      const credCls = f.credibility === "高" ? " fc-cred-hi" : f.credibility === "中" ? " fc-cred-mid" : " fc-cred-lo";
+      const credTag = f.credibility ? `<span class="fc-cred${credCls}">可信度·${f.credibility}</span>` : "";
       const estLabel = `自算估值${f.bond_est ? '<span class="fc-note">（按十年国债ETF估算）</span>' : ""}${credTag}`;
       const rows = (f.is_mrf && f.dwjz == null)
         // MRF fund without a reachable NAV source: note only, no fake data.

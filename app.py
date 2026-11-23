@@ -44,9 +44,9 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.22.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.0"  # keep in sync with the footer in static/index.html
 
-# --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
+# --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
 # registration is username+password only, so a broken SMTP setup can never
 # block customers from registering.
@@ -71,7 +71,7 @@ logger = logging.getLogger("fund-valuation")
 BACKUP_DIR = DB_PATH.parent / "backups"
 BACKUP_KEEP = 10
 # New backups are gzip-compressed (.db.gz); legacy plain .db backups from
-# v1.17.0 remain listable/downloadable/restorable.
+# v1.4.0 remain listable/downloadable/restorable.
 BACKUP_NAME_RE = re.compile(r"^fund-backup-\d{8}-\d{6}\.db(\.gz)?$")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 FUND_CODE_RE = re.compile(r"^\d{6}$")
@@ -205,16 +205,16 @@ def init_db():
     ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "refresh_seconds" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN refresh_seconds INTEGER NOT NULL DEFAULT 60")
-    # Migration: users.is_admin (added 2026-11-20, v1.12.0)
+    # Migration: users.is_admin (added 2026-11-20, v1.2.0)
     if "is_admin" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
-    # Migration: users.email (added 2026-11-23, v1.20.0) — nullable for
+    # Migration: users.email (added 2026-11-23, v1.4.0) — nullable for
     # legacy users; unique via index (SQLite ADD COLUMN cannot take UNIQUE;
     # a unique index still allows multiple NULLs).
     if "email" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-    # Migration: online tracking (added 2026-11-23, v1.21.0) — session
+    # Migration: online tracking (added 2026-11-23, v1.4.0) — session
     # heartbeat timestamp + accumulated online seconds per user, plus an
     # IP geolocation cache (province/city via ip-api.com, fetched once).
     if "total_online_seconds" not in ucols:
@@ -227,7 +227,7 @@ def init_db():
         "ip TEXT PRIMARY KEY, country TEXT, region TEXT, city TEXT, "
         "fetched_at REAL NOT NULL)"
     )
-    # Email verification codes (v1.20.0): one active code per (email,
+    # Email verification codes (v1.4.0): one active code per (email,
     # purpose); codes stored hashed. email_code_log backs the daily cap.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS email_codes("
@@ -240,7 +240,7 @@ def init_db():
         "id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, "
         "purpose TEXT NOT NULL, sent_at REAL NOT NULL)"
     )
-    # Login log table (added 2026-11-20, v1.12.0)
+    # Login log table (added 2026-11-20, v1.2.0)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS login_log("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, "
@@ -256,7 +256,7 @@ def init_db():
     for col, ddl in (("prev_nav_date", "TEXT"), ("prev_dwjz", "REAL"), ("prev_jzzzl", "REAL")):
         if col not in ncols:
             conn.execute(f"ALTER TABLE nav_cache ADD COLUMN {col} {ddl}")
-    # Migration: mrf_symbol_map.isin (added 2026-11-23, v1.18.2)
+    # Migration: mrf_symbol_map.isin (added 2026-11-23, v1.4.0)
     mcols = [r[1] for r in conn.execute("PRAGMA table_info(mrf_symbol_map)").fetchall()]
     if mcols and "isin" not in mcols:
         conn.execute("ALTER TABLE mrf_symbol_map ADD COLUMN isin TEXT")
@@ -323,7 +323,7 @@ def _parse_iso(ts):
 
 
 def _heartbeat(conn, token: str, user_id: int, last_seen_at):
-    """Session heartbeat (v1.21.0): at most one write per minute per
+    """Session heartbeat (v1.4.0): at most one write per minute per
     session; accumulate the elapsed gap into users.total_online_seconds
     when it looks like continuous activity (<=600s)."""
     now = datetime.now(timezone.utc)
@@ -377,7 +377,7 @@ def _log_login(conn, username: str, user_id, success: bool, request: Request):
     )
 
 
-# --- email verification codes (v1.20.0) ---
+# --- email verification codes (v1.4.0) ---
 def _require_email_auth():
     if not EMAIL_AUTH:
         raise HTTPException(404, "功能未启用")
@@ -618,7 +618,7 @@ def register(body: RegisterBody, response: Response):
     if len(body.password) < 6:
         raise HTTPException(400, "密码至少 6 位")
     # EMAIL_AUTH off (default): plain username+password registration; any
-    # email/code in the body is ignored. On: v1.20.0 verified-email flow.
+    # email/code in the body is ignored. On: v1.4.0 verified-email flow.
     email = _norm_email(body.email) if EMAIL_AUTH else None
     with db() as conn:
         if EMAIL_AUTH:
@@ -739,7 +739,7 @@ def change_password(body: ChangePasswordBody, session: Optional[str] = Cookie(de
     return {"ok": True}
 
 
-# --- IP geolocation (v1.21.0): province/city via ip-api.com, cached
+# --- IP geolocation (v1.4.0): province/city via ip-api.com, cached
 # forever in ip_geo; failures retried after 7 days. ---
 IP_GEO_RETRY_SECONDS = 7 * 86400
 ONLINE_WINDOW_SECONDS = 300
@@ -803,7 +803,7 @@ def _ip_region(conn, ip: Optional[str]) -> str:
     return " ".join(parts) if parts else "未知"
 
 
-# ---------------------------------------------------------------- admin (v1.12.0)
+# ---------------------------------------------------------------- admin (v1.2.0)
 class AdminPasswordBody(BaseModel):
     password: str
 
@@ -925,7 +925,7 @@ def admin_login_logs(limit: int = 200, session: Optional[str] = Cookie(default=N
 # ---------------------------------------------------------------- backup
 # System backup & restore (admin only). A backup is a consistent SQLite
 # copy (sqlite3 backup API, WAL-safe) in BACKUP_DIR, gzip-compressed to
-# .db.gz to save space (v1.17.1; legacy plain .db backups from v1.17.0
+# .db.gz to save space (v1.4.0; legacy plain .db backups from v1.4.0
 # still list/download/restore), plus a .json sidecar with metadata.
 # Retention: newest BACKUP_KEEP across all kinds. Restore copies the
 # backup INTO the live DB via the backup API (no file swap, so WAL stays
@@ -1034,7 +1034,7 @@ def _restore_backup(name: str) -> dict:
     """Validate + restore one backup into the live DB. Returns the
     pre-restore backup entry. Raises ValueError on an unusable file.
     Accepts both gzip-compressed (.db.gz, current) and legacy plain
-    (.db, v1.17.0) backups."""
+    (.db, v1.4.0) backups."""
     path = BACKUP_DIR / name
     # Materialize a plain .db temp file first (gunzip when needed). This
     # also snapshots the target: the pre-restore backup below prunes to
@@ -1369,7 +1369,7 @@ async def fetch_nav(code: str, name: str = "") -> dict:
         return await fetch_mrf_nav(code, name)
     with db() as conn:
         row = conn.execute("SELECT * FROM nav_cache WHERE fund_code=?", (code,)).fetchone()
-    # Cache rows from before v1.8.0 have NULL prev_* (migrated columns); treat as stale
+    # Cache rows from before v1.1.0 have NULL prev_* (migrated columns); treat as stale
     # so prev-day NAV gets backfilled immediately instead of waiting out the TTL.
     if row and time.time() - row["fetched_at"] < NAV_TTL and _nav_from_row(row)["prev_dwjz"] is not None:
         return {**_nav_from_row(row), "stale": False}
@@ -1945,11 +1945,11 @@ def quotes_stale() -> bool:
 # ---------------------------------------------------------------- stock minute trends
 # Eastmoney trends2 minute data per stock; the intraday fund curve is
 # computed from holdings' minute closes (replaces snapshot recording,
-# v1.15.0). Verified 2026-11-20: data.preClose present; rows are
+# v1.2.0). Verified 2026-11-20: data.preClose present; rows are
 # "YYYY-MM-DD HH:MM,open,close,high,low,vol,amount,avg" in Beijing time.
 TRENDS_TTL = 300            # seconds, DB cache for today's session (trading window)
-TRENDS_TTL_OFF = 1800       # seconds, DB cache outside trading windows (v1.21.3)
-TRENDS_FAIL_BACKOFF = 900   # seconds, per-secid upstream failure backoff (v1.21.2)
+TRENDS_TTL_OFF = 1800       # seconds, DB cache outside trading windows (v1.4.0)
+TRENDS_FAIL_BACKOFF = 900   # seconds, per-secid upstream failure backoff (v1.4.0)
 
 
 def _in_trading_window(now: Optional[datetime] = None) -> bool:
@@ -1970,7 +1970,7 @@ def _in_trading_window(now: Optional[datetime] = None) -> bool:
 
 
 def _trends_ttl(now: Optional[datetime] = None) -> int:
-    """Trends cache TTL: 300s in trading windows, 1800s outside (v1.21.3)."""
+    """Trends cache TTL: 300s in trading windows, 1800s outside (v1.4.0)."""
     return TRENDS_TTL if _in_trading_window(now) else TRENDS_TTL_OFF
 
 
@@ -2012,7 +2012,7 @@ def _secid_candidates(code: str, market_map: Optional[dict]) -> list:
 
 # ---------------------------------------------------------------- JP/KR/TW via Eastmoney
 # Sina has no JP/KR/TW quotes, so those holdings use Eastmoney directly
-# (ulist quotes + trends2 minute data, v1.15.3). Secid prefixes verified
+# (ulist quotes + trends2 minute data, v1.2.0). Secid prefixes verified
 # 2026-11-20 via the suggest API: JP=176, KR=177, TW=178. Holding codes
 # come in three shapes: ISIN (JP3236330001), bare local codes (TW 2330,
 # KR 005930 — the latter indistinguishable from A-share codes by shape),
@@ -2136,7 +2136,7 @@ def _tencent_code(secid: str) -> Optional[str]:
 
 
 async def _fetch_tencent_trends(secid: str, date_str: str) -> Optional[dict]:
-    """Minute closes from Tencent as an Eastmoney fallback (v1.21.2).
+    """Minute closes from Tencent as an Eastmoney fallback (v1.4.0).
     Tencent's minute query only serves the current session, so callers
     must restrict this to date_str == today. Rows are "HHMM price vol amt"
     with no date; A/HK times are Beijing time, US times are ET (converted
@@ -2192,7 +2192,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
     same-date cache row, falls back to the most recent cached payload for
     this secid under any date (weekend/early-morning: Saturday asks for
     Saturday, but Friday's session is the data the curve needs).
-    v1.21.2: when Eastmoney yields nothing for today (throttled server
+    v1.4.0: when Eastmoney yields nothing for today (throttled server
     IP), Tencent minute data is tried before the cache fallback; after a
     hard failure on both sources the secid backs off for
     TRENDS_FAIL_BACKOFF seconds (upstream skipped, cache fallback only)."""
@@ -2213,7 +2213,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
                 "ORDER BY date DESC LIMIT 1", (secid,)).fetchone()
         return json.loads(latest["payload"]) if latest else None
 
-    # Per-secid failure backoff (v1.21.2): after both upstreams fail, skip
+    # Per-secid failure backoff (v1.4.0): after both upstreams fail, skip
     # upstream calls for TRENDS_FAIL_BACKOFF so the 240s warm loop doesn't
     # hammer a throttled IP. Fresh same-date cache already returned above.
     if time.time() < _trends_fail_until.get(secid, 0):
@@ -2248,7 +2248,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
 
     if payload is None and date_str == today_str:
         # Eastmoney yielded nothing usable (throttled IP returns empty):
-        # try Tencent before giving up (v1.21.2).
+        # try Tencent before giving up (v1.4.0).
         try:
             payload = await _fetch_tencent_trends(secid, date_str)
         except Exception:
@@ -2353,7 +2353,7 @@ def _fund_curve(holdings: list, trends_by_code: dict, start_ts: int,
 
 
 # ETF feeder funds （联接） disclose no stock holdings; their curve (and,
-# as a bonus, estimate) comes from the tracking index instead (v1.15.0).
+# as a bonus, estimate) comes from the tracking index instead (v1.2.0).
 SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # Eastmoney public web suggest token
 
 
@@ -2531,7 +2531,7 @@ async def _quote_warm_loop():
 
 async def _jittered(coro):
     """Stagger warm-loop upstream fetches with a random 0-0.3s delay so a
-    whole watchlist's worth of requests doesn't burst at once (v1.21.3)."""
+    whole watchlist's worth of requests doesn't burst at once (v1.4.0)."""
     await asyncio.sleep(random.uniform(0, 0.3))
     return await coro
 
@@ -2542,7 +2542,7 @@ async def _trends_warm_loop():
     tracking-index secids), so the first /api/history/today call never
     waits on Eastmoney. Runs beside the quote warmer; startup is never
     blocked; errors are logged and skipped. Cycle: 240s in trading
-    windows, 900s outside (v1.21.3)."""
+    windows, 900s outside (v1.4.0)."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -3290,7 +3290,7 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
 # ---------------------------------------------------------------- rankings
 # 排行榜 data: Eastmoney rankhandler (full-market period returns, QDII list),
 # holdings (QDII US share), pingzhongdata NAV trend (volatility board, pooled
-# from the returns boards' per-period top-30 union since v1.12.1).
+# from the returns boards' per-period top-30 union since v1.2.0).
 RANK_REF = "https://fund.eastmoney.com/data/fundranking.html"
 RETURNS_TTL = 12 * 3600     # full-market returns dataset
 QDII_US_TTL = 7 * 86400     # holdings are quarterly disclosures
@@ -3799,7 +3799,7 @@ async def compute_qdii_us() -> dict:
         us_w = sum(h["weight"] for h in hs if is_us_holding(h["code"], market_map))
         return {
             "code": r["code"], "name": r["name"],
-            # absolute share: US weight as % of fund NAV (v1.18.3; was
+            # absolute share: US weight as % of fund NAV (v1.4.0; was
             # relative to the disclosed top-10 total)
             "us_pct": round(us_w, 1),
             "coverage": round(total_w, 2), "y1": r["y1"],
@@ -3814,7 +3814,7 @@ async def compute_qdii_us() -> dict:
             "excluded_low_coverage": excluded_low_coverage, "items": items[:30]}
 
 
-# Volatility / return-volatility-ratio boards (v1.19.2): four windows in
+# Volatility / return-volatility-ratio boards (v1.4.0): four windows in
 # trading days, computed in one pass per fund from pingzhongdata NAV history.
 VOL_WINDOWS = {"1m": 20, "3m": 60, "6m": 120, "1y": 250}
 # Per-window minimum daily-return counts; fewer -> fund skipped for that
@@ -3858,12 +3858,12 @@ async def fetch_vol_windows(code: str):
 
 
 async def compute_vol2(cat: str = "all") -> dict:
-    """Volatility + return/volatility-ratio boards (v1.19.2): pool = union
+    """Volatility + return/volatility-ratio boards (v1.4.0): pool = union
     of the top-30 funds of each returns period (daily/1w/1m/3m/6m/1y/ytd),
     deduplicated; each pool fund gets per-window (1m/3m/6m/1y) ret/vol/ratio
     metrics. Sorting/filtering happens per request in the endpoints, so the
     cached payload keeps every pool fund that has at least one window.
-    cat restricts the pool to one fund category's returns board (v1.19.1)."""
+    cat restricts the pool to one fund category's returns board (v1.4.0)."""
     ret_key = "returns_all" if cat == "all" else f"returns_{cat}"
     payload, _stale = await _get_or_compute(
         ret_key, RETURNS_TTL, lambda cat=cat: _compute_returns_payload(cat))
@@ -4068,7 +4068,7 @@ def _vol2_key(cat: str) -> str:
 
 
 async def _vol2_board(cat: str, window: str, sort_field: str, reverse: bool):
-    """Shared vol/ratio board logic (v1.19.2): serve the vol2_<cat> cache,
+    """Shared vol/ratio board logic (v1.4.0): serve the vol2_<cat> cache,
     flatten the chosen window's metrics, sort, top 30. Returns a warming
     JSONResponse when the cache is not ready yet."""
     if window not in VOL_WINDOWS:
@@ -4096,13 +4096,13 @@ async def _vol2_board(cat: str, window: str, sort_field: str, reverse: bool):
 
 
 @app.get("/api/rank/vol")
-@app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.12.1 path)
+@app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.2.0 path)
 async def rank_vol(cat: str = "all", window: str = "1y",
                    session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
     if cat not in RANK_CATS:
         cat = "all"
-    # ascending: lower volatility ranks first (v1.18.3)
+    # ascending: lower volatility ranks first (v1.4.0)
     return await _vol2_board(cat, window, "vol", reverse=False)
 
 
@@ -4112,7 +4112,7 @@ async def rank_ratio(cat: str = "all", window: str = "1y",
     current_user_id(session)
     if cat not in RANK_CATS:
         cat = "all"
-    # descending: higher return-per-volatility ranks first (v1.19.2)
+    # descending: higher return-per-volatility ranks first (v1.4.0)
     return await _vol2_board(cat, window, "ratio", reverse=True)
 
 
