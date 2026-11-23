@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import secrets
 import shutil
@@ -43,7 +44,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.21.2"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.21.3"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -1931,8 +1932,36 @@ def quotes_stale() -> bool:
 # computed from holdings' minute closes (replaces snapshot recording,
 # v1.15.0). Verified 2026-11-20: data.preClose present; rows are
 # "YYYY-MM-DD HH:MM,open,close,high,low,vol,amount,avg" in Beijing time.
-TRENDS_TTL = 300            # seconds, DB cache for today's session
+TRENDS_TTL = 300            # seconds, DB cache for today's session (trading window)
+TRENDS_TTL_OFF = 1800       # seconds, DB cache outside trading windows (v1.21.3)
 TRENDS_FAIL_BACKOFF = 900   # seconds, per-secid upstream failure backoff (v1.21.2)
+
+
+def _in_trading_window(now: Optional[datetime] = None) -> bool:
+    """True during CN day session (weekdays 09:15-16:30 Asia/Shanghai) or
+    the US session as seen from Beijing (21:00-05:00; the after-midnight
+    part belongs to the previous weekday's US session, so Tue-Sat
+    00:00-05:00 counts). Weekends outside that: False."""
+    now = now or datetime.now(CN_TZ)
+    mins = now.hour * 60 + now.minute
+    wd = now.weekday()  # Mon=0 .. Sun=6
+    if wd < 5 and 9 * 60 + 15 <= mins <= 16 * 60 + 30:
+        return True
+    if wd < 5 and mins >= 21 * 60:
+        return True
+    if 1 <= wd <= 5 and mins <= 5 * 60:
+        return True
+    return False
+
+
+def _trends_ttl(now: Optional[datetime] = None) -> int:
+    """Trends cache TTL: 300s in trading windows, 1800s outside (v1.21.3)."""
+    return TRENDS_TTL if _in_trading_window(now) else TRENDS_TTL_OFF
+
+
+def _warm_interval(now: Optional[datetime] = None) -> int:
+    """Trends warm-loop sleep: 240s in trading windows, 900s outside."""
+    return 240 if _in_trading_window(now) else 900
 TRENDS_REF = "https://quote.eastmoney.com/"
 _trends_sem = asyncio.Semaphore(5)
 _trends_fail_until: dict = {}   # secid -> ts until which upstream calls are skipped
@@ -2157,7 +2186,7 @@ async def fetch_stock_trends(secid: str, date_str: str) -> Optional[dict]:
         row = conn.execute(
             "SELECT payload, fetched_at FROM stock_trends_cache WHERE secid=? AND date=?",
             (secid, date_str)).fetchone()
-    if row and (date_str < today_str or time.time() - row["fetched_at"] < TRENDS_TTL):
+    if row and (date_str < today_str or time.time() - row["fetched_at"] < _trends_ttl()):
         return json.loads(row["payload"])
 
     def _fallback():
@@ -2240,7 +2269,7 @@ async def fetch_holding_trends(code: str, market_map: Optional[dict], date_str: 
     JP/KR/TW holdings (ISIN / bare local codes) resolve via the suggest
     API instead (see resolve_em_secid)."""
     c = (code or "").strip().upper()
-    if time.time() - _secid_fail_at.get(c, 0) < TRENDS_TTL:
+    if time.time() - _secid_fail_at.get(c, 0) < _trends_ttl():
         return None
     async with _trends_sem:
         if _em_want_types(c, market_map):
@@ -2485,12 +2514,20 @@ async def _quote_warm_loop():
         await asyncio.sleep(40)
 
 
+async def _jittered(coro):
+    """Stagger warm-loop upstream fetches with a random 0-0.3s delay so a
+    whole watchlist's worth of requests doesn't burst at once (v1.21.3)."""
+    await asyncio.sleep(random.uniform(0, 0.3))
+    return await coro
+
+
 async def _trends_warm_loop():
-    """Keep stock_trends_cache hot: every 240s (< TRENDS_TTL 300s) refresh
-    minute trends for the union of holding codes across all users'
-    watchlists (plus feeder funds' tracking-index secids), so the first
-    /api/history/today call never waits on Eastmoney. Runs beside the
-    quote warmer; startup is never blocked; errors are logged and skipped."""
+    """Keep stock_trends_cache hot: refresh minute trends for the union of
+    holding codes across all users' watchlists (plus feeder funds'
+    tracking-index secids), so the first /api/history/today call never
+    waits on Eastmoney. Runs beside the quote warmer; startup is never
+    blocked; errors are logged and skipped. Cycle: 240s in trading
+    windows, 900s outside (v1.21.3)."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -2510,7 +2547,8 @@ async def _trends_warm_loop():
                     if _is_feeder(r["fund_name"], hold["holdings"]):
                         feeder_codes.append(r["fund_code"])
                 await asyncio.gather(*[
-                    fetch_holding_trends(c, m, date_str, n) for c, (m, n) in uniq.items()])
+                    _jittered(fetch_holding_trends(c, m, date_str, n))
+                    for c, (m, n) in uniq.items()])
                 n = len(uniq)
                 for fc in feeder_codes:
                     idx = await resolve_fund_index(fc)
@@ -2526,7 +2564,7 @@ async def _trends_warm_loop():
                       f"for {len(rows)} funds", flush=True)
         except Exception as e:
             print(f"[trends-warm] failed: {e!r}", flush=True)
-        await asyncio.sleep(240)
+        await asyncio.sleep(_warm_interval())
 
 
 # ---------------------------------------------------------------- watchlist
