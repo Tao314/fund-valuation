@@ -24,6 +24,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 SYSTEMD_CONF = Path("/etc/systemd/system/fund-valuation.service.d/smtp.conf")
+DEFAULT_ENV_FILE = Path("/etc/fund-valuation/smtp.env")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 KEYS = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_SSL")
 
@@ -35,6 +36,39 @@ def _unquote(value: str) -> str:
     return value
 
 
+def _parse_assignment(text: str, cfg: dict) -> None:
+    """Parse one KEY=value assignment; value = everything after the first '='.
+
+    Tolerates values containing spaces, quotes, $, !, # and '=' (e.g. a
+    password with special characters). Surrounding matching quotes on the
+    whole assignment or on the value are stripped.
+    """
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    if "=" not in text:
+        return
+    key, _, value = text.partition("=")
+    key = key.strip()
+    if key in KEYS:
+        cfg[key] = _unquote(value)
+
+
+def load_env_file(path: Path) -> dict:
+    """Parse a plain KEY=value env file (systemd EnvironmentFile format)."""
+    cfg = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return cfg
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        _parse_assignment(line, cfg)
+    return cfg
+
+
 def load_systemd_conf(path: Path) -> dict:
     cfg = {}
     try:
@@ -43,14 +77,13 @@ def load_systemd_conf(path: Path) -> dict:
         return cfg
     for line in lines:
         line = line.strip()
-        if not line.startswith("Environment="):
-            continue
-        rest = line[len("Environment="):]
-        # One assignment per line in our generated drop-in; also tolerate
-        # systemd's space-separated quoted assignments on a single line.
-        for key, val in re.findall(r"(\w+)=(\"[^\"]*\"|'[^']*'|\S+)", rest):
-            if key in KEYS:
-                cfg[key] = _unquote(val)
+        if line.startswith("EnvironmentFile="):
+            env_path = line[len("EnvironmentFile="):].strip().lstrip("-")
+            env_path = _unquote(env_path)
+            for key, val in load_env_file(Path(env_path)).items():
+                cfg.setdefault(key, val)
+        elif line.startswith("Environment="):
+            _parse_assignment(line[len("Environment="):], cfg)
     return cfg
 
 
@@ -58,9 +91,13 @@ def load_config() -> dict:
     cfg = {k: os.environ.get(k, "").strip() for k in KEYS}
     if not cfg["SMTP_HOST"]:
         file_cfg = load_systemd_conf(SYSTEMD_CONF)
+        for key, val in load_env_file(DEFAULT_ENV_FILE).items():
+            file_cfg.setdefault(key, val)
         for key in KEYS:
             if not cfg[key] and file_cfg.get(key):
-                cfg[key] = file_cfg[key].strip()
+                # Never strip the password: it may legitimately contain
+                # leading/trailing spaces or other special characters.
+                cfg[key] = file_cfg[key] if key == "SMTP_PASS" else file_cfg[key].strip()
     if not cfg["SMTP_FROM"]:
         cfg["SMTP_FROM"] = cfg["SMTP_USER"]
     return cfg
