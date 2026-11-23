@@ -44,13 +44,22 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.1"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.3"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
 # registration is username+password only, so a broken SMTP setup can never
 # block customers from registering.
 EMAIL_AUTH = os.environ.get("EMAIL_AUTH", "0").strip() == "1"
+# Ranking-fund prewarm backfill (v1.4.2): kill switch + rate limit
+# (funds processed per minute; the worker is strictly sequential).
+PREWARM_ENABLED = os.environ.get("PREWARM_ENABLED", "1").strip() != "0"
+try:
+    PREWARM_PER_MIN = float(os.environ.get("PREWARM_PER_MIN", "1") or 1)
+except ValueError:
+    PREWARM_PER_MIN = 1.0
+if PREWARM_PER_MIN <= 0:
+    PREWARM_PER_MIN = 1.0
 # SMTP config comes from environment variables only (never committed).
 # When SMTP_HOST is empty the app runs in LOG MODE: codes are written to
 # the server log instead of being emailed, so the flow is testable before
@@ -90,7 +99,8 @@ async def lifespan(_app):
              asyncio.create_task(_quote_warm_loop()),
              asyncio.create_task(_trends_warm_loop()),
              asyncio.create_task(_backup_loop()),
-             asyncio.create_task(_beta_loop())]
+             asyncio.create_task(_beta_loop()),
+             asyncio.create_task(_prewarm_loop())]
     try:
         yield
     finally:
@@ -195,6 +205,18 @@ def init_db():
             close REAL NOT NULL,
             fetched_at REAL NOT NULL,
             PRIMARY KEY(secid, date));
+        CREATE TABLE IF NOT EXISTS prewarm_queue(
+            fund_code TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            priority INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS system_errors(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            source TEXT NOT NULL,
+            message TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_system_errors_ts ON system_errors(ts);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -295,6 +317,53 @@ def db():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso(ts):
+    """Epoch seconds -> UTC ISO string (None-safe)."""
+    if not ts:
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
+# ------------------------------------------------- system status (v1.4.3)
+# In-memory background-worker status for the admin 系统状态 page. Each
+# loop records last_run / last_result / next_run (epoch seconds) here;
+# the page combines this with DB-derived stats.
+_worker_status: dict = {}
+
+
+def _wstat(name: str, **kw):
+    st = _worker_status.setdefault(name, {})
+    st.update(kw)
+    return st
+
+
+_ERR_DEDUPE_SEC = 600   # same source+message recorded at most once per 10 min
+_ERR_KEEP_SEC = 7 * 86400
+
+
+def log_error(source: str, message: str):
+    """Record a system error for the admin 系统状态 page (v1.4.3).
+    Dedupes identical source+message within 10 minutes so an upstream
+    outage can't flood the table; prunes rows older than 7 days.
+    Never raises — error logging must not break the caller."""
+    try:
+        msg = str(message)[:500]
+        now = time.time()
+        with db() as conn:
+            last = conn.execute(
+                "SELECT MAX(ts) AS t FROM system_errors WHERE source=? AND message=?",
+                (source, msg)).fetchone()
+            if last and last["t"] and now - last["t"] < _ERR_DEDUPE_SEC:
+                return
+            conn.execute(
+                "INSERT INTO system_errors(ts, source, message) VALUES(?,?,?)",
+                (now, source, msg))
+            conn.execute("DELETE FROM system_errors WHERE ts < ?",
+                         (now - _ERR_KEEP_SEC,))
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- auth
@@ -1089,17 +1158,26 @@ async def _backup_loop():
     try:
         if not _list_backups():
             entry = await asyncio.to_thread(_make_backup, "auto")
+            _wstat("backup", last_run=time.time(),
+                   last_result=f"initial backup {entry['name']}")
             print(f"[backup] initial backup {entry['name']}", flush=True)
     except Exception as e:
+        log_error("backup", f"initial backup failed: {e!r}")
         print(f"[backup] initial backup failed: {e!r}", flush=True)
     while True:
         now = datetime.now(CN_TZ)
         nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        _wstat("backup", next_run=nxt.timestamp())
         await asyncio.sleep(max(1.0, (nxt - now).total_seconds()))
         try:
             entry = await asyncio.to_thread(_make_backup, "auto")
+            _wstat("backup", last_run=time.time(),
+                   last_result=f"daily backup {entry['name']}")
             print(f"[backup] daily backup {entry['name']}", flush=True)
         except Exception as e:
+            log_error("backup", f"daily backup failed: {e!r}")
+            _wstat("backup", last_run=time.time(),
+                   last_result=f"failed: {e!r}")
             print(f"[backup] daily backup failed: {e!r}", flush=True)
 
 
@@ -1112,7 +1190,13 @@ def admin_list_backups(session: Optional[str] = Cookie(default=None)):
 @app.post("/api/admin/backups")
 async def admin_create_backup(session: Optional[str] = Cookie(default=None)):
     require_admin(session)
-    entry = await asyncio.to_thread(_make_backup, "manual")
+    try:
+        entry = await asyncio.to_thread(_make_backup, "manual")
+    except Exception as e:
+        log_error("backup", f"manual backup failed: {e!r}")
+        raise HTTPException(500, f"备份失败：{e}")
+    _wstat("backup", last_run=time.time(),
+           last_result=f"manual backup {entry['name']}")
     return {"ok": True, "backup": entry}
 
 
@@ -1156,10 +1240,17 @@ async def upstream_get(url: str, referer: Optional[str] = None, timeout: float =
     headers = {"User-Agent": UA}
     if referer:
         headers["Referer"] = referer
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp
+    except Exception as e:
+        # Single choke point for upstream failures -> admin 系统状态
+        # error log (deduped inside log_error, so expected fallbacks
+        # like trends2 throttling don't flood it).
+        log_error("upstream", f"{url.split('?')[0]} -> {type(e).__name__}: {e}")
+        raise
 
 
 def _is_fund_entry(d: dict) -> bool:
@@ -2514,6 +2605,8 @@ async def _quote_warm_loop():
                 if syms:
                     async with _quote_refresh_lock:
                         await _refresh_quotes(sorted(syms))
+                    _wstat("quote_warm", last_run=time.time(),
+                           last_result=f"refreshed {len(syms)} symbols for {len(codes)} funds")
                     print(f"[quote-warm] refreshed {len(syms)} symbols "
                           f"for {len(codes)} funds", flush=True)
                 # Precompute per-user estimates payloads (quotes are hot
@@ -2524,8 +2617,15 @@ async def _quote_warm_loop():
                 if uids:
                     print(f"[quote-warm] estimates cache refreshed for "
                           f"{len(uids)} users", flush=True)
+            else:
+                _wstat("quote_warm", last_run=time.time(),
+                       last_result="no watchlist funds")
         except Exception as e:
+            log_error("quote-warm", repr(e))
+            _wstat("quote_warm", last_run=time.time(),
+                   last_result=f"failed: {e!r}")
             print(f"[quote-warm] failed: {e!r}", flush=True)
+        _wstat("quote_warm", next_run=time.time() + 40)
         await asyncio.sleep(40)
 
 
@@ -2575,10 +2675,19 @@ async def _trends_warm_loop():
                 async with _trends_sem:
                     await fetch_stock_trends("1.511260", date_str)
                 n += 1
+                _wstat("trends_warm", last_run=time.time(),
+                       last_result=f"refreshed {n} secids for {len(rows)} funds")
                 print(f"[trends-warm] refreshed {n} secids "
                       f"for {len(rows)} funds", flush=True)
+            else:
+                _wstat("trends_warm", last_run=time.time(),
+                       last_result="no watchlist funds")
         except Exception as e:
+            log_error("trends-warm", repr(e))
+            _wstat("trends_warm", last_run=time.time(),
+                   last_result=f"failed: {e!r}")
             print(f"[trends-warm] failed: {e!r}", flush=True)
+        _wstat("trends_warm", next_run=time.time() + _warm_interval())
         await asyncio.sleep(_warm_interval())
 
 
@@ -3718,6 +3827,7 @@ async def _compute_beta_bg(code: str):
         _beta_fail_at.pop(code, None)
     except Exception as e:
         _beta_fail_at[code] = time.time()
+        log_error("beta", f"{code}: {e!r}")
         print(f"[beta] compute failed for {code}: {e!r}", flush=True)
     finally:
         if _beta_tasks.get(code) is asyncio.current_task():
@@ -3750,6 +3860,10 @@ async def _beta_loop():
         try:
             now = datetime.now(CN_TZ)
             today = now.strftime("%Y-%m-%d")
+            nxt = now.replace(hour=15, minute=35, second=0, microsecond=0)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            _wstat("beta", next_run=nxt.timestamp())
             if now.hour * 60 + now.minute >= 15 * 60 + 35 and last_run != today:
                 last_run = today
                 with db() as conn:
@@ -3757,10 +3871,13 @@ async def _beta_loop():
                         "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
                 for code in codes:
                     await _jittered(_compute_beta_bg(code))
+                _wstat("beta", last_run=time.time(),
+                       last_result=f"daily recalibration for {len(codes)} funds")
                 if codes:
                     print(f"[beta] daily recalibration for {len(codes)} funds",
                           flush=True)
         except Exception as e:
+            log_error("beta-loop", repr(e))
             print(f"[beta] loop failed: {e!r}", flush=True)
         await asyncio.sleep(600)
 
@@ -3962,6 +4079,7 @@ async def _rank_compute_bg(key: str, ttl: int, compute):
     try:
         await _get_or_compute(key, ttl, compute)
     except Exception as e:
+        log_error(f"rank:{key}", f"background compute failed: {e!r}")
         print(f"[rank] {key}: background compute failed: {e!r}", flush=True)
 
 
@@ -4019,12 +4137,424 @@ async def _rank_warm_loop():
                 _, stale = await _get_or_compute(key, ttl, compute)
                 dt = time.time() - t0
                 if stale:
+                    log_error(f"rank-warm:{key}",
+                              "compute failed, kept stale cache")
                     print(f"[rank-warm] {key}: compute failed, kept stale cache ({dt:.1f}s)", flush=True)
                 else:
                     print(f"[rank-warm] {key}: done in {dt:.1f}s", flush=True)
             except Exception as e:
+                log_error(f"rank-warm:{key}", repr(e))
                 print(f"[rank-warm] {key}: failed: {e!r}", flush=True)
+        _wstat("rank_warm", last_run=time.time(),
+               last_result="hourly board check done",
+               next_run=time.time() + 3600)
         await asyncio.sleep(3600)
+
+
+# ---------------------------------------------------------------- ranking prewarm backfill (v1.4.2)
+# Funds shown in the rankings get the same data treatment as watchlist
+# funds, backfilled slowly in the background: holdings, NAV, stock
+# position, fund type, daily klines, β calibration (credibility) and
+# today's minute trends — so a customer who adds a ranking fund to their
+# pool sees valuation + credibility immediately. Risk controls: strictly
+# sequential (one fund at a time), rate-limited by PREWARM_PER_MIN
+# (default 1/min), per-fund failure backoff, and the worker pauses
+# 30 min after 3 consecutive upstream failures so it can never hammer
+# Eastmoney into throttling the server IP.
+PREWARM_SYNC_INTERVAL = 600      # re-scan ranking caches for new entrants
+PREWARM_MAX_ATTEMPTS = 10        # -> status 'failed' (retried daily)
+PREWARM_FAIL_PAUSE = 1800        # pause after consecutive failures
+_prewarm_paused_until = 0.0
+_prewarm_consec_fail = 0
+
+
+def _prewarm_pool_codes() -> set:
+    """Union of fund codes currently shown across all ranking boards,
+    derived from cached board payloads only (no upstream calls):
+    returns boards contribute each period's top-30 per category,
+    vol/ratio boards their whole pool, qdii-us its top-30 list."""
+    codes = set()
+    with db() as conn:
+        rows = conn.execute("SELECT key, payload FROM rank_cache").fetchall()
+    for r in rows:
+        key = r["key"]
+        try:
+            payload = json.loads(r["payload"])
+        except Exception:
+            continue
+        if key.startswith("returns_"):
+            all_rows = payload.get("rows") or []
+            for field in PERIOD_FIELDS.values():
+                top = sorted(all_rows,
+                             key=lambda x: (x.get(field) is None, -(x.get(field) or 0)))[:30]
+                codes.update(x["code"] for x in top if x.get("code"))
+        elif key.startswith("vol3_") or key == "qdii_us_v3":
+            codes.update(x["code"] for x in (payload.get("items") or []) if x.get("code"))
+    return codes
+
+
+def _prewarm_sync_pool() -> int:
+    """Insert ranking-pool codes missing from prewarm_queue as pending.
+    New entrants get priority 1 so they jump ahead of the initial
+    backlog (priority 0); existing rows (incl. done) are untouched, and
+    funds that leave the rankings keep their queued/done state."""
+    codes = _prewarm_pool_codes()
+    if not codes:
+        return 0
+    now = time.time()
+    with db() as conn:
+        have = {r[0] for r in conn.execute("SELECT fund_code FROM prewarm_queue").fetchall()}
+        new = [c for c in codes if c not in have]
+        if not new:
+            return 0
+        prio = 1 if have else 0
+        conn.executemany(
+            "INSERT OR IGNORE INTO prewarm_queue(fund_code, status, priority, attempts, updated_at) "
+            "VALUES(?, 'pending', ?, 0, ?)",
+            [(c, prio, now) for c in new])
+    return len(new)
+
+
+def _prewarm_counts() -> dict:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM prewarm_queue GROUP BY status").fetchall()
+    counts = {"done": 0, "pending": 0, "failed": 0}
+    for r in rows:
+        counts[r["status"]] = r["n"]
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def _prewarm_next_code() -> Optional[str]:
+    """Highest-priority pending fund whose failure backoff has elapsed.
+    Backoff grows with attempts (60s x attempts, cap 30 min); 'failed'
+    funds become eligible again after a day."""
+    now = time.time()
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT fund_code, status, attempts, updated_at FROM prewarm_queue "
+            "WHERE status IN ('pending', 'failed') "
+            "ORDER BY priority DESC, attempts ASC, updated_at ASC").fetchall()
+    for r in rows:
+        if r["status"] == "failed":
+            if now - r["updated_at"] >= 86400:
+                return r["fund_code"]
+            continue
+        if now - r["updated_at"] >= min(1800, 60 * r["attempts"]):
+            return r["fund_code"]
+    return None
+
+
+async def _prewarm_one(code: str):
+    """Warm every cache a watchlist fund would get, for one ranking fund.
+    Raises on upstream failure (caller counts it); β row existence is
+    the done criterion (n=0 negative-cache rows count as done)."""
+    hold = await fetch_holdings(code)
+    if hold.get("stale") and not hold["holdings"]:
+        raise RuntimeError(f"holdings unavailable for {code}")
+    await fetch_nav(code)               # nav_cache (raises 502 if upstream down & no cache)
+    await fetch_stock_position(code)    # fund_stock_position (never raises)
+    ftype = await fetch_fund_type(code) or ""   # fund_type_cache
+    # An n=0 β row only counts as done for funds that are definitively
+    # skipped (MRF / bond / money / no stock holdings). For an equity
+    # fund, n=0 usually means daily klines failed upstream (throttle),
+    # so treat it as a failure and retry with backoff instead of
+    # marking the fund done with no credibility forever.
+    coverage = sum(h["weight"] for h in hold["holdings"])
+    definitive_skip = (_is_mrf_code(code) or "债券" in ftype
+                       or "货币" in ftype or coverage <= 0)
+
+    def _beta_usable(row):
+        return (bool(row) and time.time() - row["updated_at"] < BETA_TTL
+                and (row["n"] > 0 or definitive_skip))
+
+    if not _beta_usable(_beta_row(code)):
+        t = _beta_tasks.get(code)
+        if t is not None and not t.done():
+            await t  # a lazy β compute is already running; don't duplicate it
+        if not _beta_usable(_beta_row(code)):
+            await compute_fund_beta(code)   # fills stock_daily_cache + fund_beta
+    # Today's minute trends for the curve (best effort; per-secid
+    # backoffs inside fetch_holding_trends keep upstream load bounded).
+    mmap = await fetch_stock_market_map(code)
+    date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+    for h in hold["holdings"]:
+        if h["weight"]:
+            await fetch_holding_trends(h["code"], mmap, date_str, h.get("name"))
+    row = _beta_row(code)
+    if row is None:
+        raise RuntimeError(f"beta row missing after compute for {code}")
+    if row["n"] == 0 and not definitive_skip:
+        raise RuntimeError(f"beta pairs empty for {code} (upstream data missing?)")
+
+
+async def _prewarm_loop():
+    """Slow sequential backfill of ranking-fund data (v1.4.2). One fund
+    at a time at PREWARM_PER_MIN (default 1/min) + jitter; pauses 30 min
+    after 3 consecutive failures. Never blocks estimates/first paint."""
+    global _prewarm_paused_until, _prewarm_consec_fail
+    if not PREWARM_ENABLED:
+        print("[prewarm] disabled (PREWARM_ENABLED=0)", flush=True)
+        return
+    await asyncio.sleep(20)
+    interval = 60.0 / PREWARM_PER_MIN
+    last_sync = 0.0
+    queue_empty = True  # until the first pool sync lands, re-check every minute
+    while True:
+        try:
+            if time.time() < _prewarm_paused_until:
+                await asyncio.sleep(min(60, _prewarm_paused_until - time.time()))
+                continue
+            sync_gap = 60 if queue_empty else PREWARM_SYNC_INTERVAL
+            if time.time() - last_sync >= sync_gap:
+                last_sync = time.time()
+                n_new = await asyncio.to_thread(_prewarm_sync_pool)
+                if n_new:
+                    queue_empty = False
+                    print(f"[prewarm] pool sync: {n_new} new funds queued", flush=True)
+            code = await asyncio.to_thread(_prewarm_next_code)
+            if code is None:
+                _wstat("prewarm", current=None, last_run=time.time(),
+                       last_result="queue empty / all in backoff")
+                await asyncio.sleep(60)
+                continue
+            _wstat("prewarm", current=code)
+            try:
+                await _prewarm_one(code)
+                _prewarm_consec_fail = 0
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE prewarm_queue SET status='done', updated_at=? WHERE fund_code=?",
+                        (time.time(), code))
+                _wstat("prewarm", current=None, last_run=time.time(),
+                       last_result=f"done {code}")
+            except Exception as e:
+                _prewarm_consec_fail += 1
+                log_error("prewarm", f"{code}: {e!r}")
+                _wstat("prewarm", current=None, last_run=time.time(),
+                       last_result=f"failed {code}: {e!r}")
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE prewarm_queue SET attempts=attempts+1, updated_at=?, "
+                        "status=CASE WHEN attempts+1>=? THEN 'failed' ELSE 'pending' END "
+                        "WHERE fund_code=?",
+                        (time.time(), PREWARM_MAX_ATTEMPTS, code))
+                print(f"[prewarm] {code} failed "
+                      f"({_prewarm_consec_fail} consecutive): {e!r}", flush=True)
+                if _prewarm_consec_fail >= 3:
+                    _prewarm_paused_until = time.time() + PREWARM_FAIL_PAUSE
+                    _prewarm_consec_fail = 0
+                    print(f"[prewarm] pausing {PREWARM_FAIL_PAUSE}s after "
+                          f"consecutive failures", flush=True)
+            counts = await asyncio.to_thread(_prewarm_counts)
+            print(f"[prewarm] done {counts['done']}/{counts['total']} "
+                  f"pending {counts['pending']} failed {counts['failed']}", flush=True)
+        except Exception as e:
+            log_error("prewarm", f"loop: {e!r}")
+            _wstat("prewarm", current=None, last_run=time.time(),
+                   last_result=f"loop failed: {e!r}")
+            print(f"[prewarm] loop failed: {e!r}", flush=True)
+        await asyncio.sleep(interval * random.uniform(0.9, 1.1))
+
+
+@app.get("/api/admin/prewarm")
+def admin_prewarm(session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    counts = _prewarm_counts()
+    paused = time.time() < _prewarm_paused_until
+    return {"enabled": PREWARM_ENABLED, "per_min": PREWARM_PER_MIN,
+            "total": counts["total"], "done": counts["done"],
+            "pending": counts["pending"], "failed": counts["failed"],
+            "paused": paused,
+            "paused_until": (datetime.fromtimestamp(
+                _prewarm_paused_until, timezone.utc).isoformat() if paused else None)}
+
+
+_BOARD_LABELS = {
+    "returns_all": "涨幅榜（全部）", "returns_gp": "涨幅榜（股票）",
+    "returns_hh": "涨幅榜（混合）", "returns_zq": "涨幅榜（债券）",
+    "returns_zs": "涨幅榜（指数）", "returns_qdii": "涨幅榜（QDII）",
+    "returns_fof": "涨幅榜（FOF）",
+    "vol3_top": "波动率/收益波动比池（全部）", "vol3_gp": "波动率池（股票）",
+    "vol3_hh": "波动率池（混合）", "vol3_zq": "波动率池（债券）",
+    "vol3_zs": "波动率池（指数）", "vol3_qdii": "波动率池（QDII）",
+    "vol3_fof": "波动率池（FOF）",
+    "qdii_us_v3": "美股占比榜",
+}
+
+
+def _board_ttl(key: str) -> Optional[int]:
+    if key.startswith("returns_"):
+        return RETURNS_TTL
+    if key.startswith("vol3_"):
+        return VOL_TTL
+    if key == "qdii_us_v3":
+        return QDII_US_TTL
+    return None
+
+
+@app.get("/api/admin/system-status")
+def admin_system_status(session: Optional[str] = Cookie(default=None)):
+    """Full system visibility for the admin 系统状态 page (v1.4.3):
+    DB fund-data stats, background worker state, upcoming scheduled
+    tasks, and the last 24h of recorded system errors."""
+    require_admin(session)
+    now = time.time()
+    today_cn = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+    with db() as conn:
+        def one(sql, args=()):
+            r = conn.execute(sql, args).fetchone()
+            return r[0] if r and r[0] is not None else 0
+
+        stats = {
+            "users": one("SELECT COUNT(*) FROM users"),
+            "watchlist_funds": one(
+                "SELECT COUNT(DISTINCT fund_code) FROM user_funds"),
+            "watchlist_rows": one("SELECT COUNT(*) FROM user_funds"),
+            "holdings_cached": one("SELECT COUNT(*) FROM holdings_cache"),
+            "nav_cached": one("SELECT COUNT(*) FROM nav_cache"),
+            "beta_ok": one("SELECT COUNT(*) FROM fund_beta WHERE n>0"),
+            "beta_skip": one("SELECT COUNT(*) FROM fund_beta WHERE n=0"),
+            "beta_last_at": _iso(one(
+                "SELECT MAX(updated_at) FROM fund_beta")),
+            "stock_position_cached": one(
+                "SELECT COUNT(*) FROM fund_stock_position"),
+            "fund_type_cached": one("SELECT COUNT(*) FROM fund_type_cache"),
+            "daily_stocks": one(
+                "SELECT COUNT(DISTINCT secid) FROM stock_daily_cache"),
+            "daily_rows": one("SELECT COUNT(*) FROM stock_daily_cache"),
+            "trends_rows": one("SELECT COUNT(*) FROM stock_trends_cache"),
+            "trends_today": one(
+                "SELECT COUNT(*) FROM stock_trends_cache WHERE date=?",
+                (today_cn,)),
+            "industry_cached": one(
+                "SELECT COUNT(*) FROM stock_industry WHERE industry IS NOT NULL"),
+            "prewarm": _prewarm_counts(),
+        }
+        board_rows = conn.execute(
+            "SELECT key, fetched_at FROM rank_cache ORDER BY key").fetchall()
+        err_groups = conn.execute(
+            "SELECT source, COUNT(*) AS n, MAX(ts) AS last_ts "
+            "FROM system_errors WHERE ts>=? GROUP BY source "
+            "ORDER BY n DESC, last_ts DESC", (now - 86400,)).fetchall()
+        err_latest = conn.execute(
+            "SELECT ts, source, message FROM system_errors WHERE ts>=? "
+            "ORDER BY ts DESC LIMIT 50", (now - 86400,)).fetchall()
+
+    # Boards: every cached board + the three always-warmed ones even
+    # when not yet computed.
+    boards = []
+    seen_keys = set()
+    for r in board_rows:
+        key, fetched_at = r["key"], r["fetched_at"]
+        seen_keys.add(key)
+        ttl = _board_ttl(key)
+        nxt = None
+        if ttl:
+            try:
+                nxt = (datetime.fromisoformat(fetched_at)
+                       + timedelta(seconds=ttl)).isoformat()
+            except Exception:
+                nxt = None
+        boards.append({
+            "key": key, "label": _BOARD_LABELS.get(key, key),
+            "ready": True,
+            "fresh": _cache_fresh(fetched_at, ttl) if ttl else None,
+            "fetched_at": fetched_at, "next_refresh": nxt,
+            "computing": (_rank_state.get(key) or {}).get("state") == "computing",
+        })
+    for key, _ttl, _compute in _RANK_BOARDS:
+        if key not in seen_keys:
+            boards.append({
+                "key": key, "label": _BOARD_LABELS.get(key, key),
+                "ready": False, "fresh": False, "fetched_at": None,
+                "next_refresh": None,
+                "computing": (_rank_state.get(key) or {}).get("state") == "computing",
+            })
+
+    # Workers (in-memory status + derived values).
+    def _w(name):
+        st = _worker_status.get(name) or {}
+        return {"last_run": _iso(st.get("last_run")),
+                "last_result": st.get("last_result"),
+                "next_run": _iso(st.get("next_run"))}
+
+    counts = stats["prewarm"]
+    paused = now < _prewarm_paused_until
+    eta_seconds = None
+    if PREWARM_ENABLED and counts["pending"] > 0:
+        eta_seconds = counts["pending"] / PREWARM_PER_MIN * 60
+        if paused:
+            eta_seconds += max(0.0, _prewarm_paused_until - now)
+    pw = _w("prewarm")
+    pw.update({
+        "enabled": PREWARM_ENABLED, "per_min": PREWARM_PER_MIN,
+        "current": (_worker_status.get("prewarm") or {}).get("current"),
+        "counts": counts, "paused": paused,
+        "paused_until": _iso(_prewarm_paused_until) if paused else None,
+        "eta_seconds": int(eta_seconds) if eta_seconds is not None else None,
+        "eta_at": _iso(now + eta_seconds) if eta_seconds is not None else None,
+        "next_code": _prewarm_next_code(),
+    })
+    backups = _list_backups()
+    bk = _w("backup")
+    bk["last_backup_at"] = backups[0]["created_at"] if backups else None
+    bt = _w("beta")
+    bt["last_beta_at"] = stats["beta_last_at"]
+    workers = {
+        "prewarm": pw,
+        "quote_warm": _w("quote_warm"),
+        "trends_warm": _w("trends_warm"),
+        "rank_warm": _w("rank_warm"),
+        "backup": bk,
+        "beta": bt,
+    }
+
+    # Upcoming tasks, soonest first.
+    now_cn = datetime.now(CN_TZ)
+    next_midnight = (now_cn + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    next_beta = now_cn.replace(hour=15, minute=35, second=0, microsecond=0)
+    if next_beta <= now_cn:
+        next_beta += timedelta(days=1)
+    next_tasks = []
+    if PREWARM_ENABLED:
+        next_tasks.append({
+            "name": "排行榜预热补全",
+            "at": _iso(_prewarm_paused_until) if paused else _iso(now),
+            "detail": ("暂停中，恢复后继续" if paused else
+                       (f"下一只 {pw['next_code']}" if pw["next_code"]
+                        else "队列已空/等待退避")),
+        })
+    next_tasks.append({"name": "每日自动备份",
+                       "at": next_midnight.astimezone(timezone.utc).isoformat(),
+                       "detail": "每天 00:00（北京时间），保留最近 10 份"})
+    next_tasks.append({"name": "β 每日重算",
+                       "at": next_beta.astimezone(timezone.utc).isoformat(),
+                       "detail": "每天 15:35（北京时间）重算自选基金 β/可信度"})
+    for wname, label in (("quote_warm", "行情预热"), ("trends_warm", "分时预热"),
+                         ("rank_warm", "榜单预热检查")):
+        nxt_run = workers[wname]["next_run"]
+        if nxt_run:
+            next_tasks.append({"name": label, "at": nxt_run, "detail": "后台循环"})
+    for b in boards:
+        if b["next_refresh"]:
+            next_tasks.append({"name": f"榜单刷新 · {b['label']}",
+                               "at": b["next_refresh"],
+                               "detail": "缓存到期后后台重算"})
+    next_tasks.sort(key=lambda t: t["at"] or "")
+
+    errors = {
+        "total_24h": sum(g["n"] for g in err_groups),
+        "groups": [{"source": g["source"], "count": g["n"],
+                    "last_at": _iso(g["last_ts"])} for g in err_groups],
+        "latest": [{"ts": _iso(e["ts"]), "source": e["source"],
+                    "message": e["message"]} for e in err_latest],
+    }
+    return {"version": APP_VERSION, "now": _iso(now), "stats": stats,
+            "boards": boards, "workers": workers,
+            "next_tasks": next_tasks, "errors": errors}
 
 
 @app.get("/api/rank/returns")

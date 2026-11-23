@@ -56,13 +56,23 @@
   button.mini:disabled { opacity: .35; cursor: default; }
   select.cat { padding: 5px; border: 1px solid #EAECF0; border-radius: 8px; font-size: 13px; max-width: 130px; min-height: 40px; }
   #countdown { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; }
-  .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: 1; min-width: 0; }
+  .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: none; width: fit-content; max-width: 100%; }
   .ms-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
   .ms-dot { width: 6px; height: 6px; border-radius: 50%; background: #98A2B3; flex: none; }
   .ms-dot.on { background: #07845B; }
   .ms-dot.warn { background: #D97706; }
   .user-wrap { display: inline-flex; align-items: center; gap: 2px; flex: none; min-width: 0; }
   .admin-subtabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  /* system status (v1.4.3): stat grid + list rows, 360px safe */
+  .ss-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 14px; }
+  .ss-stat { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid #F0F2F5; min-width: 0; }
+  .ss-stat .k { color: #667085; }
+  .ss-stat .v { font-weight: 600; color: #202939; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ss-row { font-size: 12.5px; color: #475467; padding: 5px 0; border-bottom: 1px solid #F0F2F5; line-height: 1.55; word-break: break-all; }
+  .ss-row:last-child { border-bottom: none; }
+  .ss-row .t { color: #98A2B3; font-size: 11.5px; }
+  .ss-row .bad { color: #C9362B; font-weight: 600; }
+  .ss-row .ok { color: #07845B; font-weight: 600; }
   .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EAECF0; flex-wrap: wrap; }
   .cat-item .cat-name { flex: 1; font-weight: 600; font-size: 14px; min-width: 80px; }
   footer { text-align: center; color: #98A2B3; font-size: 11px; padding: 16px; }
@@ -346,6 +356,7 @@
         <button class="tab-btn active" id="admin-tab-users">用户管理</button>
         <button class="tab-btn" id="admin-tab-logs">登录记录</button>
         <button class="tab-btn" id="admin-tab-backup">系统备份</button>
+        <button class="tab-btn" id="admin-tab-status">系统状态</button>
       </div>
       <div id="admin-panel-users">
         <div class="card">
@@ -378,6 +389,17 @@
             <span class="muted">每天 0 点自动备份，保留最近 10 份；恢复前会自动备份当前数据</span>
           </div>
           <div id="backup-list" style="margin-top:8px"></div>
+          <div class="muted" id="prewarm-progress" style="margin-top:8px">排行榜预热进度 加载中…</div>
+        </div>
+      </div>
+      <div id="admin-panel-status" style="display:none">
+        <div class="card">
+          <h3>系统状态</h3>
+          <div class="row">
+            <button id="status-refresh-btn">刷新</button>
+            <span class="muted" id="status-updated">加载中…</span>
+          </div>
+          <div id="status-body" style="margin-top:8px"><div class="muted">加载中…</div></div>
         </div>
       </div>
     </div>
@@ -472,6 +494,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.3</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">管理页新增「系统状态」：基金数据统计、后台任务与预计完成时间、下次任务、最近 24 小时错误日志</div></div></div>
+          <div class="es-row"><div class="es-ver">v1.4.2</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">排行榜基金数据预热补全（限速队列、新进榜优先、失败退避），加入自选即秒出估值与可信度</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.1</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">排行榜一键加入自选（默认未分类）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.0</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">TrueNAV 1.1/1.2 估值提准与可信度标签、邮箱注册、系统备份与恢复、收益波动比榜、腾讯分时兜底、演变页</div></div></div>
           <div class="es-row"><div class="es-ver">v1.3.0</div><div class="es-main"><div class="es-date">2026-11-21</div><div class="es-desc">板块识别与板块涨跌、曲线对称轴与秒显、行业查询限速修复</div></div></div>
@@ -483,7 +507,7 @@
     </div>
   </div>
 </main>
-<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.1 · 更新于 2026-11-23 19:06</span></footer>
+<footer><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.3 · 更新于 2026-11-23 19:48</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -673,6 +697,7 @@ function showView(name) {
   $("nav-settings").className = "tab-btn" + (name === "settings" ? " active" : "");
   $("nav-evo").className = "tab-btn" + (name === "evo" ? " active" : "");
   if (name === "rank") loadRank(); else stopRankPoll();
+  if (name !== "admin") stopStatusTimer();
   if (name === "admin") loadAdmin();
 }
 $("nav-main").onclick = () => showView("main");
@@ -688,13 +713,89 @@ function showAdminSubTab(name) {
   $("admin-panel-users").style.display = name === "users" ? "" : "none";
   $("admin-panel-logs").style.display = name === "logs" ? "" : "none";
   $("admin-panel-backup").style.display = name === "backup" ? "" : "none";
+  $("admin-panel-status").style.display = name === "status" ? "" : "none";
   $("admin-tab-users").className = "tab-btn" + (name === "users" ? " active" : "");
   $("admin-tab-logs").className = "tab-btn" + (name === "logs" ? " active" : "");
   $("admin-tab-backup").className = "tab-btn" + (name === "backup" ? " active" : "");
+  $("admin-tab-status").className = "tab-btn" + (name === "status" ? " active" : "");
+  if (name === "status") startStatusTimer(); else stopStatusTimer();
 }
 $("admin-tab-users").onclick = () => showAdminSubTab("users");
 $("admin-tab-logs").onclick = () => showAdminSubTab("logs");
 $("admin-tab-backup").onclick = () => showAdminSubTab("backup");
+$("admin-tab-status").onclick = () => showAdminSubTab("status");
+/* ---- system status (v1.4.3, admin only) ---- */
+let statusTimer = null;
+function startStatusTimer() {
+  stopStatusTimer();
+  loadSystemStatus();
+  statusTimer = setInterval(loadSystemStatus, 30000);
+}
+function stopStatusTimer() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+}
+$("status-refresh-btn").onclick = () => loadSystemStatus();
+async function loadSystemStatus() {
+  if (!isAdmin) return;
+  try {
+    const d = await api("/api/admin/system-status");
+    $("status-updated").textContent = "更新于 " + fmtLocalTime(d.now) + " · 每 30 秒自动刷新";
+    $("status-body").innerHTML = renderSystemStatus(d);
+  } catch (e) {
+    $("status-body").innerHTML = '<div class="muted">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+function renderSystemStatus(d) {
+  const s = d.stats || {}, w = d.workers || {}, pw = w.prewarm || {};
+  const stat = (k, v) => `<div class="ss-stat"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+  const row = html => `<div class="ss-row">${html}</div>`;
+  const t = iso => iso ? fmtLocalTime(iso) : "—";
+  const wline = (label, x, extra) => row(`<b>${esc(label)}</b>` + (extra ? " · " + extra : "")
+    + `<br><span class="t">上次 ${t(x && x.last_run)}${x && x.last_result ? " · " + esc(x.last_result) : ""} · 下次 ${t(x && x.next_run)}</span>`);
+  let h = "<h4>基金数据统计</h4><div class=\"ss-grid\">"
+    + stat("自选基金（去重）", s.watchlist_funds + " 只")
+    + stat("自选记录", s.watchlist_rows + " 条")
+    + stat("用户数", s.users)
+    + stat("持仓缓存", s.holdings_cached + " 只")
+    + stat("净值缓存", s.nav_cached + " 只")
+    + stat("β/可信度", s.beta_ok + " 只")
+    + stat("β 跳过（债/货币等）", s.beta_skip + " 只")
+    + stat("股票仓位缓存", s.stock_position_cached + " 只")
+    + stat("基金类型缓存", s.fund_type_cached + " 只")
+    + stat("股票日线", s.daily_stocks + " 只")
+    + stat("分时缓存", s.trends_rows + " 条")
+    + stat("今日分时", s.trends_today + " 条")
+    + stat("行业缓存", s.industry_cached + " 只")
+    + stat("预热队列", "完成 " + (s.prewarm ? s.prewarm.done : 0) + " / 待补 " + (s.prewarm ? s.prewarm.pending : 0) + " / 失败 " + (s.prewarm ? s.prewarm.failed : 0))
+    + "</div>";
+  h += "<h4>榜单缓存</h4>" + (d.boards || []).map(b => row(
+    `<b>${esc(b.label)}</b> · ` + (b.ready ? (b.fresh ? '<span class="ok">已就绪</span>' : "已就绪（待刷新）") : '<span class="bad">未就绪</span>')
+    + (b.computing ? " · 计算中" : "")
+    + `<br><span class="t">更新 ${t(b.fetched_at)} · 下次刷新 ${t(b.next_refresh)}</span>`)).join("");
+  h += "<h4>正在进行的任务</h4>";
+  let pwExtra = pw.enabled ? ("速率 " + pw.per_min + " 只/分钟") : "已关闭";
+  if (pw.current) pwExtra += " · 正在补 " + pw.current;
+  if (pw.paused) pwExtra += " · 暂停中（" + t(pw.paused_until) + " 恢复）";
+  if (pw.eta_at) pwExtra += " · 预计完成 " + t(pw.eta_at) + "（约 " + fmtOnlineDur(pw.eta_seconds) + "）";
+  if (pw.next_code) pwExtra += " · 下一只 " + pw.next_code;
+  h += wline("排行榜预热补全", pw, pwExtra);
+  h += wline("行情预热", w.quote_warm);
+  h += wline("分时预热", w.trends_warm);
+  h += wline("榜单预热检查", w.rank_warm);
+  h += wline("每日备份", w.backup, w.backup && w.backup.last_backup_at ? "最近备份 " + t(w.backup.last_backup_at) : "");
+  h += wline("β 每日重算", w.beta, w.beta && w.beta.last_beta_at ? "最近 β 更新 " + t(w.beta.last_beta_at) : "");
+  h += "<h4>下次任务</h4>" + ((d.next_tasks || []).map(x => row(
+    `<b>${esc(x.name)}</b> · ${t(x.at)}` + (x.detail ? `<br><span class="t">${esc(x.detail)}</span>` : ""))).join("") || '<div class="muted">暂无</div>');
+  const errs = d.errors || { total_24h: 0, groups: [], latest: [] };
+  h += "<h4>最近 24 小时错误（共 " + errs.total_24h + " 条）</h4>";
+  if (!errs.total_24h) {
+    h += '<div class="muted">最近 24 小时无错误记录</div>';
+  } else {
+    h += errs.groups.map(g => row(`<b>${esc(g.source)}</b> · ${g.count} 次 · <span class="t">最近 ${t(g.last_at)}</span>`)).join("");
+    h += errs.latest.map(e => row(`<span class="t">${t(e.ts)}</span> <b>${esc(e.source)}</b> ${esc(e.message)}`)).join("");
+  }
+  return h;
+}
 function setAdminErr(msg) { const e = $("admin-err"); if (e) e.textContent = msg || ""; }
 function fmtOnlineDur(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -762,6 +863,17 @@ async function loadAdmin() {
     ).join("") || '<div class="muted">暂无记录</div>';
   } catch (e) { setAdminErr(e.message); }
   loadBackups();
+  loadPrewarm();
+}
+async function loadPrewarm() {
+  if (!isAdmin) return;
+  try {
+    const d = await api("/api/admin/prewarm");
+    let t = "排行榜预热进度 " + d.done + "/" + d.total + "（待补 " + d.pending + "，失败 " + d.failed + "）";
+    if (!d.enabled) t += " · 已关闭";
+    else if (d.paused) t += " · 暂停中（上游异常退避）";
+    $("prewarm-progress").textContent = t;
+  } catch (e) { $("prewarm-progress").textContent = "排行榜预热进度 读取失败"; }
 }
 /* ---- system backup (v1.4.0, admin only) ---- */
 const BACKUP_KIND_LABEL = { auto: "自动", manual: "手动", "pre-restore": "恢复前" };
