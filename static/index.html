@@ -17,7 +17,8 @@
   .chip-row { touch-action: pan-x pan-y; }
   :root { --header-h: 47px; }
   header { background: #fff; color: #202939; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid #EAECF0; position: sticky; top: 0; z-index: 30; }
-  #userbox { flex: none; max-width: 35vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #userbox { flex: none; max-width: 35vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #2563EB; font-weight: 600; font-size: 13px; }
+  .refresh-group { display: inline-flex; align-items: center; gap: 4px; flex: none; }
   header h1 { font-size: 16px; font-weight: 600; margin: 0; line-height: 22px; }
   .title-wrap { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
   .title-note { font-size: 11px; color: #98A2B3; line-height: 22px; }
@@ -193,8 +194,8 @@
 </head>
 <body>
 <header>
-  <div class="title-wrap"><h1>基金自算估值</h1><span id="countdown" title="下次自动刷新" style="display:none">60s</span><span class="title-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</span></div>
-  <span class="user-wrap"><span id="userbox" class="muted"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span>
+  <div class="title-wrap"><h1>基金自算估值</h1><span class="refresh-group"><button id="refresh-btn" title="刷新" aria-label="刷新" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button><span id="countdown" title="下次自动刷新" style="display:none">60s</span></span><span class="title-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</span></div>
+  <span class="user-wrap"><span id="userbox"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span>
 </header>
 <main>
   <div id="auth" class="card" style="display:none">
@@ -239,7 +240,6 @@
         <button class="tab-btn" id="nav-settings">设置</button>
         <button class="tab-btn" id="nav-admin" style="display:none">管理</button>
         <span style="flex:1"></span>
-        <button id="refresh-btn" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
         <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-sep">·</span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-sep">·</span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
@@ -404,7 +404,7 @@
     </div>
   </div>
 </main>
-<footer><span id="app-version">版本 v1.21.3 · 更新于 2026-11-23 15:51</span></footer>
+<footer><span id="app-version">版本 v1.21.4 · 更新于 2026-11-23 15:58</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -901,7 +901,7 @@ document.querySelectorAll("#rank-periods .chip").forEach(b => {
     loadRank();
   };
 });
-function showAuth() { applyEmailAuthUI(); $("auth").style.display = ""; $("dash").style.display = "none"; $("countdown").style.display = "none"; $("logout-btn").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); stopRankPoll(); prevSnapshot = null; }
+function showAuth() { applyEmailAuthUI(); $("auth").style.display = ""; $("dash").style.display = "none"; $("countdown").style.display = "none"; $("refresh-btn").style.display = "none"; $("logout-btn").style.display = "none"; clearInterval(timer); clearInterval(countdownTimer); stopRankPoll(); prevSnapshot = null; }
 // Keep the sticky toolbar flush under the sticky header: header height can
 // grow when the title note wraps on narrow screens, so measure it live.
 function syncHeaderH() {
@@ -934,7 +934,7 @@ function showDash(user, admin, userId, email, emailAuthFlag) {
   isAdmin = !!admin; myUserId = userId ?? null; myUsername = user || ""; myEmail = email || null;
   $("nav-admin").style.display = isAdmin ? "" : "none";
   $("auth").style.display = "none"; $("dash").style.display = "";
-  $("countdown").style.display = ""; $("logout-btn").style.display = "";
+  $("countdown").style.display = ""; $("refresh-btn").style.display = ""; $("logout-btn").style.display = "";
   $("userbox").textContent = user;
   $("account-email").textContent = "邮箱：" + (myEmail || "未绑定");
   $("account-email").style.display = emailAuth ? "" : "none";
