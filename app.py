@@ -7,6 +7,7 @@ Data: Eastmoney (search / official NAV / holdings), Sina (stock quotes).
 All upstream calls go through the backend with global caches.
 """
 import asyncio
+import gzip
 import hashlib
 import hmac
 import json
@@ -38,15 +39,18 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.17.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.18.2"  # keep in sync with the footer in static/index.html
 BACKUP_DIR = DB_PATH.parent / "backups"
 BACKUP_KEEP = 10
-BACKUP_NAME_RE = re.compile(r"^fund-backup-\d{8}-\d{6}\.db$")
+# New backups are gzip-compressed (.db.gz); legacy plain .db backups from
+# v1.17.0 remain listable/downloadable/restorable.
+BACKUP_NAME_RE = re.compile(r"^fund-backup-\d{8}-\d{6}\.db(\.gz)?$")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 FUND_CODE_RE = re.compile(r"^\d{6}$")
 QUOTE_TTL = 45          # seconds, in-memory global cache
 NAV_TTL = 600           # seconds, DB cache
 HOLDINGS_TTL = 86400    # seconds, DB cache
+FUND_TYPE_TTL = 30 * 86400  # seconds, DB cache (fund type rarely changes)
 SESSION_DAYS = 30
 
 @asynccontextmanager
@@ -135,6 +139,15 @@ def init_db():
             code TEXT PRIMARY KEY,
             industry TEXT,
             fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS fund_type_cache(
+            fund_code TEXT PRIMARY KEY,
+            ftype TEXT,
+            fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS mrf_symbol_map(
+            fund_code TEXT PRIMARY KEY,
+            isin TEXT,
+            yahoo_symbol TEXT,
+            resolved_at REAL NOT NULL);
         """
     )
     # Migration: user_funds.category (added 2026-11-19)
@@ -164,6 +177,10 @@ def init_db():
     for col, ddl in (("prev_nav_date", "TEXT"), ("prev_dwjz", "REAL"), ("prev_jzzzl", "REAL")):
         if col not in ncols:
             conn.execute(f"ALTER TABLE nav_cache ADD COLUMN {col} {ddl}")
+    # Migration: mrf_symbol_map.isin (added 2026-11-23, v1.18.2)
+    mcols = [r[1] for r in conn.execute("PRAGMA table_info(mrf_symbol_map)").fetchall()]
+    if mcols and "isin" not in mcols:
+        conn.execute("ALTER TABLE mrf_symbol_map ADD COLUMN isin TEXT")
     # Category ordering table + backfill from existing fund categories (idempotent)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS user_categories("
@@ -479,16 +496,38 @@ def admin_login_logs(limit: int = 200, session: Optional[str] = Cookie(default=N
 
 # ---------------------------------------------------------------- backup
 # System backup & restore (admin only). A backup is a consistent SQLite
-# copy (sqlite3 backup API, WAL-safe) in BACKUP_DIR plus a .json sidecar
-# with metadata. Retention: newest BACKUP_KEEP across all kinds. Restore
-# copies the backup INTO the live DB via the backup API (no file swap, so
-# WAL stays consistent), then re-runs init_db() so every migration
-# applies — old backups restore into new code. Version is recorded for
-# information only and never blocks a restore.
+# copy (sqlite3 backup API, WAL-safe) in BACKUP_DIR, gzip-compressed to
+# .db.gz to save space (v1.17.1; legacy plain .db backups from v1.17.0
+# still list/download/restore), plus a .json sidecar with metadata.
+# Retention: newest BACKUP_KEEP across all kinds. Restore copies the
+# backup INTO the live DB via the backup API (no file swap, so WAL stays
+# consistent), then re-runs init_db() so every migration applies — old
+# backups restore into new code. Version is recorded for information
+# only and never blocks a restore.
+
+def _backup_sidecar(path: Path) -> Path:
+    """Sidecar .json for a backup file (.db or .db.gz): same stem."""
+    name = path.name
+    if name.endswith(".gz"):
+        name = name[:-3]
+    if name.endswith(".db"):
+        name = name[:-3]
+    return path.with_name(name + ".json")
+
+
+def _backup_stamp_str(path: Path) -> str:
+    """Filename without .db/.db.gz suffixes, for timestamp parsing."""
+    name = path.name
+    if name.endswith(".gz"):
+        name = name[:-3]
+    if name.endswith(".db"):
+        name = name[:-3]
+    return name
+
 
 def _backup_entry(path: Path) -> dict:
     meta = {}
-    sidecar = path.with_suffix(".json")
+    sidecar = _backup_sidecar(path)
     if sidecar.is_file():
         try:
             meta = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -498,7 +537,7 @@ def _backup_entry(path: Path) -> dict:
         # Sidecar missing/corrupt (e.g. a .db copied in by hand): derive
         # the timestamp from the filename.
         try:
-            dt = datetime.strptime(path.stem, "fund-backup-%Y%m%d-%H%M%S").replace(tzinfo=CN_TZ)
+            dt = datetime.strptime(_backup_stamp_str(path), "fund-backup-%Y%m%d-%H%M%S").replace(tzinfo=CN_TZ)
             meta["created_at"] = dt.isoformat()
         except ValueError:
             meta["created_at"] = datetime.fromtimestamp(path.stat().st_mtime, CN_TZ).isoformat()
@@ -508,13 +547,15 @@ def _backup_entry(path: Path) -> dict:
         "kind": meta.get("kind") or "manual",
         "size_bytes": path.stat().st_size,
         "app_version": meta.get("app_version") or "",
+        "compressed": path.name.endswith(".gz"),
     }
 
 
 def _list_backups() -> list:
     if not BACKUP_DIR.is_dir():
         return []
-    paths = [p for p in BACKUP_DIR.glob("*.db") if BACKUP_NAME_RE.fullmatch(p.name)]
+    paths = [p for p in list(BACKUP_DIR.glob("*.db")) + list(BACKUP_DIR.glob("*.db.gz"))
+             if BACKUP_NAME_RE.fullmatch(p.name)]
     # Timestamped names sort chronologically; newest first.
     return [_backup_entry(p) for p in sorted(paths, key=lambda p: p.name, reverse=True)]
 
@@ -524,7 +565,7 @@ def _prune_backups():
     for e in entries[BACKUP_KEEP:]:
         p = BACKUP_DIR / e["name"]
         p.unlink(missing_ok=True)
-        p.with_suffix(".json").unlink(missing_ok=True)
+        _backup_sidecar(p).unlink(missing_ok=True)
 
 
 def _make_backup(kind: str) -> dict:
@@ -532,23 +573,30 @@ def _make_backup(kind: str) -> dict:
     created = datetime.now(CN_TZ)
     stamp = created
     while True:  # same-second collisions bump the filename stamp
-        name = f"fund-backup-{stamp:%Y%m%d-%H%M%S}.db"
+        name = f"fund-backup-{stamp:%Y%m%d-%H%M%S}.db.gz"
         dest = BACKUP_DIR / name
-        if not dest.exists():
+        legacy = BACKUP_DIR / f"fund-backup-{stamp:%Y%m%d-%H%M%S}.db"
+        if not dest.exists() and not legacy.exists():
             break
         stamp += timedelta(seconds=1)
-    src = sqlite3.connect(DB_PATH)
+    raw = BACKUP_DIR / (name + ".rawtmp")
     try:
-        dst = sqlite3.connect(dest)
+        src = sqlite3.connect(DB_PATH)
         try:
-            src.backup(dst)
+            dst = sqlite3.connect(raw)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
         finally:
-            dst.close()
+            src.close()
+        with open(raw, "rb") as fin, gzip.open(dest, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
     finally:
-        src.close()
+        raw.unlink(missing_ok=True)
     meta = {"created_at": created.isoformat(), "app_version": APP_VERSION,
-            "kind": kind, "size_bytes": dest.stat().st_size}
-    dest.with_suffix(".json").write_text(
+            "kind": kind, "size_bytes": dest.stat().st_size, "compressed": True}
+    _backup_sidecar(dest).write_text(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     _prune_backups()
     return {"name": name, **meta}
@@ -556,29 +604,39 @@ def _make_backup(kind: str) -> dict:
 
 def _restore_backup(name: str) -> dict:
     """Validate + restore one backup into the live DB. Returns the
-    pre-restore backup entry. Raises ValueError on an unusable file."""
+    pre-restore backup entry. Raises ValueError on an unusable file.
+    Accepts both gzip-compressed (.db.gz, current) and legacy plain
+    (.db, v1.17.0) backups."""
     path = BACKUP_DIR / name
-    try:
-        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
-        try:
-            ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
-            has_users = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        raise ValueError("备份文件不是有效的 SQLite 数据库")
-    if ok != "ok":
-        raise ValueError("备份文件完整性校验失败")
-    if not has_users:
-        raise ValueError("备份文件缺少 users 表，不是有效的系统备份")
-    # Snapshot the target first: the pre-restore backup below prunes to
+    # Materialize a plain .db temp file first (gunzip when needed). This
+    # also snapshots the target: the pre-restore backup below prunes to
     # BACKUP_KEEP and could delete the very file being restored (when it
     # is among the oldest), which would leave sqlite3.connect() to create
     # an empty DB and copy that over the live one.
     tmp = BACKUP_DIR / (name + ".restore-tmp")
-    shutil.copyfile(path, tmp)
     try:
+        if name.endswith(".gz"):
+            try:
+                with gzip.open(path, "rb") as fin, open(tmp, "wb") as fout:
+                    shutil.copyfileobj(fin, fout)
+            except (OSError, EOFError):
+                raise ValueError("备份文件解压失败，不是有效的 gzip 备份")
+        else:
+            shutil.copyfile(path, tmp)
+        try:
+            conn = sqlite3.connect(tmp.as_uri() + "?mode=ro", uri=True)
+            try:
+                ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                has_users = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            raise ValueError("备份文件不是有效的 SQLite 数据库")
+        if ok != "ok":
+            raise ValueError("备份文件完整性校验失败")
+        if not has_users:
+            raise ValueError("备份文件缺少 users 表，不是有效的系统备份")
         pre = _make_backup("pre-restore")
         src = sqlite3.connect(tmp)
         try:
@@ -677,10 +735,11 @@ async def upstream_get(url: str, referer: Optional[str] = None, timeout: float =
 
 
 def _is_fund_entry(d: dict) -> bool:
-    """FundSearchAPI also returns stocks; funds have CATEGORY 700 (verified 2026-11-19)."""
+    """FundSearchAPI also returns stocks; funds have CATEGORY 700, Hong Kong
+    MRF funds （互认基金， e.g. 968061) have CATEGORY 780 (verified 2026-11-23)."""
     cat = d.get("CATEGORY")
     if cat is not None:
-        return str(cat) == "700"
+        return str(cat) in ("700", "780")
     return d.get("FundBaseInfo") is not None
 
 
@@ -697,6 +756,37 @@ async def search(q: str, session: Optional[str] = Cookie(default=None)):
     return {"results": results[:20]}
 
 
+async def fetch_fund_type(code: str) -> Optional[str]:
+    """Fund type string (e.g. "QDII-混合偏股", "混合型-偏股", "债券型-长债")
+    from Eastmoney FundSearchAPI FundBaseInfo.FTYPE, DB-cached 30d.
+    Returns None when unknown (upstream failure and no cache)."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM fund_type_cache WHERE fund_code=?", (code,)).fetchone()
+    if row and time.time() - row["fetched_at"] < FUND_TYPE_TTL:
+        return row["ftype"]
+    try:
+        from urllib.parse import quote
+        resp = await upstream_get(
+            f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={quote(code)}")
+        ftype = None
+        for d in resp.json().get("Datas", []):
+            if d.get("CODE") == code and _is_fund_entry(d):
+                ftype = (d.get("FundBaseInfo") or {}).get("FTYPE")
+                if not ftype and str(d.get("CATEGORY")) == "780":
+                    ftype = "香港互认基金"  # MRF: FundBaseInfo is null upstream
+                break
+        if ftype:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO fund_type_cache(fund_code, ftype, fetched_at) VALUES(?,?,?) "
+                    "ON CONFLICT(fund_code) DO UPDATE SET ftype=excluded.ftype, fetched_at=excluded.fetched_at",
+                    (code, ftype, time.time()))
+            return ftype
+    except Exception:
+        pass
+    return row["ftype"] if row else None
+
+
 def _nav_from_row(row) -> dict:
     keys = row.keys()
     return {
@@ -707,7 +797,148 @@ def _nav_from_row(row) -> dict:
     }
 
 
-async def fetch_nav(code: str) -> dict:
+# Hong Kong MRF funds （互认基金， 968/969xxx): Eastmoney lsjz returns an
+# empty list for them, so NAV comes from Yahoo Finance daily closes
+# (verified 2026-11-23: 968061 ISIN HK0000555752 -> 0P0001IVWZ.HK,
+# 2026-11-19 close 18.38 CNH, matching other apps). Yahoo search by fund
+# code returns nothing and by Chinese name HTTP 400; search by ISIN is
+# exact. ISIN sources tried in order: Eastmoney F10 jbgk page, cifm fund
+# page (neither exposed an ISIN when checked 2026-11-23 — kept as cheap
+# future-proof attempts), then the seed map below (from JPM factsheets).
+# Resolution result cached in mrf_symbol_map: success permanently,
+# failure 1 day.
+MRF_ISIN_SEED = {"968061": "HK0000555752", "968062": "HK0000555760",
+                 "968063": "HK0000555778"}
+MRF_YAHOO_SEED = {"968061": "0P0001IVWZ.HK", "968062": "0P0001IVX0.HK"}
+MRF_FAIL_TTL = 86400  # seconds
+_ISIN_RE = re.compile(r"HK\d{10}")
+
+
+def _is_mrf_code(code: str) -> bool:
+    return code[:3] in ("968", "969")
+
+
+async def _yahoo_search_symbol(query: str, require_hk: bool = True) -> Optional[str]:
+    """First Yahoo MUTUALFUND quote for the query. Code/name searches
+    require a .HK symbol (Hong Kong listing); ISIN searches are exact
+    (unique identifier) and accept any listing — e.g. 968063's ISIN
+    resolves to 0P0001IVX1 on OTC Markets without a .HK suffix."""
+    if not query:
+        return None
+    try:
+        from urllib.parse import quote
+        resp = await upstream_get(
+            f"https://query2.finance.yahoo.com/v1/finance/search?q={quote(query)}&quotesCount=10",
+            timeout=15)
+        for x in resp.json().get("quotes", []):
+            sym = x.get("symbol") or ""
+            if x.get("quoteType") == "MUTUALFUND" and (sym.endswith(".HK") or not require_hk):
+                return sym
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_mrf_isin(code: str) -> Optional[str]:
+    """Best-effort ISIN lookup for an MRF fund code: Eastmoney F10 jbgk
+    page, then the cifm fund page. Both are server-rendered but carried
+    no ISIN when checked 2026-11-23; kept so resolution starts working
+    if either page adds one."""
+    for url, referer in (
+        (f"https://fundf10.eastmoney.com/jbgk_{code}.html",
+         "https://fundf10.eastmoney.com/"),
+        (f"https://www.cifm.com/fund/{code}/", None),
+    ):
+        try:
+            resp = await upstream_get(url, referer=referer, timeout=10)
+            m = _ISIN_RE.search(resp.text)
+            if m:
+                return m.group(0)
+        except Exception:
+            pass
+    return None
+
+
+async def resolve_mrf_symbol(code: str, name: str = "") -> Optional[str]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT isin, yahoo_symbol, resolved_at FROM mrf_symbol_map WHERE fund_code=?",
+            (code,)).fetchone()
+    if row:
+        if row["yahoo_symbol"]:
+            return row["yahoo_symbol"]
+        if time.time() - row["resolved_at"] < MRF_FAIL_TTL:
+            return None
+    isin = (row["isin"] if row else None) or await _fetch_mrf_isin(code) \
+        or MRF_ISIN_SEED.get(code)
+    symbol = None
+    if isin:
+        symbol = await _yahoo_search_symbol(isin, require_hk=False)
+    if not symbol:
+        symbol = MRF_YAHOO_SEED.get(code)
+    if not symbol:
+        symbol = await _yahoo_search_symbol(code)
+    if not symbol and name:
+        symbol = await _yahoo_search_symbol(name)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO mrf_symbol_map(fund_code, isin, yahoo_symbol, resolved_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(fund_code) DO UPDATE SET isin=excluded.isin, "
+            "yahoo_symbol=excluded.yahoo_symbol, resolved_at=excluded.resolved_at",
+            (code, isin, symbol, time.time()))
+    return symbol
+
+
+async def fetch_mrf_nav(code: str, name: str = "") -> dict:
+    """NAV for an MRF fund from Yahoo daily closes. Same return shape and
+    nav_cache (TTL 600s) as fetch_nav. Raises HTTPException(502) when no
+    source works; the caller renders empty NAV fields then."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM nav_cache WHERE fund_code=?", (code,)).fetchone()
+    if row and time.time() - row["fetched_at"] < NAV_TTL and _nav_from_row(row)["prev_dwjz"] is not None:
+        return {**_nav_from_row(row), "stale": False}
+    try:
+        symbol = await resolve_mrf_symbol(code, name)
+        if not symbol:
+            raise ValueError("no Yahoo symbol")
+        resp = await upstream_get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1mo&interval=1d",
+            timeout=15)
+        result = resp.json()["chart"]["result"][0]
+        closes = result["indicators"]["quote"][0]["close"]
+        pts = [(datetime.fromtimestamp(t, CN_TZ).strftime("%Y-%m-%d"), float(c))
+               for t, c in zip(result["timestamp"], closes) if c is not None]
+        if len(pts) < 2:
+            raise ValueError("not enough NAV points")
+        (prev_date, prev_close), (nav_date, close) = pts[-2], pts[-1]
+        prev_jzzzl = (round((prev_close - pts[-3][1]) / pts[-3][1] * 100, 2)
+                      if len(pts) >= 3 and pts[-3][1] else None)
+        nav = {
+            "nav_date": nav_date, "dwjz": round(close, 4),
+            "jzzzl": round((close - prev_close) / prev_close * 100, 2) if prev_close else 0.0,
+            "prev_nav_date": prev_date, "prev_dwjz": round(prev_close, 4),
+            "prev_jzzzl": prev_jzzzl,
+        }
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO nav_cache(fund_code, nav_date, dwjz, jzzzl, prev_nav_date, prev_dwjz, prev_jzzzl, fetched_at) "
+                "VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(fund_code) DO UPDATE SET nav_date=excluded.nav_date, dwjz=excluded.dwjz, jzzzl=excluded.jzzzl, "
+                "prev_nav_date=excluded.prev_nav_date, prev_dwjz=excluded.prev_dwjz, prev_jzzzl=excluded.prev_jzzzl, "
+                "fetched_at=excluded.fetched_at",
+                (code, nav["nav_date"], nav["dwjz"], nav["jzzzl"],
+                 nav["prev_nav_date"], nav["prev_dwjz"], nav["prev_jzzzl"], time.time()),
+            )
+        return {**nav, "stale": False}
+    except Exception:
+        if row:
+            return {**_nav_from_row(row), "stale": True}
+        raise HTTPException(502, f"净值数据暂时不可用（{code}）")
+
+
+async def fetch_nav(code: str, name: str = "") -> dict:
+    if _is_mrf_code(code):  # MRF: Eastmoney lsjz is empty, use Yahoo
+        return await fetch_mrf_nav(code, name)
     with db() as conn:
         row = conn.execute("SELECT * FROM nav_cache WHERE fund_code=?", (code,)).fetchone()
     # Cache rows from before v1.8.0 have NULL prev_* (migrated columns); treat as stale
@@ -1703,6 +1934,7 @@ async def _quote_warm_loop():
                         s = await holding_quote_symbol(h, mmap)
                         if s:
                             syms.add(s)
+                syms.add("sh511260")  # bond-fund estimate source
                 if syms:
                     async with _quote_refresh_lock:
                         await _refresh_quotes(sorted(syms))
@@ -1754,6 +1986,10 @@ async def _trends_warm_loop():
                         async with _trends_sem:
                             await fetch_stock_trends(idx["secid"], date_str)
                         n += 1
+                # Bond-fund curve source: 10Y treasury ETF minute trends.
+                async with _trends_sem:
+                    await fetch_stock_trends("1.511260", date_str)
+                n += 1
                 print(f"[trends-warm] refreshed {n} secids "
                       f"for {len(rows)} funds", flush=True)
         except Exception as e:
@@ -2042,14 +2278,28 @@ async def _compute_estimates(uid):
     # Fetch NAV + holdings per fund in parallel, collect all symbols,
     # then one batch quote call.
     async def _fund_inputs(r):
-        nav = await fetch_nav(r["fund_code"])
-        hold = await fetch_holdings(r["fund_code"])
+        # Per-fund fault tolerance: one fund with no reachable NAV source
+        # (e.g. HK MRF 968061 — lsjz returns an empty list) must not 502
+        # the whole page; it renders with empty NAV fields instead.
+        try:
+            nav = await fetch_nav(r["fund_code"], r["fund_name"])
+        except Exception:
+            nav = {"nav_date": None, "dwjz": None, "jzzzl": None,
+                   "prev_nav_date": None, "prev_dwjz": None, "prev_jzzzl": None,
+                   "stale": True}
+        try:
+            hold = await fetch_holdings(r["fund_code"])
+        except Exception:
+            hold = {"holdings": [], "report_label": None, "report_date": None, "stale": True}
         mmap = await fetch_stock_market_map(r["fund_code"])
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
         return (r, nav, hold, syms)
 
     per_fund = await asyncio.gather(*[_fund_inputs(r) for r in rows])
     all_symbols = [s for (_, _, _, syms) in per_fund for s in syms if s]
+    # Bond funds (no stock holdings) are estimated from the 10Y treasury
+    # ETF (511260) daily change; always fetch its quote alongside.
+    all_symbols.append("sh511260")
     quotes = await fetch_quotes(all_symbols)
     q_stale = quotes_stale()
     # Industries/sectors for the union of holding codes (A-share via F10,
@@ -2060,6 +2310,12 @@ async def _compute_estimates(uid):
         *[fetch_industry(c) for c in ind_codes], return_exceptions=True)
     industries = {c: (v if isinstance(v, str) else None)
                   for c, v in zip(ind_codes, ind_results)}
+    # Fund types (QDII detection for NAV publish timing; bond/money funds
+    # have no stock holdings to estimate from). DB-cached 30d.
+    type_results = await asyncio.gather(
+        *[fetch_fund_type(r["fund_code"]) for r in rows], return_exceptions=True)
+    fund_types = {r["fund_code"]: (v if isinstance(v, str) else None)
+                  for r, v in zip(rows, type_results)}
     out = []
     for r, nav, hold, syms in per_fund:
         est_pct, est_pct_ext, coverage, quote_time, skipped = 0.0, 0.0, 0.0, None, []
@@ -2092,6 +2348,7 @@ async def _compute_estimates(uid):
         est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes)
         # ETF feeder funds have no usable stock holdings (est would be a
         # meaningless 0.00%): use the tracking index's latest change.
+        feeder_applied = False
         if coverage == 0 and _is_feeder(r["fund_name"], hold["holdings"]):
             idx = await resolve_fund_index(r["fund_code"])
             if idx:
@@ -2100,6 +2357,7 @@ async def _compute_estimates(uid):
                         idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
                 chg = _index_latest_chg(tr)
                 if chg is not None:
+                    feeder_applied = True
                     ts_last = tr["points"][-1][0]
                     est_pct = chg
                     coverage = 100.0
@@ -2108,10 +2366,26 @@ async def _compute_estimates(uid):
                                "change_pct": round(chg, 2), "change_pct_ext": None}]
                     skipped = []
                     quote_time = datetime.fromtimestamp(ts_last, CN_TZ).strftime("%Y-%m-%d %H:%M")
+        # Bond funds disclose no stock holdings: estimate from the 10Y
+        # treasury ETF (511260) daily change, like other apps' bond-index
+        # estimates. Money-market funds stay NAV-only (different semantics).
+        bond_applied = False
+        ftype0 = fund_types.get(r["fund_code"]) or ""
+        if coverage == 0 and not feeder_applied and "债券" in ftype0:
+            bq = quotes.get("sh511260")
+            if bq:
+                bond_applied = True
+                est_pct = bq["change_pct"]
+                detail = [{"code": "511260", "name": "十年国债ETF国泰", "weight": 100.0,
+                           "change_pct": round(bq["change_pct"], 2), "change_pct_ext": None}]
+                skipped = []
+                quote_time = bq["quote_time"]
         # Main sector: group top-10 holdings by industry/sector, take the
         # largest summed weight; sector change = weighted change of that
-        # sector's own holdings (same quotes as the estimate). Computed
-        # from the raw holdings so feeder funds (zero weights) get null.
+        # sector's own holdings (same quotes as the estimate). share_pct
+        # is absolute (% of fund NAV, same basis as the holding weights),
+        # not normalized by coverage. Computed from the raw holdings so
+        # feeder funds (zero weights) get null.
         sector = None
         sec_w: dict = {}
         sec_num: dict = {}
@@ -2130,7 +2404,7 @@ async def _compute_estimates(uid):
             main_ind = max(sec_w, key=sec_w.get)
             sector = {
                 "name": _short_industry(main_ind),
-                "share_pct": round(sec_w[main_ind] / raw_coverage * 100, 1),
+                "share_pct": round(sec_w[main_ind], 1),
                 "change_pct": round(sec_num[main_ind] / sec_den[main_ind], 2)
                 if sec_den.get(main_ind) else None,
             }
@@ -2139,8 +2413,20 @@ async def _compute_estimates(uid):
         # (change_pct_ext is None during US regular hours -> null then too).
         show_ext = has_us and has_ext
         est_nav_ext = nav["dwjz"] * (1 + est_pct_ext / 100) if (show_ext and nav["dwjz"]) else None
+        ftype = fund_types.get(r["fund_code"])
+        # QDII funds publish NAV T-1; domestic funds (incl. A+H via 港股通)
+        # publish same-day. Judge by fund type, not by holdings' markets.
+        is_qdii = bool(ftype and "QDII" in ftype) or "QDII" in (r["fund_name"] or "")
+        # Hong Kong MRF funds （互认基金） publish NAV T+1 or later, like QDII.
+        is_mrf = ftype == "香港互认基金" or r["fund_code"][:3] in ("968", "969")
+        # Bond/money funds disclose no stock holdings: no estimate, no
+        # curve, and no stale warning (their empty holdings page is not
+        # "stale data"). Feeder-index and bond-ETF-estimated funds excluded.
+        no_stock_holdings = coverage == 0 and not feeder_applied and not bond_applied
         out.append({
             "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
+            "fund_type": ftype, "is_qdii": is_qdii, "is_mrf": is_mrf,
+            "bond_est": bond_applied, "no_stock_holdings": no_stock_holdings,
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
@@ -2149,7 +2435,8 @@ async def _compute_estimates(uid):
             "est_change_pct_ext": round(est_pct_ext, 2) if show_ext else None,
             "coverage_pct": round(coverage, 2),
             "report_label": hold["report_label"], "report_date": hold["report_date"],
-            "quote_time": quote_time, "stale": nav["stale"] or hold["stale"] or q_stale,
+            "quote_time": quote_time,
+            "stale": False if no_stock_holdings else (nav["stale"] or hold["stale"] or q_stale),
             "skipped_holdings": skipped, "holdings": detail,
             "sector": sector,
         })
@@ -2273,6 +2560,7 @@ async def _compute_series(uid):
     # Live quotes from the same 45s cache /api/estimates reads, for the
     # final curve point (curve end == card estimate by construction).
     all_symbols = [s for (_, _, _, _, syms) in per_fund for s in syms if s]
+    all_symbols.append("sh511260")  # bond-fund estimate source (see _compute_estimates)
     quotes = await fetch_quotes(all_symbols)
     now_ts = int(time.time())
     series = {}
@@ -2287,6 +2575,15 @@ async def _compute_series(uid):
                 async with _trends_sem:
                     feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
                 pts = _index_curve(feeder_tr, start_ts)
+        bond_tr = None
+        if not pts:
+            # Bond fund: curve from the 10Y treasury ETF (511260) minute
+            # trends, same weight-100% machinery as feeder index curves.
+            ftype_s = await fetch_fund_type(code) or ""
+            if "债券" in ftype_s:
+                async with _trends_sem:
+                    bond_tr = await fetch_stock_trends("1.511260", date_str)
+                pts = _index_curve(bond_tr, start_ts)
         if not pts:
             with db() as conn:
                 rows = conn.execute(
@@ -2307,6 +2604,13 @@ async def _compute_series(uid):
                         async with _trends_sem:
                             feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
                 chg = _index_latest_chg(feeder_tr)
+                if chg is not None:
+                    est_pct = chg
+            if coverage == 0 and bond_tr is not None:
+                # Bond fund final point = 511260 quote change (same source
+                # as the card estimate), falling back to trends latest.
+                bq = quotes.get("sh511260")
+                chg = bq["change_pct"] if bq else _index_latest_chg(bond_tr)
                 if chg is not None:
                     est_pct = chg
             val = round(est_pct, 2)
