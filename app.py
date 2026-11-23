@@ -39,7 +39,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.19.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.19.2"  # keep in sync with the footer in static/index.html
 BACKUP_DIR = DB_PATH.parent / "backups"
 BACKUP_KEEP = 10
 # New backups are gzip-compressed (.db.gz); legacy plain .db backups from
@@ -2969,32 +2969,59 @@ async def compute_qdii_us() -> dict:
             "excluded_low_coverage": excluded_low_coverage, "items": items[:30]}
 
 
-def _parse_vol(text: str):
+# Volatility / return-volatility-ratio boards (v1.19.2): four windows in
+# trading days, computed in one pass per fund from pingzhongdata NAV history.
+VOL_WINDOWS = {"1m": 20, "3m": 60, "6m": 120, "1y": 250}
+# Per-window minimum daily-return counts; fewer -> fund skipped for that
+# window only (other windows unaffected). Stops short-history new funds
+# from topping long-window boards on a handful of samples.
+VOL_MIN_RETS = {"1m": 15, "3m": 40, "6m": 80, "1y": 120}
+
+
+def _parse_vol_windows(text: str):
+    """Per-window {ret, vol, ratio} from Data_netWorthTrend.
+
+    ret = (last NAV / first NAV - 1) * 100 over the last N+1 NAV points;
+    vol = std of last N daily returns (equityReturn, %) x sqrt(250);
+    ratio = ret / vol (None when vol is 0). A window with fewer than
+    VOL_MIN_RETS daily returns is omitted."""
     m = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.S)
     if not m:
         return None
     trend = json.loads(m.group(1))
     rets = [p.get("equityReturn") for p in trend if isinstance(p.get("equityReturn"), (int, float))]
-    rets = rets[-250:]
-    if len(rets) < 60:
-        return None
-    mean = sum(rets) / len(rets)
-    var = sum((x - mean) ** 2 for x in rets) / (len(rets) - 1)
-    return round(math.sqrt(var) * math.sqrt(250), 2), len(rets)
+    navs = [p.get("y") for p in trend if isinstance(p.get("y"), (int, float))]
+    out = {}
+    for label, n in VOL_WINDOWS.items():
+        rs = rets[-n:]
+        nv = navs[-(n + 1):]
+        if len(rs) < VOL_MIN_RETS[label] or len(nv) < 2 or not nv[0]:
+            continue
+        mean = sum(rs) / len(rs)
+        var = sum((x - mean) ** 2 for x in rs) / (len(rs) - 1)
+        vol = round(math.sqrt(var) * math.sqrt(250), 2)
+        ret = round((nv[-1] / nv[0] - 1) * 100, 2)
+        ratio = round(ret / vol, 2) if vol > 0 else None
+        out[label] = {"ret": ret, "vol": vol, "ratio": ratio, "points": len(rs)}
+    return out or None
 
 
-async def fetch_vol(code: str):
+async def fetch_vol_windows(code: str):
     text = await fetch_pingzhong_text(code)
     # regex/JSON over the full NAV history: keep it off the event loop
-    return await asyncio.to_thread(_parse_vol, text)
+    return await asyncio.to_thread(_parse_vol_windows, text)
 
 
-async def compute_vol_top() -> dict:
-    """Volatility board (v1.12.1): pool = union of the top-30 funds of each
-    returns period (daily/1w/1m/3m/6m/1y/ytd), deduplicated; rank pool funds
-    by annualized volatility (std of last 250 daily returns x sqrt(250))."""
+async def compute_vol2(cat: str = "all") -> dict:
+    """Volatility + return/volatility-ratio boards (v1.19.2): pool = union
+    of the top-30 funds of each returns period (daily/1w/1m/3m/6m/1y/ytd),
+    deduplicated; each pool fund gets per-window (1m/3m/6m/1y) ret/vol/ratio
+    metrics. Sorting/filtering happens per request in the endpoints, so the
+    cached payload keeps every pool fund that has at least one window.
+    cat restricts the pool to one fund category's returns board (v1.19.1)."""
+    ret_key = "returns_all" if cat == "all" else f"returns_{cat}"
     payload, _stale = await _get_or_compute(
-        "returns_all", RETURNS_TTL, _compute_returns_payload)
+        ret_key, RETURNS_TTL, lambda cat=cat: _compute_returns_payload(cat))
     rows = payload["rows"]
     pool = {}  # code -> {"row": returns row, "periods_hit": [period, ...]}
     for period, field in PERIOD_FIELDS.items():
@@ -3007,22 +3034,19 @@ async def compute_vol_top() -> dict:
     async def one(code, entry):
         async with sem:
             try:
-                got = await fetch_vol(code)
+                w = await fetch_vol_windows(code)
             except Exception:
-                got = None
-        if not got:
+                w = None
+        if not w:
             return None
-        vol, points = got
         r = entry["row"]
-        return {"code": code, "name": r["name"], "vol": vol, "points": points,
+        return {"code": code, "name": r["name"], "w": w,
                 "y1": r["y1"], "periods_hit": entry["periods_hit"]}
 
     results = await asyncio.gather(*(one(c, e) for c, e in pool.items()))
     items = [x for x in results if x]
-    # ascending: lower volatility ranks first (v1.18.3)
-    items.sort(key=lambda x: x["vol"])
-    return {"updated_at": now_iso(), "total": len(pool),
-            "pool_size": len(pool), "items": items[:30]}
+    return {"updated_at": now_iso(), "cat": cat, "total": len(pool),
+            "pool_size": len(pool), "items": items}
 
 
 # Per-board locks: a user request arriving while a board is being computed
@@ -3041,7 +3065,11 @@ def _rank_lock(key: str) -> asyncio.Lock:
 # Typical full-compute durations in seconds (measured) for warming ETAs.
 _RANK_ETA = {"returns_all": 100, "vol_top_v2": 200, "qdii_us_v3": 240,
              "returns_gp": 60, "returns_hh": 80, "returns_zq": 60,
-             "returns_zs": 60, "returns_qdii": 60, "returns_fof": 60}
+             "returns_zs": 60, "returns_qdii": 60, "returns_fof": 60,
+             "vol_gp_v1": 200, "vol_hh_v1": 200, "vol_zq_v1": 200,
+             "vol_zs_v1": 200, "vol_qdii_v1": 200, "vol_fof_v1": 200,
+             "vol3_top": 200, "vol3_gp": 200, "vol3_hh": 200, "vol3_zq": 200,
+             "vol3_zs": 200, "vol3_qdii": 200, "vol3_fof": 200}
 # In-memory per-board compute state: {"state": "computing", "started_at": epoch}
 _rank_state: dict = {}
 _rank_tasks: dict = {}
@@ -3124,7 +3152,7 @@ def _warming_response(key: str) -> JSONResponse:
 
 _RANK_BOARDS = [
     ("returns_all", RETURNS_TTL, _compute_returns_payload),
-    ("vol_top_v2", VOL_TTL, compute_vol_top),
+    ("vol3_top", VOL_TTL, compute_vol2),
     ("qdii_us_v3", QDII_US_TTL, compute_qdii_us),
 ]
 
@@ -3190,18 +3218,57 @@ async def rank_qdii_us(session: Optional[str] = Cookie(default=None)):
             "excluded_low_coverage": payload.get("excluded_low_coverage", 0), "items": items}
 
 
-@app.get("/api/rank/vol")
-@app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.12.1 path)
-async def rank_vol(session: Optional[str] = Cookie(default=None)):
-    current_user_id(session)
-    got = await _board_payload("vol_top_v2", VOL_TTL, compute_vol_top)
+def _vol2_key(cat: str) -> str:
+    return "vol3_top" if cat == "all" else f"vol3_{cat}"
+
+
+async def _vol2_board(cat: str, window: str, sort_field: str, reverse: bool):
+    """Shared vol/ratio board logic (v1.19.2): serve the vol2_<cat> cache,
+    flatten the chosen window's metrics, sort, top 30. Returns a warming
+    JSONResponse when the cache is not ready yet."""
+    if window not in VOL_WINDOWS:
+        window = "1y"
+    key = _vol2_key(cat)
+    got = await _board_payload(key, VOL_TTL,
+                               lambda cat=cat: compute_vol2(cat))
     if got is None:
-        return _warming_response("vol_top_v2")
+        return _warming_response(key)
     payload, stale = got
-    items = [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]
-    return {"updated_at": payload["updated_at"], "total": payload["total"],
+    rows = []
+    for x in payload["items"]:
+        m = (x.get("w") or {}).get(window)
+        if not m or m.get(sort_field) is None:
+            continue
+        rows.append({"code": x["code"], "name": x["name"],
+                     "vol": m["vol"], "ret": m["ret"], "ratio": m["ratio"],
+                     "y1": x.get("y1"), "periods_hit": x.get("periods_hit")})
+    rows.sort(key=lambda r: r[sort_field], reverse=reverse)
+    items = [{"rank": i + 1, **r} for i, r in enumerate(rows[:30])]
+    return {"cat": payload.get("cat", cat), "window": window,
+            "updated_at": payload["updated_at"], "total": payload["total"],
             "pool_size": payload.get("pool_size", payload["total"]),
             "stale": stale, "items": items}
+
+
+@app.get("/api/rank/vol")
+@app.get("/api/rank/qdii-vol")  # legacy alias (pre-v1.12.1 path)
+async def rank_vol(cat: str = "all", window: str = "1y",
+                   session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    if cat not in RANK_CATS:
+        cat = "all"
+    # ascending: lower volatility ranks first (v1.18.3)
+    return await _vol2_board(cat, window, "vol", reverse=False)
+
+
+@app.get("/api/rank/ratio")
+async def rank_ratio(cat: str = "all", window: str = "1y",
+                     session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    if cat not in RANK_CATS:
+        cat = "all"
+    # descending: higher return-per-volatility ranks first (v1.19.2)
+    return await _vol2_board(cat, window, "ratio", reverse=True)
 
 
 @app.get("/")

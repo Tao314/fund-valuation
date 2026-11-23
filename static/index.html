@@ -141,6 +141,7 @@
   .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
   .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
   .rk-note { font-size: 12px; color: #98A2B3; line-height: 1.5; margin: 2px 2px 8px; }
+  .rk-explain { font-size: 12.5px; color: #667085; background: #F8F9FB; border: 1px solid #EAECF0; border-radius: 8px; padding: 8px 10px; line-height: 1.6; margin: 0 2px 10px; }
   .rank-warming { text-align: center; padding: 18px 0; }
   .rank-warming .dot { animation: rank-pulse 1.2s ease-in-out infinite; }
   @keyframes rank-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
@@ -231,6 +232,7 @@
           <button class="chip active" data-board="returns">涨幅榜</button>
           <button class="chip" data-board="us">美股占比（QDII）</button>
           <button class="chip" data-board="vol">波动率</button>
+          <button class="chip" data-board="ratio">收益波动比</button>
         </div>
         <div class="chip-row" id="rank-cats">
           <button class="chip active" data-cat="all">全部</button>
@@ -250,7 +252,14 @@
           <button class="chip active" data-period="1y">近1年</button>
           <button class="chip" data-period="ytd">今年来</button>
         </div>
+        <div class="chip-row" id="rank-windows" style="display:none">
+          <button class="chip" data-window="1m">近1月</button>
+          <button class="chip" data-window="3m">近3月</button>
+          <button class="chip" data-window="6m">近6月</button>
+          <button class="chip active" data-window="1y">近1年</button>
+        </div>
         <div class="rk-note" id="rank-note"></div>
+        <div class="rk-explain" id="rank-explain"></div>
         <div id="rank-list"></div>
         <div class="err" id="rank-err"></div>
         <div class="rk-updated" id="rank-updated"></div>
@@ -331,7 +340,7 @@
     </div>
   </div>
 </main>
-<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.19.0 · 更新于 2026-11-23 11:36</span></footer>
+<footer>自算估值，仅供参考，以基金公司公布净值为准。估值基于最新披露前十大重仓股实时涨跌加权计算，与实际净值可能有偏差。<br><span id="app-version">版本 v1.19.2 · 更新于 2026-11-23 12:10</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -604,8 +613,15 @@ $("admin-add-user-btn").onclick = async () => {
   } catch (e) { setAdminErr(e.message); }
 };
 /* ---- ranking view (v1.11.0) ---- */
-let rankBoard = "returns", rankPeriod = "1y", rankCat = "all";
+let rankBoard = "returns", rankPeriod = "1y", rankCat = "all", rankWindow = "1y";
 const CAT_LABELS = { all: "全部", gp: "股票型", hh: "混合型", zq: "债券型", zs: "指数型", qdii: "QDII", fof: "FOF" };
+const WINDOW_LABELS = { "1m": "近1月", "3m": "近3月", "6m": "近6月", "1y": "近1年" };
+const BOARD_EXPLAINS = {
+  returns: "数据来自东方财富全市场基金排行，按所选周期涨幅从高到低取前 30（选了分类就只在该分类内排），每 12 小时更新。用法：找近期强势的方向和品种；注意涨幅榜是事后排名，涨得多的未必能继续涨，适合用来发现候选、再结合波动率和收益波动比筛选。",
+  us: "池子是全部 QDII 基金（约 216 只），逐只取最新披露的前十大持仓，把其中美股持仓的权重加总就是美股占比（占基金净值），从高到低取前 30，每 7 天更新。用法：想配美股敞口时按占比选；只算前十大持仓，实际美股仓位可能更高。",
+  vol: "池子是所选分类涨幅榜 7 个周期前 30 合并去重（约 100–150 只），用每只基金的历史净值算日涨跌幅的标准差、年化（×√250）得到波动率，从低到高取前 30，每日更新；每个窗口有最低样本门槛（近1年至少 120 天）。用法：在涨得好的基金里挑拿得住的；债券型天然低、股票型天然高，同分类内比较才有意义；近1月窗口噪音大，长期性格看近1年。",
+  ratio: "与波动率榜同一池子：区间涨幅 ÷ 同期年化波动率，从高到低取前 30，每日更新。衡量每承担一份波动换来多少收益（类似夏普比率，越高越好）。用法：找涨得又好又稳的基金；注意只看过去、不代表未来，窗口越短越容易被单段行情带偏。",
+};
 const rankMem = {};  // in-memory cache per board+period for this session
 const PERIOD_KEY = { daily: "daily", "1w": "w1", "1m": "m1", "3m": "m3", "6m": "m6", "1y": "y1", ytd: "ytd" };
 function fmtLocalTime(iso) {
@@ -624,9 +640,14 @@ const RANK_NOTES = {
 };
 function updateRankNote(data) {
   let note;
-  if (rankBoard === "vol") {
+  if (rankBoard === "vol" || rankBoard === "ratio") {
     const poolSize = data ? data.pool_size : null;
-    note = "涨幅榜 7 个周期前 30 合并去重（共 " + (poolSize != null ? poolSize : "—") + " 只）中，按近 1 年年化波动率从低到高取前 30（波动越小越靠前）";
+    const scope = rankCat !== "all" ? CAT_LABELS[rankCat] + "基金涨幅榜" : "涨幅榜";
+    const win = WINDOW_LABELS[rankWindow] || "近1年";
+    note = scope + " 7 个周期前 30 合并去重（共 " + (poolSize != null ? poolSize : "—") + " 只）中，"
+      + (rankBoard === "vol"
+        ? "按" + win + "年化波动率从低到高取前 30（波动越小越靠前）"
+        : "按" + win + "收益波动比（区间涨幅 ÷ 年化波动率）从高到低取前 30（越高越靠前）");
   } else if (rankBoard === "returns" && rankCat !== "all") {
     const total = data && data.total != null ? "共 " + data.total + " 只，" : "";
     note = CAT_LABELS[rankCat] + "基金" + total + "按所选周期涨幅从高到低取前 30";
@@ -634,6 +655,7 @@ function updateRankNote(data) {
     note = RANK_NOTES[rankBoard] || "";
   }
   $("rank-note").textContent = note;
+  $("rank-explain").textContent = BOARD_EXPLAINS[rankBoard] || "";
 }
 function renderRank(data) {
   updateRankNote(data);
@@ -655,8 +677,18 @@ function renderRank(data) {
       if (it.y1 != null) parts.push("近1年 " + fmtDiff(it.y1));
       return rankRow(it, it.us_pct.toFixed(1) + "%", parts.join(" · "));
     }).join("");
+  } else if (rankBoard === "vol") {
+    const win = WINDOW_LABELS[rankWindow] || "近1年";
+    html = items.map(it => rankRow(it, it.vol.toFixed(2) + "%",
+      it.ret != null ? win + "涨幅 " + fmtDiff(it.ret) : "")).join("");
   } else {
-    html = items.map(it => rankRow(it, it.vol.toFixed(2) + "%", it.y1 != null ? "近1年 " + fmtDiff(it.y1) : "")).join("");
+    const win = WINDOW_LABELS[rankWindow] || "近1年";
+    html = items.map(it => {
+      const parts = [];
+      if (it.ret != null) parts.push(win + "涨幅 " + fmtDiff(it.ret));
+      if (it.vol != null) parts.push("波动 " + it.vol.toFixed(2) + "%");
+      return rankRow(it, it.ratio != null ? it.ratio.toFixed(2) : "-", parts.join(" · "));
+    }).join("");
   }
   $("rank-list").innerHTML = html || '<div class="muted">暂无数据</div>';
   $("rank-updated").textContent = "数据来源：东方财富 · 更新于 " + fmtLocalTime(data.updated_at) + (data.stale ? " · 数据更新中" : "");
@@ -667,7 +699,9 @@ function etaText(sec) { return sec < 60 ? "不到 1 分钟" : "约 " + Math.ceil
 async function loadRank() {
   stopRankPoll();
   updateRankNote(null);
-  const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod + ":" + rankCat : rankBoard;
+  const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod + ":" + rankCat
+    : (rankBoard === "vol" || rankBoard === "ratio") ? rankBoard + ":" + rankCat + ":" + rankWindow
+    : rankBoard;
   $("rank-err").textContent = "";
   if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
   $("rank-list").innerHTML = '<div class="muted">加载中…</div>';
@@ -675,12 +709,14 @@ async function loadRank() {
   await fetchRank(cacheKey);
 }
 async function fetchRank(cacheKey) {
-  const board = rankBoard, period = rankPeriod, cat = rankCat;
+  const board = rankBoard, period = rankPeriod, cat = rankCat, win = rankWindow;
   try {
     const url = board === "returns" ? "/api/rank/returns?period=" + period + "&cat=" + cat
-      : board === "us" ? "/api/rank/qdii-us" : "/api/rank/vol";
+      : board === "us" ? "/api/rank/qdii-us"
+      : board === "ratio" ? "/api/rank/ratio?cat=" + cat + "&window=" + win
+      : "/api/rank/vol?cat=" + cat + "&window=" + win;
     const data = await api(url);
-    if (board !== rankBoard || period !== rankPeriod || cat !== rankCat) return;  // user switched meanwhile
+    if (board !== rankBoard || period !== rankPeriod || cat !== rankCat || win !== rankWindow) return;  // user switched meanwhile
     if (data.warming) {
       $("rank-list").innerHTML = '<div class="muted rank-warming">数据正在准备中，预计还需' + etaText(data.eta_seconds || 60) + '<span class="dot">…</span></div>';
       $("rank-updated").textContent = "";
@@ -702,7 +738,15 @@ document.querySelectorAll("#rank-boards .chip").forEach(b => {
     rankBoard = b.dataset.board;
     document.querySelectorAll("#rank-boards .chip").forEach(x => x.classList.toggle("active", x === b));
     $("rank-periods").style.display = rankBoard === "returns" ? "" : "none";
-    $("rank-cats").style.display = rankBoard === "returns" ? "" : "none";
+    $("rank-windows").style.display = (rankBoard === "vol" || rankBoard === "ratio") ? "" : "none";
+    $("rank-cats").style.display = (rankBoard === "returns" || rankBoard === "vol" || rankBoard === "ratio") ? "" : "none";
+    loadRank();
+  };
+});
+document.querySelectorAll("#rank-windows .chip").forEach(b => {
+  b.onclick = () => {
+    rankWindow = b.dataset.window;
+    document.querySelectorAll("#rank-windows .chip").forEach(x => x.classList.toggle("active", x === b));
     loadRank();
   };
 });
