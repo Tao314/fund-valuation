@@ -42,9 +42,13 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.20.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.20.1"  # keep in sync with the footer in static/index.html
 
-# --- Email verification codes (v1.20.0) ---
+# --- Email verification codes (v1.20.0, feature-flagged in v1.20.1) ---
+# EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
+# registration is username+password only, so a broken SMTP setup can never
+# block customers from registering.
+EMAIL_AUTH = os.environ.get("EMAIL_AUTH", "0").strip() == "1"
 # SMTP config comes from environment variables only (never committed).
 # When SMTP_HOST is empty the app runs in LOG MODE: codes are written to
 # the server log instead of being emailed, so the flow is testable before
@@ -314,6 +318,11 @@ def _log_login(conn, username: str, user_id, success: bool, request: Request):
 
 
 # --- email verification codes (v1.20.0) ---
+def _require_email_auth():
+    if not EMAIL_AUTH:
+        raise HTTPException(404, "功能未启用")
+
+
 def _norm_email(email: str) -> str:
     email = (email or "").strip().lower()
     if not EMAIL_RE.match(email):
@@ -388,6 +397,7 @@ def _issue_code(conn, email: str, purpose: str):
     try:
         _send_code_mail(email, purpose, code)
     except Exception:
+        logger.exception("email code send failed")
         # Roll back the issued code so the user can retry immediately.
         conn.execute("DELETE FROM email_codes WHERE email=? AND purpose=?", (email, purpose))
         conn.execute(
@@ -489,8 +499,10 @@ class SendCodeBody(BaseModel):
 class RegisterBody(BaseModel):
     username: str
     password: str
-    email: str
-    code: str
+    # Optional so username+password registration works when EMAIL_AUTH is
+    # off; when EMAIL_AUTH=1 both are required and verified in register().
+    email: str = ""
+    code: str = ""
 
 
 class ResetPasswordBody(BaseModel):
@@ -504,8 +516,16 @@ class BindEmailBody(BaseModel):
     code: str
 
 
+@app.get("/api/config")
+def public_config():
+    # Unauthenticated bootstrap config for the frontend (the register form
+    # is shown before login, so /api/me alone cannot carry this flag).
+    return {"email_auth": EMAIL_AUTH, "version": APP_VERSION}
+
+
 @app.post("/api/email/send-code")
 def send_email_code(body: SendCodeBody, session: Optional[str] = Cookie(default=None)):
+    _require_email_auth()
     email = _norm_email(body.email)
     purpose = (body.purpose or "").strip()
     if purpose not in ("register", "reset", "bind"):
@@ -537,16 +557,19 @@ def register(body: RegisterBody, response: Response):
         raise HTTPException(400, "用户名需 3-32 个字符")
     if len(body.password) < 6:
         raise HTTPException(400, "密码至少 6 位")
-    email = _norm_email(body.email)
+    # EMAIL_AUTH off (default): plain username+password registration; any
+    # email/code in the body is ignored. On: v1.20.0 verified-email flow.
+    email = _norm_email(body.email) if EMAIL_AUTH else None
     with db() as conn:
-        _verify_code(conn, email, "register", body.code)
+        if EMAIL_AUTH:
+            _verify_code(conn, email, "register", body.code)
         try:
             cur = conn.execute(
                 "INSERT INTO users(username, password_hash, created_at, email) VALUES(?,?,?,?)",
                 (username, hash_password(body.password), now_iso(), email),
             )
         except sqlite3.IntegrityError:
-            raise HTTPException(409, "用户名或邮箱已存在")
+            raise HTTPException(409, "用户名或邮箱已存在" if EMAIL_AUTH else "用户名已存在")
         user_id = cur.lastrowid
         token = secrets.token_urlsafe(32)
         conn.execute("INSERT INTO sessions(token, user_id, created_at) VALUES(?,?,?)", (token, user_id, now_iso()))
@@ -556,6 +579,7 @@ def register(body: RegisterBody, response: Response):
 
 @app.post("/api/password/reset")
 def reset_password(body: ResetPasswordBody):
+    _require_email_auth()
     email = _norm_email(body.email)
     if len(body.new_password) < 6:
         raise HTTPException(400, "密码至少 6 位")
@@ -571,6 +595,7 @@ def reset_password(body: ResetPasswordBody):
 
 @app.post("/api/email/bind")
 def bind_email(body: BindEmailBody, session: Optional[str] = Cookie(default=None)):
+    _require_email_auth()
     uid = current_user_id(session)
     email = _norm_email(body.email)
     with db() as conn:
@@ -616,7 +641,7 @@ def me(session: Optional[str] = Cookie(default=None)):
     with db() as conn:
         row = conn.execute("SELECT username, is_admin, email FROM users WHERE id=?", (uid,)).fetchone()
     return {"user_id": uid, "username": row["username"], "is_admin": bool(row["is_admin"]),
-            "email": row["email"]}
+            "email": row["email"], "email_auth": EMAIL_AUTH}
 
 
 @app.get("/api/settings")

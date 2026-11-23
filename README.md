@@ -11,7 +11,7 @@
 - **特殊基金**：ETF 联接基金按跟踪指数估值；债券基金按十年国债 ETF 涨跌估算；香港互认基金（968/969xxx）可搜索添加并显示净值
 - **排行榜**：涨幅榜（全市场及股票/混合/债券/指数/QDII/FOF 分类，7 个周期）、美股占比榜（QDII，美股权重占净值比例）、波动率榜（近1月/近3月/近6月/近1年四档年化波动率，从低到高，可按基金分类筛选）、收益波动比榜（区间涨幅 ÷ 波动率，四档窗口），每个榜单附用途解释
 - **多用户与管理**：账号密码登录、每人独立自选与分类；管理员可管理用户、查看登录记录
-- **邮箱注册与找回密码**：注册需邮箱验证码（6 位、10 分钟有效），忘记密码可通过邮箱验证码重置，老用户可绑定邮箱；验证码有发送频率与尝试次数限制
+- **邮箱验证（可选，默认关闭）**：默认用户名+密码注册；设置 `EMAIL_AUTH=1` 后启用邮箱验证码注册（6 位、10 分钟有效）、邮箱找回密码与老用户绑定邮箱，验证码有发送频率与尝试次数限制；SMTP 未调通时保持默认关闭即可，不影响客户注册
 - **系统备份与恢复**（管理员）：每天 0 点自动备份、保留 10 份，备份文件 gzip 压缩，可手动备份、下载、恢复；恢复时自动迁移，老版本备份可恢复到新系统
 - **秒开体验**：服务端缓存 + 后台预热（行情、曲线、榜单、估值），页面先出缓存再更新，增删基金即时生效
 - **手机适配**：单文件前端、无构建，360px 窄屏不撑破，基金名完整显示
@@ -115,10 +115,11 @@ rm -rf /opt/fund-valuation
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | /api/email/send-code | 发送邮箱验证码 {email, purpose: register/reset/bind}（60 秒冷却、每天 10 次上限） |
-| POST | /api/register | 注册 {username, password, email, code}，成功自动登录 |
-| POST | /api/password/reset | 邮箱验证码重置密码 {email, code, new_password}，成功后全部会话失效 |
-| POST | /api/email/bind | 老用户绑定邮箱 {email, code}（需登录，仅未绑定时） |
+| GET | /api/config | 前端启动配置（无需登录）：{email_auth, version} |
+| POST | /api/email/send-code | 发送邮箱验证码 {email, purpose: register/reset/bind}（60 秒冷却、每天 10 次上限；仅 EMAIL_AUTH=1 时可用，否则 404） |
+| POST | /api/register | 注册：默认 {username, password}；EMAIL_AUTH=1 时另需 {email, code}，成功自动登录 |
+| POST | /api/password/reset | 邮箱验证码重置密码 {email, code, new_password}，成功后全部会话失效（仅 EMAIL_AUTH=1 时可用，否则 404） |
+| POST | /api/email/bind | 老用户绑定邮箱 {email, code}（需登录，仅未绑定时；仅 EMAIL_AUTH=1 时可用，否则 404） |
 | POST | /api/login | 登录，返回 HttpOnly 会话 Cookie |
 | POST | /api/logout | 退出 |
 | GET | /api/me | 当前用户 |
@@ -157,13 +158,16 @@ rm -rf /opt/fund-valuation
 - `static/index.html` 前端
 - `requirements.txt` fastapi / uvicorn / httpx
 - `install.sh` Debian 13 一键安装（venv + systemd 服务）
+- `tools/smtp_test.py` 独立 SMTP 发信测试（见「部署配置」）
+- `tools/backtest.py` 估值回测基线（见 backtest-report.md）
 
-## 部署配置（邮箱验证码，v1.20.0）
+## 部署配置（邮箱验证码，可选，默认关闭）
 
-注册/找回密码的验证码邮件走 SMTP，配置只从环境变量读取（不写进代码仓库）。未配置 `SMTP_HOST` 时进入日志模式：验证码只写服务日志（`[email-code] to=... code=...`），便于本地测试；正式部署请配齐以下变量后重启服务：
+邮箱验证码功能由 `EMAIL_AUTH` 开关控制，**默认关闭**（用户名+密码注册，页面不显示邮箱相关入口，邮箱接口返回 404）。确认 SMTP 可用后再设 `EMAIL_AUTH=1` 开启。开启后注册/找回密码的验证码邮件走 SMTP，配置只从环境变量读取（不写进代码仓库）。未配置 `SMTP_HOST` 时进入日志模式：验证码只写服务日志（`[email-code] to=... code=...`），便于本地测试；正式部署请配齐以下变量后重启服务：
 
 | 变量 | 说明 |
 |---|---|
+| `EMAIL_AUTH` | 邮箱验证开关：`1`=开启（邮箱验证码注册/找回/绑定），缺省或 `0`=关闭（用户名+密码注册） |
 | `SMTP_HOST` | SMTP 服务器地址，如 `smtp.example.com` |
 | `SMTP_PORT` | 端口，默认 465 |
 | `SMTP_USER` | SMTP 登录账号 |
@@ -183,7 +187,22 @@ Environment=SMTP_FROM=noreply@example.com
 
 改完 `systemctl daemon-reload && systemctl restart fund-valuation` 生效。验证码规则：6 位数字、10 分钟有效、同邮箱同用途 60 秒内只能发一次、每天最多 10 次、输错 5 次作废。
 
+开启 `EMAIL_AUTH=1` 前，先单独测发信（不依赖网页）：
+
+```bash
+cd /opt/fund-valuation
+python3 tools/smtp_test.py 你的收件邮箱@example.com
+```
+
+脚本从环境变量读 SMTP 配置；环境变量里没有 `SMTP_HOST` 时自动读 `/etc/systemd/system/fund-valuation.service.d/smtp.conf`。它逐步打印连接/登录/发送结果，失败时打印异常类型与信息（不打印密码）；`--verbose` 会打开 SMTP 调试输出（内含编码后的凭据，切勿粘贴外发）。测通后再把 `EMAIL_AUTH=1` 加到服务环境变量并重启。
+
 ## 版本演变
+
+### v1.20.1（2026-11-23）
+
+- 邮箱验证改为可选开关 `EMAIL_AUTH`，**默认关闭**：关闭时恢复用户名+密码注册，页面隐藏邮箱/验证码/忘记密码/绑定入口，邮箱接口返回 404；设 `EMAIL_AUTH=1` 后恢复 v1.20.0 全部邮箱流程。前端通过新增的公开接口 `GET /api/config` 读取开关（`/api/me` 也带 `email_auth` 字段）
+- 新增独立发信测试工具 `tools/smtp_test.py`：单独验证 SMTP 连接/登录/发送，不依赖网页注册流程
+- 验证码发送失败时服务日志记录异常堆栈（此前只返回 502 无日志）
 
 ### v1.20.0（2026-11-23）
 
