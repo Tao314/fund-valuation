@@ -92,18 +92,6 @@
   .ds-badge.none { background: #ECEEF2; color: #667085; }
   .ds-badge.fb { background: #EBF1FF; color: #2563EB; }
   .ds-badge.nofb { background: #FEF3C7; color: #B45309; }
-  /* customer data status (v1.4.9): top pill + alert bar + detail cards */
-  .ds-dot.warn { background: #D97706; }
-  .ds-badge.warn { background: transparent; color: #B45309; border: 1px solid #D97706; }
-  .ds-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: none; }
-  .ds-pill .ds-dot { margin-right: 0; }
-  .ds-svc { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
-  .ds-svc:last-child { border-bottom: none; }
-  .ds-svc .ds-svc-name { font-size: 14px; font-weight: 600; color: #202939; }
-  .ds-svc .ds-svc-desc { font-size: 12px; color: #667085; margin-top: 2px; }
-  .ds-svc .ds-svc-msg { font-size: 12px; color: #667085; margin-top: 2px; }
-  .ds-svc .ds-svc-right { text-align: right; flex: none; }
-  .ds-svc .ds-svc-time { font-size: 11px; color: #98A2B3; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .ft-dir > summary { cursor: pointer; list-style: none; }
   .ft-dir > summary::-webkit-details-marker { display: none; }
   .ft-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #475467; padding: 3px 0; border-bottom: 1px solid #F0F2F5; min-width: 0; }
@@ -318,7 +306,6 @@
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
         <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
-        <button class="ds-pill" id="ds-pill" title="数据服务状态"><span class="ds-dot ok" id="ds-pill-dot"></span><span id="ds-pill-text">数据状态</span></button>
         <div class="sort-toggle">
           <button class="secondary active" id="sort-default">默认顺序</button>
           <button class="secondary" id="sort-change">按涨跌幅</button>
@@ -346,13 +333,6 @@
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">加载中…</div>
         <div class="err" id="dash-err"></div>
-      </div>
-    </div>
-
-    <div id="view-datastatus" style="display:none">
-      <div class="card">
-        <h3>数据服务状态</h3>
-        <div id="ds-detail"><div class="muted">加载中…</div></div>
       </div>
     </div>
 
@@ -780,7 +760,6 @@ function showView(name) {
   $("view-admin").style.display = name === "admin" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
   $("view-evo").style.display = name === "evo" ? "" : "none";
-  $("view-datastatus").style.display = name === "datastatus" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
@@ -790,7 +769,6 @@ function showView(name) {
   if (name === "rank") loadRank(); else stopRankPoll();
   if (name !== "admin") stopStatusTimer();
   if (name === "admin") loadAdmin();
-  if (name === "datastatus") loadDataStatus();
 }
 $("nav-main").onclick = () => showView("main");
 $("nav-rank").onclick = () => showView("rank");
@@ -2052,35 +2030,6 @@ function applyDataFlow(ok) {
   const b = $("dataflow-banner");
   if (b) b.style.display = ok === false ? "" : "none";
 }
-/* ---- customer data status (v1.4.9): business names only, whitelist
-   fields from GET /api/data-status — no provider/interface ever reaches
-   the client. Four levels: 正常 / 更新延迟 / 部分异常 / 暂不可用. */
-let dataStatusCache = null;
-const DS_TEXT = { normal: "数据正常", delayed: "数据延迟", degraded: "部分异常", outage: "暂不可用" };
-const DS_BADGE = { normal: "ok", delayed: "warn", degraded: "warn", outage: "bad" };
-function dsStatusText(s) { return DS_TEXT[s] || "数据正常"; }
-async function loadDataStatus() {
-  try {
-    const d = await api("/api/data-status");
-    dataStatusCache = d;
-    const dot = $("ds-pill-dot");
-    if (dot) dot.className = "ds-dot " + (DS_BADGE[d.overall_status] || "ok");
-    if ($("view-datastatus").style.display !== "none") renderDataStatusDetail(d);
-  } catch { /* stays on last known state; estimates refresh retries */ }
-}
-function renderDataStatusDetail(d) {
-  const rows = (d.services || []).map(s =>
-    '<div class="ds-svc"><div><div class="ds-svc-name">' + esc(s.name) + '</div>' +
-    '<div class="ds-svc-desc">' + esc(s.desc) + '</div>' +
-    '<div class="ds-svc-msg">' + esc(s.message) + '</div></div>' +
-    '<div class="ds-svc-right"><span class="ds-badge ' + (DS_BADGE[s.status] || "ok") + '">' + dsStatusText(s.status) + '</span>' +
-    '<div class="ds-svc-time">' + (s.updated_at ? "最近更新 " + fmtLocalTime(s.updated_at) : "暂无记录") + '</div></div></div>').join("");
-  $("ds-detail").innerHTML =
-    '<div style="font-size:14px;font-weight:600;margin-bottom:2px">' + esc(d.overall_message) + '</div>' +
-    '<div class="muted" style="margin-bottom:6px">最近状态检查 ' + fmtLocalTime(d.checked_at) + '</div>' + rows +
-    '<div class="muted" style="margin-top:10px;font-size:11.5px">数据服务状态仅反映数据获取及更新情况，不代表基金估值的准确性，实际净值以基金管理人公布的数据为准。</div>';
-}
-$("ds-pill").onclick = () => showView("datastatus");
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
@@ -2092,7 +2041,6 @@ async function loadEstimates() {
     const data = await api("/api/estimates");
     window.estimateData = data;
     applyDataFlow(data.data_flow_ok);
-    loadDataStatus();  // top pill + alert bar; never rejects
     if (data.refresh_seconds && data.refresh_seconds !== refreshSeconds) {
       refreshSeconds = data.refresh_seconds;
       startAutoRefresh(); resetCountdown();
