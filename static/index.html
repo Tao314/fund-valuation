@@ -139,7 +139,38 @@
   .fund-card .fc-pub { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
   .fund-card .fc-diff { font-size: 11px; color: #98A2B3; }
   .fund-card .fc-spark { position: relative; margin-top: 8px; }
-  .fund-card .fc-spark svg { display: block; width: 100%; height: 44px; }
+  .fund-card .fc-spark svg { display: block; width: 100%; height: 80px; }
+  .fund-card { cursor: pointer; }
+  /* fund detail page (v1.5.0) */
+  .dt-top { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center; padding: 10px 0 4px; }
+  .dt-top .dt-label { font-size: 12px; color: #667085; }
+  .dt-top .dt-val { font-size: 19px; font-weight: 700; margin-top: 3px; color: #202939; }
+  .dt-top .dt-val small { font-size: 11px; color: #98A2B3; font-weight: 400; }
+  .dt-tabs { display: flex; gap: 8px; margin: 12px 0 10px; }
+  .dt-chart { position: relative; }
+  .dt-chart svg { display: block; width: 100%; height: 170px; }
+  .dt-chart .sp-max, .dt-chart .sp-min { position: absolute; left: 2px; font-size: 11px; color: #98A2B3; }
+  .dt-chart .sp-max { top: 0; } .dt-chart .sp-min { bottom: 16px; }
+  .dt-chart .sp-loading { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); font-size: 12px; color: #98A2B3; }
+  .dt-chart .sp-dot { position: absolute; width: 7px; height: 7px; border-radius: 50%; transform: translate(-50%, -50%); }
+  .dt-times { display: flex; justify-content: space-between; font-size: 11px; color: #98A2B3; padding-top: 2px; }
+  .dt-legend { font-size: 12px; color: #667085; display: flex; gap: 14px; flex-wrap: wrap; margin: 4px 0 6px; }
+  .dt-table { max-height: 320px; overflow-y: auto; margin-top: 8px; }
+  .dt-row { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #F0F2F5; font-size: 13px; color: #202939; }
+  .dt-row .dt-chg { font-variant-numeric: tabular-nums; }
+  .dt-bar-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+  .dt-bar-name { width: 72px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #202939; }
+  .dt-bar-track { flex: 1; height: 10px; background: #EEF0F3; border-radius: 5px; overflow: hidden; }
+  .dt-bar-fill { height: 100%; background: #2563EB; border-radius: 5px; }
+  .dt-bar-val { width: 76px; text-align: right; flex: none; color: #475467; font-variant-numeric: tabular-nums; }
+  .flow-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid #F0F2F5; }
+  .flow-row .rk-num { flex: none; width: 22px; text-align: center; font-weight: 700; color: #667085; }
+  .flow-row .rk-num.top { color: #C9362B; }
+  .flow-row .rk-main { flex: 1; min-width: 0; }
+  .flow-row .rk-name { font-size: 14px; font-weight: 600; color: #202939; }
+  .flow-row .rk-sub { font-size: 11.5px; color: #98A2B3; margin-top: 1px; }
+  .flow-row .rk-val { text-align: right; flex: none; font-weight: 700; font-size: 15px; color: #202939; font-variant-numeric: tabular-nums; }
+  .flow-row .rk-val small { display: block; font-size: 11px; font-weight: 400; color: #667085; }
   .fund-card .fc-spark .sp-max, .fund-card .fc-spark .sp-min { position: absolute; left: 0; font-size: 10px; line-height: 1; color: #98A2B3; font-variant-numeric: tabular-nums; pointer-events: none; }
   .fund-card .fc-spark .sp-max { top: 0; }
   .fund-card .fc-spark .sp-min { top: 34px; }
@@ -336,6 +367,42 @@
       </div>
     </div>
 
+    <div id="view-detail" style="display:none">
+      <div class="card">
+        <div class="row"><button class="secondary" id="detail-back" style="flex:none">‹ 返回</button><span class="muted" id="detail-updated"></span></div>
+        <h3 id="detail-name" style="word-break:break-all">—</h3>
+        <div class="muted" id="detail-sub"></div>
+        <div class="dt-top" id="detail-top"></div>
+        <div class="dt-tabs">
+          <button class="tab-btn active" id="dt-tab-perf">业绩走势</button>
+          <button class="tab-btn" id="dt-tab-sector">关联板块</button>
+        </div>
+        <div id="dt-perf">
+          <div class="chip-row" id="dt-windows">
+            <button class="chip active" data-window="1m">近1月</button>
+            <button class="chip" data-window="3m">近3月</button>
+            <button class="chip" data-window="6m">近6月</button>
+            <button class="chip" data-window="1y">近1年</button>
+            <button class="chip" data-window="3y">近3年</button>
+          </div>
+          <div class="dt-legend"><span><span style="color:#2563EB">—</span> 本基金 <b id="dt-fund-ret">—</b></span><span><span style="color:#D97706">—</span> 沪深300 <b id="dt-hs-ret">—</b></span></div>
+          <div class="dt-chart" id="dt-chart"><div class="muted">加载中…</div></div>
+          <div class="dt-table" id="dt-nav-table"></div>
+        </div>
+        <div id="dt-sector" style="display:none">
+          <div class="muted" id="dt-index-line" style="margin-bottom:6px"></div>
+          <div class="dt-chart" id="dt-intraday"><div class="muted">加载中…</div></div>
+          <div class="row" style="margin-top:8px">
+            <button class="secondary" id="dt-share-btn" style="flex:none">分享走势图</button>
+            <span class="muted" id="dt-share-msg"></span>
+          </div>
+          <div class="muted" id="dt-cat-line" style="margin-top:6px"></div>
+        </div>
+        <h4 style="margin-top:14px">行业分布</h4>
+        <div id="dt-industries"><div class="muted">加载中…</div></div>
+      </div>
+    </div>
+
     <div id="view-rank" style="display:none">
       <div class="card">
         <div class="chip-row" id="rank-boards">
@@ -343,6 +410,7 @@
           <button class="chip" data-board="us">美股占比（QDII）</button>
           <button class="chip" data-board="vol">波动率</button>
           <button class="chip" data-board="ratio">收益波动比</button>
+          <button class="chip" data-board="flow">板块资金流</button>
         </div>
         <div class="chip-row" id="rank-cats">
           <button class="chip active" data-cat="all">全部</button>
@@ -532,6 +600,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.5.0</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">单个基金详情页：点卡片进入，当日涨幅/近1年涨幅/持有人数与库内排名；业绩走势（本基金 vs 沪深300，近1月/3月/6月/1年/3年切换+净值表）；关联板块改为基金当日估值走势，可分享成图片；行业分布条形图；排行榜新增板块资金流榜（东财行业板块主力净流入）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.9</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">修复盘前净值标签与估值基数：净值日期按日历日判定（昨日净值不再叫今日净值），盘前曲线不再显示昨日分时（显示「今日尚未开盘」），自算估值始终以最新已公布净值为基数；本地缓存（估值/曲线）按日历日校验，隔夜缓存不再首屏误显；客户数据状态：估值页顶部指示灯（数据正常/部分异常/暂不可用）+「数据服务状态」详情页（行情数据/基金净值/估值服务三类业务状态），后端单独白名单接口，不透露任何供应商与接口信息</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.8</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">同花顺兜底补齐：A股日线（东财日线失败时）、A股实时行情（新浪失败时）、基金行业配置（F10 行业失败时，仅显示行业与占比）；港美股日线/行情、基金搜索、排行榜仍无独立兜底</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.7</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">接入同花顺官方接口作净值/持仓/股票仓位兜底（东财失败时自动切换）；「数据接口」页按数据类型分组卡片展示，一眼看出每组有无兜底、是否异常；用户管理按注册顺序编号</div></div></div>
@@ -551,7 +620,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.9 · 更新于 2026-11-24 09:45</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.5.0 · 更新于 2026-11-24 11:37</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -760,6 +829,7 @@ function showView(name) {
   $("view-admin").style.display = name === "admin" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
   $("view-evo").style.display = name === "evo" ? "" : "none";
+  $("view-detail").style.display = name === "detail" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
@@ -1093,6 +1163,7 @@ const BOARD_EXPLAINS = {
   returns: "数据来自东方财富全市场基金排行，按所选周期涨幅从高到低取前 30（选了分类就只在该分类内排），每 12 小时更新。用法：找近期强势的方向和品种；注意涨幅榜是事后排名，涨得多的未必能继续涨，适合用来发现候选、再结合波动率和收益波动比筛选。",
   us: "池子是全部 QDII 基金（约 216 只），逐只取最新披露的前十大持仓，把其中美股持仓的权重加总就是美股占比（占基金净值），从高到低取前 30，每 7 天更新。用法：想配美股敞口时按占比选；只算前十大持仓，实际美股仓位可能更高。",
   vol: "池子是所选分类涨幅榜 7 个周期前 30 合并去重（约 100–150 只），用每只基金的历史净值算日涨跌幅的标准差、年化（×√250）得到波动率，从低到高取前 30，每日更新；每个窗口有最低样本门槛（近1年至少 120 天）。用法：在涨得好的基金里挑拿得住的；债券型天然低、股票型天然高，同分类内比较才有意义；近1月窗口噪音大，长期性格看近1年。",
+  flow: "行业板块（申万/东财行业口径，约 100 个板块）按今日主力净流入（超大单+大单主动性净额）从高到低取前 50，每 60 秒更新。用法：看钱在往哪些板块流、从哪些板块出；流入不等于会涨，单日读数要连着看几天。数据来自东方财富板块资金流。",
   ratio: "与波动率榜同一池子：区间涨幅 ÷ 同期年化波动率，从高到低取前 30，每日更新。衡量每承担一份波动换来多少收益（类似夏普比率，越高越好）。用法：找涨得又好又稳的基金；注意只看过去、不代表未来，窗口越短越容易被单段行情带偏。",
 };
 const rankMem = {};  // in-memory cache per board+period for this session
@@ -1152,6 +1223,7 @@ async function rankAdd(code, btn) {
   }
 }
 const RANK_NOTES = {
+  flow: "行业板块按今日主力净流入从高到低取前 50（亿元）",
   returns: "东方财富全市场基金（约 2 万只），按所选周期涨幅从高到低取前 30",
   us: "QDII 基金中，按最新披露前十大持仓的美股权重占基金净值比例从高到低取前 30；前十大覆盖率低于 5% 的不入榜",
 };
@@ -1187,6 +1259,10 @@ function renderRank(data) {
       if (it.date) parts.push(it.date);
       return rankRow(it, fmtPct(it[key]), parts.join(" · "));
     }).join("");
+  } else if (rankBoard === "flow") {
+    html = items.map(it => `<div class="flow-row"><div class="rk-num${it.rank <= 3 ? " top" : ""}">${it.rank}</div>`
+      + `<div class="rk-main"><div class="rk-name">${esc(it.name)}</div><div class="rk-sub">今日涨跌 ${fmtDiff(it.change_pct)}</div></div>`
+      + `<div class="rk-val">${it.main_net != null ? (it.main_net > 0 ? "+" : "") + it.main_net.toFixed(2) + "亿" : "-"}<small>主力净流入</small></div></div>`).join("");
   } else if (rankBoard === "us") {
     html = items.map(it => {
       const parts = [];
@@ -1220,6 +1296,7 @@ async function loadRank() {
   const cacheKey = rankBoard === "returns" ? "returns:" + rankPeriod + ":" + rankCat
     : (rankBoard === "vol" || rankBoard === "ratio") ? rankBoard + ":" + rankCat + ":" + rankWindow
     : rankBoard;
+  if (rankBoard === "flow") { $("rank-periods").style.display = "none"; $("rank-windows").style.display = "none"; $("rank-cats").style.display = "none"; }
   $("rank-err").textContent = "";
   if (rankMem[cacheKey]) { renderRank(rankMem[cacheKey]); return; }
   $("rank-list").innerHTML = '<div class="muted">加载中…</div>';
@@ -1231,6 +1308,7 @@ async function fetchRank(cacheKey) {
   try {
     const url = board === "returns" ? "/api/rank/returns?period=" + period + "&cat=" + cat
       : board === "us" ? "/api/rank/qdii-us"
+      : board === "flow" ? "/api/rank/sector-flow"
       : board === "ratio" ? "/api/rank/ratio?cat=" + cat + "&window=" + win
       : "/api/rank/vol?cat=" + cat + "&window=" + win;
     const data = await api(url);
@@ -1705,7 +1783,7 @@ function sparklineHtml(f, published, preopen) {
   const t0 = segs ? segs[0][0] : pts[0][0];
   const t1 = segs ? segs[segs.length - 1][1] : pts[pts.length - 1][0];
   const totalMins = segs ? segs.reduce((a, s) => a + (s[1] - s[0]) / 60, 0) : 0;
-  const W = 100, H = 44, YT = 2, YB = 42;
+  const W = 100, H = 80, YT = 2, YB = 78;
   const X = p => {
     if (segs && totalMins > 0) return Math.max(0, Math.min(W, tradingMinutesAt(p[0], segs) / totalMins * W));
     const tSpan = t1 - t0;
@@ -1771,6 +1849,249 @@ function sparklineHtml(f, published, preopen) {
     <div class="sp-times"><span class="sp-t-first">${fmtHM(t0)}</span>${joinLabels}<span class="sp-t-last">${fmtHM(t1)}</span></div>
   </div>`;
 }
+/* ---- fund detail page (v1.5.0) ---- */
+let detailCode = null, detailData = null, detailWindow = "1m", detailTab = "perf";
+const DT_WINDOWS = { "1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095 };
+function fmtHolders(n) {
+  if (n == null) return "—";
+  return n >= 10000 ? (n / 10000).toFixed(1) + "万户" : n.toLocaleString("zh-CN") + "户";
+}
+function openDetail(code) {
+  detailCode = code; detailData = null; detailTab = "perf";
+  $("dt-tab-perf").className = "tab-btn active";
+  $("dt-tab-sector").className = "tab-btn";
+  $("dt-perf").style.display = "";
+  $("dt-sector").style.display = "none";
+  const f = (currentFunds || []).find(x => x.fund_code === code);
+  $("detail-name").textContent = (f ? f.fund_name : code) + " " + code;
+  $("detail-sub").textContent = "";
+  $("detail-top").innerHTML = '<div class="muted">加载中…</div>';
+  $("dt-chart").innerHTML = '<div class="muted">加载中…</div>';
+  $("dt-nav-table").innerHTML = "";
+  $("dt-intraday").innerHTML = '<div class="muted">加载中…</div>';
+  $("dt-industries").innerHTML = '<div class="muted">加载中…</div>';
+  $("dt-index-line").textContent = "";
+  $("dt-cat-line").textContent = "";
+  $("dt-share-msg").textContent = "";
+  showView("detail");
+  loadDetail(code);
+}
+$("detail-back").onclick = () => showView("main");
+$("dt-tab-perf").onclick = () => { detailTab = "perf"; $("dt-tab-perf").className = "tab-btn active"; $("dt-tab-sector").className = "tab-btn"; $("dt-perf").style.display = ""; $("dt-sector").style.display = "none"; };
+$("dt-tab-sector").onclick = () => { detailTab = "sector"; $("dt-tab-sector").className = "tab-btn active"; $("dt-tab-perf").className = "tab-btn"; $("dt-sector").style.display = ""; $("dt-perf").style.display = "none"; renderSector(); };
+document.querySelectorAll("#dt-windows .chip").forEach(b => {
+  b.onclick = () => {
+    detailWindow = b.dataset.window;
+    document.querySelectorAll("#dt-windows .chip").forEach(x => x.classList.toggle("active", x === b));
+    renderPerf();
+  };
+});
+async function loadDetail(code) {
+  try {
+    const d = await api("/api/fund/" + code);
+    if (code !== detailCode) return;
+    detailData = d;
+    renderDetail();
+    // Cold fund: NAV history is still fetching in the background —
+    // show the warming hint and poll, so the page never sits empty.
+    if (d.warming) {
+      $("dt-chart").innerHTML = '<div class="muted rank-warming">历史净值正在准备中<span class="dot">…</span></div>';
+      setTimeout(() => { if (code === detailCode) loadDetail(code); }, 15000);
+    }
+    // Intraday series for the 关联板块 tab: reuse the already-loaded
+    // history; fetch it if this fund has no points yet.
+    if (!historySeries[code] || !historySeries[code].length) {
+      await loadHistory();
+      if (code === detailCode && detailTab === "sector") renderSector();
+    }
+  } catch (e) {
+    if (code !== detailCode) return;
+    $("detail-top").innerHTML = '<div class="muted">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+function renderDetail() {
+  const d = detailData; if (!d) return;
+  $("detail-name").textContent = d.fund_name + " " + d.fund_code;
+  $("detail-sub").textContent = [d.fund_type || "", d.report_label || "", d.report_date || ""].filter(Boolean).join(" · ");
+  $("detail-updated").textContent = d.nav_date ? "净值 " + d.nav_date : "";
+  const dayChg = d.no_stock_holdings ? "—" : fmtDiff(d.est_change_pct);
+  const y1 = d.y1_return != null ? fmtDiff(d.y1_return) : "—";
+  const h = d.holders;
+  const hVal = h ? fmtHolders(h.count) : "—";
+  const hSub = h && h.rank != null ? "库内第 " + h.rank + " 名（共 " + h.total + " 只）" : (h ? "库内暂无排名" : "暂无数据");
+  $("detail-top").innerHTML =
+    '<div><div class="dt-label">当日涨幅（自算估值）</div><div class="dt-val">' + dayChg + '</div></div>'
+    + '<div><div class="dt-label">近1年</div><div class="dt-val">' + y1 + '</div></div>'
+    + '<div><div class="dt-label">持有人数</div><div class="dt-val">' + hVal + '</div><div class="dt-label" style="font-size:11px">' + esc(hSub) + '</div></div>';
+  $("dt-industries").innerHTML = (d.industries || []).length
+    ? d.industries.map(x => '<div class="dt-bar-row"><span class="dt-bar-name">' + esc(x.name) + '</span>'
+      + '<span class="dt-bar-track"><span class="dt-bar-fill" style="display:block;width:' + Math.min(100, Math.max(0, x.share_pct)) + '%"></span></span>'
+      + '<span class="dt-bar-val">' + x.share_pct.toFixed(1) + '%' + (x.change_pct != null ? ' ' + fmtDiff(x.change_pct) : '') + '</span></div>').join("")
+    : '<div class="muted">暂无行业分布数据</div>';
+  renderPerf();
+  if (detailTab === "sector") renderSector();
+}
+function dtCutoffStr() {
+  const d = new Date();
+  d.setDate(d.getDate() - DT_WINDOWS[detailWindow]);
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+// Rebase a cumulative-return series (oldest->newest [[date, ret]]) to its
+// first point inside the window, so the curve starts at 0%.
+function dtRebase(pts, cutoff) {
+  const w = pts.filter(p => p[0] >= cutoff);
+  if (w.length < 2) return [];
+  const base = w[0][1];
+  return w.map(p => [p[0], (1 + p[1] / 100) / (1 + base / 100) * 100 - 100]);
+}
+function perfChartSvg(fPts, hPts) {
+  const W = 360, H = 170, YT = 8, YB = 148;
+  const all = fPts.concat(hPts).map(p => p[1]);
+  const bound = Math.max(0.5, ...all.map(Math.abs));
+  const X = (i, n) => n <= 1 ? 0 : i / (n - 1) * W;
+  const Y = v => YB - (v + bound) / (2 * bound) * (YB - YT);
+  const line = pts => pts.map((p, i) => X(i, pts.length).toFixed(1) + "," + Y(p[1]).toFixed(1)).join(" ");
+  const zero = Y(0);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<line x1="0" y1="${YT}" x2="${W}" y2="${YT}" stroke="#F0F2F5" stroke-width="1"/>`
+    + `<line x1="0" y1="${zero.toFixed(1)}" x2="${W}" y2="${zero.toFixed(1)}" stroke="#EAECF0" stroke-width="1" stroke-dasharray="4 3"/>`
+    + `<line x1="0" y1="${YB}" x2="${W}" y2="${YB}" stroke="#F0F2F5" stroke-width="1"/>`;
+  if (hPts.length >= 2) svg += `<polyline points="${line(hPts)}" fill="none" stroke="#D97706" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+  if (fPts.length >= 2) {
+    const area = `0,${H} ` + line(fPts) + ` ${W},${H}`;
+    svg += `<polygon points="${area}" fill="#2563EB" opacity="0.07"/>`
+      + `<polyline points="${line(fPts)}" fill="none" stroke="#2563EB" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  }
+  svg += "</svg>";
+  const fmtLbl = v => (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+  const first = (fPts[0] || hPts[0] || ["", 0])[0], last = (fPts[fPts.length - 1] || hPts[hPts.length - 1] || ["", 0])[0];
+  return svg + `<span class="sp-max">${fmtLbl(bound)}</span><span class="sp-min">${fmtLbl(-bound)}</span>`
+    + `<div class="dt-times"><span>${esc(first)}</span><span>${esc(last)}</span></div>`;
+}
+function renderPerf() {
+  const d = detailData; if (!d) return;
+  const cutoff = dtCutoffStr();
+  const hist = (d.nav_history || []).slice().reverse();  // oldest -> newest
+  // Cumulative fund return from NAVs inside the window (recomputed here
+  // because the backend returns raw NAVs, not windowed returns).
+  const winNav = hist.filter(r => r.date >= cutoff);
+  let fPts = [];
+  if (winNav.length >= 2) {
+    const base = winNav[0].nav;
+    fPts = winNav.map(r => [r.date, base ? (r.nav / base - 1) * 100 : 0]);
+  }
+  const hsPts = dtRebase((d.hs300 || []).map(x => [x.date, x.ret]), cutoff);
+  $("dt-fund-ret").textContent = fPts.length ? fmtDiff(fPts[fPts.length - 1][1]) : "—";
+  $("dt-hs-ret").textContent = hsPts.length ? fmtDiff(hsPts[hsPts.length - 1][1]) : "—";
+  if (!fPts.length && !hsPts.length) {
+    $("dt-chart").innerHTML = '<div class="muted">净值历史暂无数据</div>';
+  } else {
+    $("dt-chart").innerHTML = perfChartSvg(fPts, hsPts);
+  }
+  const rows = (d.nav_history || []).filter(r => r.date >= cutoff).slice(0, 30);
+  $("dt-nav-table").innerHTML = rows.length
+    ? rows.map(r => '<div class="dt-row"><span>' + esc(r.date) + '</span><span>' + r.nav.toFixed(4) + '</span><span class="dt-chg">' + fmtDiff(r.change) + '</span></div>').join("")
+    : '<div class="muted">该窗口内暂无净值数据</div>';
+}
+function detailIntradaySvg(f) {
+  const raw = historySeries[f.fund_code];
+  const hasPts = Array.isArray(raw) && raw.length >= 2;
+  const segs = sparkSegments(f);
+  if (!hasPts && !segs) return "";
+  const pts = hasPts ? raw : [];
+  const vals = pts.map(p => p[1]);
+  const min = hasPts ? Math.min(...vals) : 0, max = hasPts ? Math.max(...vals) : 0;
+  const bound = Math.max(Math.abs(min), Math.abs(max), 0.5);
+  const t0 = segs ? segs[0][0] : pts[0][0];
+  const t1 = segs ? segs[segs.length - 1][1] : pts[pts.length - 1][0];
+  const totalMins = segs ? segs.reduce((a, s) => a + (s[1] - s[0]) / 60, 0) : 0;
+  const W = 360, H = 170, YT = 8, YB = 148;
+  const X = p => {
+    if (segs && totalMins > 0) return Math.max(0, Math.min(W, tradingMinutesAt(p[0], segs) / totalMins * W));
+    const tSpan = t1 - t0;
+    return tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
+  };
+  const Y = v => YB - (v + bound) / (2 * bound) * (YB - YT);
+  const last = hasPts ? vals[vals.length - 1] : 0;
+  const colorVal = f.est_change_pct != null ? f.est_change_pct : last;
+  const color = colorVal >= 0 ? "#C9362B" : "#07845B";
+  let lines = "";
+  if (hasPts) {
+    const line = pts.map(p => X(p).toFixed(1) + "," + Y(p[1]).toFixed(1)).join(" ");
+    const area = X(pts[0]).toFixed(1) + "," + H + " " + line + " " + X(pts[pts.length - 1]).toFixed(1) + "," + H;
+    lines = `<polygon points="${area}" fill="${color}" opacity="0.07"/><polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  }
+  const zero = Y(0);
+  const fmtLbl = v => (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+  const dot = hasPts ? `<span class="sp-dot" style="left:${(X(pts[pts.length - 1]) / W * 100).toFixed(2)}%;top:${Y(last).toFixed(1)}px;background:${color}"></span>` : "";
+  const preopen = f && fundMarketStatus(f).session === "preopen";
+  return `<svg id="dt-intraday-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<line x1="0" y1="${YT}" x2="${W}" y2="${YT}" stroke="#F0F2F5" stroke-width="1"/>`
+    + `<line x1="0" y1="${zero.toFixed(1)}" x2="${W}" y2="${zero.toFixed(1)}" stroke="#EAECF0" stroke-width="1" stroke-dasharray="4 3"/>`
+    + `<line x1="0" y1="${YB}" x2="${W}" y2="${YB}" stroke="#F0F2F5" stroke-width="1"/>${lines}</svg>`
+    + `<span class="sp-max">${fmtLbl(bound)}</span><span class="sp-min">${fmtLbl(-bound)}</span>`
+    + (hasPts ? "" : `<span class="sp-loading">${preopen ? "今日尚未开盘" : "曲线加载中"}</span>`)
+    + dot
+    + `<div class="dt-times"><span>${fmtHM(t0)}</span><span>${fmtHM(t1)}</span></div>`;
+}
+function renderSector() {
+  const d = detailData; if (!d) return;
+  const idx = d.index;
+  $("dt-index-line").textContent = idx
+    ? "场内指数：" + idx.name + (idx.change_pct != null ? " " + fmtDiff(idx.change_pct) : "")
+    : "场内指数：暂无跟踪指数信息";
+  $("dt-cat-line").textContent = d.same_cat_count != null
+    ? "同类基金 " + d.same_cat_count + " 只" : "";
+  const f = (currentFunds || []).find(x => x.fund_code === d.fund_code);
+  if (!f) { $("dt-intraday").innerHTML = '<div class="muted">曲线加载中…</div>'; return; }
+  const svg = detailIntradaySvg(f);
+  $("dt-intraday").innerHTML = svg || '<div class="muted">曲线加载中…</div>';
+}
+$("dt-share-btn").onclick = async () => {
+  const d = detailData;
+  const svgEl = $("dt-intraday-svg");
+  const msg = $("dt-share-msg");
+  if (!d || !svgEl) { msg.textContent = "暂无可分享的走势图"; return; }
+  msg.textContent = "正在生成图片…";
+  try {
+    const clone = svgEl.cloneNode(true);
+    clone.setAttribute("width", "900");
+    clone.setAttribute("height", "425");
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const xml = new XMLSerializer().serializeToString(clone);
+    const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+    URL.revokeObjectURL(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = 900; canvas.height = 500;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, 900, 500);
+    ctx.fillStyle = "#202939"; ctx.font = "bold 30px sans-serif";
+    ctx.fillText(d.fund_name + " " + d.fund_code, 24, 42);
+    ctx.fillStyle = "#667085"; ctx.font = "24px sans-serif";
+    ctx.fillText("当日自算估值 " + fmtDiff(d.est_change_pct) + " · " + todayStr(), 24, 76);
+    ctx.drawImage(img, 0, 90, 900, 425);
+    ctx.fillStyle = "#98A2B3"; ctx.font = "18px sans-serif";
+    ctx.fillText("自算估值，仅供参考，以基金公司公布净值为准", 24, 488);
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+    const file = new File([blob], "fund-" + d.fund_code + "-估值走势.png", { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: d.fund_name + " 当日估值走势" });
+      msg.textContent = "已分享";
+    } else {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = file.name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      msg.textContent = "图片已下载";
+    }
+  } catch (e) {
+    msg.textContent = "生成失败，请重试";
+  }
+};
 let refreshing = false, prevSnapshot = null, currentFunds = [], currentGroups = [], sortMode = "default", fadeTimer = null;
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function catOptions(current, allCats) {
@@ -1874,7 +2195,7 @@ function renderFunds(data) {
       if (ov != null) metaParts.push(ov);
       metaParts.push(`${esc(f.report_label ?? "-")} ${f.report_date ?? ""}`.trim());
       if (f.stale && !f.no_stock_holdings) metaParts.push("数据可能过期");
-      html += `<div class="fund-card${ch ? " changed" : ""}">
+      html += `<div class="fund-card${ch ? " changed" : ""}" onclick="openDetail('${f.fund_code}')">
       <div class="fc-head">
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-code-status"><span class="fc-code">${f.fund_code}</span><span class="fc-status" data-code="${f.fund_code}">${st.label}</span></span></div>
         ${published || big == null ? "" : `<div class="fc-chg">${fmtPct(big)}</div>`}

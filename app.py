@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.9"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.5.0"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -95,6 +95,10 @@ QUOTE_TTL = 45          # seconds, in-memory global cache
 NAV_TTL = 600           # seconds, DB cache
 HOLDINGS_TTL = 86400    # seconds, DB cache
 FUND_TYPE_TTL = 30 * 86400  # seconds, DB cache (fund type rarely changes)
+HOLDER_TTL = 7 * 86400       # seconds, DB cache for fund holder counts (v1.5.0)
+NAV_HISTORY_TTL = 86400     # seconds, DB cache for detail-page NAV history (v1.5.0)
+SECTOR_FLOW_TTL = 60        # seconds, Eastmoney sector fund-flow board cache (v1.5.0)
+HS300_SECID = "1.000300"    # 沪深300 index secid for the detail-page benchmark curve
 SESSION_DAYS = 30
 
 @asynccontextmanager
@@ -206,6 +210,18 @@ def init_db():
             mae_raw REAL,
             mae_cal REAL,
             updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS fund_holders(
+            fund_code TEXT PRIMARY KEY,
+            holder_count INTEGER,
+            report_date TEXT,
+            updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS fund_nav_history(
+            fund_code TEXT NOT NULL,
+            date TEXT NOT NULL,
+            nav REAL NOT NULL,
+            change_pct REAL,
+            fetched_at REAL NOT NULL,
+            PRIMARY KEY(fund_code, date));
         CREATE TABLE IF NOT EXISTS stock_daily_cache(
             secid TEXT NOT NULL,
             date TEXT NOT NULL,
@@ -1317,7 +1333,7 @@ _SOURCE_GROUPS = [
     ("股票行情", ["sina", "em_ulist", "fuyao_snapshot"]),
     ("股票日线", ["em_kline", "fuyao_kline"]),
     ("基金搜索", ["em_search"]),
-    ("排行榜", ["em_rank"]),
+    ("排行榜", ["em_rank", "em_sector_flow"]),
     ("行业板块", ["em_f10", "fuyao_industry"]),
     ("其他", ["em_suggest", "em_jbgk", "ipapi"]),
 ]
@@ -1351,6 +1367,8 @@ def _classify_source(url: str) -> str:
         return "em_kline"
     if "rankhandler" in u:
         return "em_rank"
+    if "clist/get" in u:
+        return "em_sector_flow"
     if "searchapi.eastmoney.com" in u:
         return "em_suggest"
     if "jbgk_" in u:
@@ -3321,6 +3339,10 @@ async def resolve_fund_index(fund_code: str) -> Optional[dict]:
             (fund_code,)).fetchone()
     if row and row["secid"]:
         return {"index_name": row["index_name"], "secid": row["secid"]}
+    if row and row["index_name"] and time.time() - row["fetched_at"] < 86400:
+        # Name known, secid not resolved yet (suggest throttled/unknown):
+        # surface the name, retry the secid after a day.
+        return {"index_name": row["index_name"], "secid": None}
     if row and time.time() - row["fetched_at"] < 86400:
         return None
     index_name = await _fetch_benchmark_index_name(fund_code)
@@ -3331,7 +3353,9 @@ async def resolve_fund_index(fund_code: str) -> Optional[dict]:
             "ON CONFLICT(fund_code) DO UPDATE SET index_name=excluded.index_name, "
             "secid=excluded.secid, fetched_at=excluded.fetched_at",
             (fund_code, index_name, secid, time.time()))
-    return {"index_name": index_name, "secid": secid} if secid else None
+    if secid:
+        return {"index_name": index_name, "secid": secid}
+    return {"index_name": index_name, "secid": None} if index_name else None
 
 
 def _residual_pct(coverage: float, stock_position: Optional[float]) -> float:
@@ -3444,6 +3468,17 @@ async def _jittered(coro):
     return await coro
 
 
+def _prune_trends_cache():
+    """Drop minute-trends rows older than 30 days (v1.4.9+): curves only
+    ever read today, beta uses daily klines, so older rows are dead
+    weight (~2.6MB/day at ~260 secids). Keeps total DB near 100MB."""
+    cutoff = (datetime.now(CN_TZ) - timedelta(days=30)).strftime("%Y-%m-%d")
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM stock_trends_cache WHERE date < ?", (cutoff,))
+        return cur.rowcount
+
+
 async def _trends_warm_loop():
     """Keep stock_trends_cache hot: refresh minute trends for the union of
     holding codes across all users' watchlists (plus feeder funds'
@@ -3454,6 +3489,7 @@ async def _trends_warm_loop():
     await asyncio.sleep(10)
     while True:
         try:
+            _prune_trends_cache()
             with db() as conn:
                 rows = conn.execute(
                     "SELECT DISTINCT fund_code, fund_name FROM user_funds").fetchall()
@@ -3475,7 +3511,7 @@ async def _trends_warm_loop():
                 n = len(uniq)
                 for fc in feeder_codes:
                     idx = await resolve_fund_index(fc)
-                    if idx:
+                    if idx and idx.get("secid"):
                         async with _trends_sem:
                             await fetch_stock_trends(idx["secid"], date_str)
                         n += 1
@@ -3616,6 +3652,21 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     if name == code:
         asyncio.create_task(_resolve_fund_name(item_id, code))
     _schedule_user_refresh(uid, warm_code=code)
+    # Holder-count library (v1.5.0): a fund joining any watchlist joins
+    # the in-library holder ranking; fetched in the background (7d cache).
+    asyncio.create_task(_fetch_holders_bg(code))
+    # No-blank-page rule: a fund the customer just added must be
+    # prewarmed NOW, not after the 1/min queue drains — enqueue it at
+    # priority 1 and start its full backfill in the background at once
+    # (holdings/NAV/β/trends/holders), so the detail page opens with
+    # data instead of an empty frame.
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO prewarm_queue(fund_code, status, priority, attempts, updated_at) "
+            "VALUES(?,'pending',1,0,?) "
+            "ON CONFLICT(fund_code) DO UPDATE SET priority=1",
+            (code, time.time()))
+    asyncio.create_task(_prewarm_one_guarded(code))
     return {"ok": True, "id": item_id, "fund_code": code, "fund_name": name, "category": category}
 
 
@@ -3866,7 +3917,7 @@ async def _compute_estimates(uid):
         feeder_applied = False
         if coverage == 0 and _is_feeder(r["fund_name"], hold["holdings"]):
             idx = await resolve_fund_index(r["fund_code"])
-            if idx:
+            if idx and idx.get("secid"):
                 async with _trends_sem:
                     tr = await fetch_stock_trends(
                         idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
@@ -4138,7 +4189,7 @@ async def _compute_series(uid):
         if not pts and _is_feeder(fund_name, holdings):
             # ETF feeder fund: curve from its tracking index (weight 100%).
             idx = await resolve_fund_index(code)
-            if idx:
+            if idx and idx.get("secid"):
                 async with _trends_sem:
                     feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
                 pts = _index_curve(feeder_tr, start_ts)
@@ -4167,7 +4218,7 @@ async def _compute_series(uid):
             if coverage == 0 and _is_feeder(fund_name, holdings):
                 if feeder_tr is None:
                     idx = await resolve_fund_index(code)
-                    if idx:
+                    if idx and idx.get("secid"):
                         async with _trends_sem:
                             feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
                 chg = _index_latest_chg(feeder_tr)
@@ -4492,20 +4543,22 @@ async def fetch_nav_history(code: str, days: int = BETA_WINDOW) -> list:
     return rows[:days]
 
 
-async def fetch_daily_closes(secid: str) -> dict:
+async def fetch_daily_closes(secid: str, days: int = 240) -> dict:
     """{date: close} daily closes for one secid from the Eastmoney kline
     API (klt=101, fqt=1), DB-cached in stock_daily_cache. A cache younger
-    than a day is served as-is. When Eastmoney fails or returns nothing,
-    A-share secids fall back to fuyao daily closes (v1.4.8, written to
-    the same cache); other markets return whatever is cached."""
+    than a day is served as-is when it already reaches back `days` (plus
+    buffer). When Eastmoney fails or returns nothing, A-share secids fall
+    back to fuyao daily closes (v1.4.8, written to the same cache); other
+    markets return whatever is cached."""
     with db() as conn:
         rows = conn.execute(
             "SELECT date, close, fetched_at FROM stock_daily_cache WHERE secid=?",
             (secid,)).fetchall()
     cached = {r["date"]: r["close"] for r in rows}
-    if rows and time.time() - max(r["fetched_at"] for r in rows) < BETA_TTL:
+    beg = (datetime.now(CN_TZ) - timedelta(days=days + 30)).strftime("%Y%m%d")
+    if rows and time.time() - max(r["fetched_at"] for r in rows) < BETA_TTL \
+            and min(cached) <= beg:
         return cached
-    beg = (datetime.now(CN_TZ) - timedelta(days=240)).strftime("%Y%m%d")
     fresh = {}
     try:
         async with _kline_sem:
@@ -4881,7 +4934,8 @@ _RANK_ETA = {"returns_all": 100, "vol_top_v2": 200, "qdii_us_v3": 240,
              "vol_gp_v1": 200, "vol_hh_v1": 200, "vol_zq_v1": 200,
              "vol_zs_v1": 200, "vol_qdii_v1": 200, "vol_fof_v1": 200,
              "vol3_top": 200, "vol3_gp": 200, "vol3_hh": 200, "vol3_zq": 200,
-             "vol3_zs": 200, "vol3_qdii": 200, "vol3_fof": 200}
+             "vol3_zs": 200, "vol3_qdii": 200, "vol3_fof": 200,
+             "sector_flow": 30}
 # In-memory per-board compute state: {"state": "computing", "started_at": epoch}
 _rank_state: dict = {}
 _rank_tasks: dict = {}
@@ -5022,10 +5076,15 @@ def _prewarm_pool_codes() -> set:
     """Union of fund codes currently shown across all ranking boards,
     derived from cached board payloads only (no upstream calls):
     returns boards contribute each period's top-30 per category,
-    vol/ratio boards their whole pool, qdii-us its top-30 list."""
+    vol/ratio boards their whole pool, qdii-us its top-30 list.
+    Plus every fund any customer has in their watchlist (v1.5.0):
+    a customer's own funds get prewarmed first so their detail page
+    opens instantly."""
     codes = set()
     with db() as conn:
         rows = conn.execute("SELECT key, payload FROM rank_cache").fetchall()
+        codes.update(r[0] for r in conn.execute(
+            "SELECT DISTINCT fund_code FROM user_funds").fetchall())
     for r in rows:
         key = r["key"]
         try:
@@ -5045,9 +5104,12 @@ def _prewarm_pool_codes() -> set:
 
 def _prewarm_sync_pool() -> int:
     """Insert ranking-pool codes missing from prewarm_queue as pending.
-    New entrants get priority 1 so they jump ahead of the initial
-    backlog (priority 0); existing rows (incl. done) are untouched, and
-    funds that leave the rankings keep their queued/done state."""
+    Ranking funds are SECOND priority (priority 0): the customer's own
+    watchlist funds are priority 1 and always go first (v1.5.0). New
+    ranking entrants no longer jump the queue. Rows already queued at
+    priority 1 that are not in any watchlist are demoted to 0, so an
+    old ranking backlog cannot starve a customer's fund. Funds that
+    leave the rankings keep their queued/done state."""
     codes = _prewarm_pool_codes()
     if not codes:
         return 0
@@ -5055,13 +5117,14 @@ def _prewarm_sync_pool() -> int:
     with db() as conn:
         have = {r[0] for r in conn.execute("SELECT fund_code FROM prewarm_queue").fetchall()}
         new = [c for c in codes if c not in have]
-        if not new:
-            return 0
-        prio = 1 if have else 0
-        conn.executemany(
-            "INSERT OR IGNORE INTO prewarm_queue(fund_code, status, priority, attempts, updated_at) "
-            "VALUES(?, 'pending', ?, 0, ?)",
-            [(c, prio, now) for c in new])
+        if new:
+            conn.executemany(
+                "INSERT OR IGNORE INTO prewarm_queue(fund_code, status, priority, attempts, updated_at) "
+                "VALUES(?, 'pending', 0, 0, ?)",
+                [(c, now) for c in new])
+        conn.execute(
+            "UPDATE prewarm_queue SET priority=0 WHERE priority=1 AND status='pending' "
+            "AND fund_code NOT IN (SELECT fund_code FROM user_funds)")
     return len(new)
 
 
@@ -5132,11 +5195,62 @@ async def _prewarm_one(code: str):
     for h in hold["holdings"]:
         if h["weight"]:
             await fetch_holding_trends(h["code"], mmap, date_str, h.get("name"))
+    # Holder-count library (v1.5.0): ranking funds join the library
+    # as they are backfilled; best effort, never fails the prewarm.
+    try:
+        await fetch_fund_holders(code)
+    except Exception:
+        pass
     row = _beta_row(code)
     if row is None:
         raise RuntimeError(f"beta row missing after compute for {code}")
     if row["n"] == 0 and not definitive_skip:
         raise RuntimeError(f"beta pairs empty for {code} (upstream data missing?)")
+
+
+_prewarm_inflight = set()
+
+
+async def _prewarm_one_guarded(code: str):
+    """Run _prewarm_one once for a code, skipping while another run for
+    the same code is in flight (the slow loop and the watchlist-add
+    fast path share this). Marks the queue row done/failed exactly
+    like the loop used to; never raises."""
+    global _prewarm_paused_until, _prewarm_consec_fail
+    if code in _prewarm_inflight:
+        return
+    _prewarm_inflight.add(code)
+    try:
+        _wstat("prewarm", current=code)
+        try:
+            await _prewarm_one(code)
+            _prewarm_consec_fail = 0
+            with db() as conn:
+                conn.execute(
+                    "UPDATE prewarm_queue SET status='done', updated_at=? WHERE fund_code=?",
+                    (time.time(), code))
+            _wstat("prewarm", current=None, last_run=time.time(),
+                   last_result=f"done {code}")
+        except Exception as e:
+            _prewarm_consec_fail += 1
+            log_error("prewarm", f"{code}: {e!r}")
+            _wstat("prewarm", current=None, last_run=time.time(),
+                   last_result=f"failed {code}: {e!r}")
+            with db() as conn:
+                conn.execute(
+                    "UPDATE prewarm_queue SET attempts=attempts+1, updated_at=?, "
+                    "status=CASE WHEN attempts+1>=? THEN 'failed' ELSE 'pending' END "
+                    "WHERE fund_code=?",
+                    (time.time(), PREWARM_MAX_ATTEMPTS, code))
+            print(f"[prewarm] {code} failed "
+                  f"({_prewarm_consec_fail} consecutive): {e!r}", flush=True)
+            if _prewarm_consec_fail >= 3:
+                _prewarm_paused_until = time.time() + PREWARM_FAIL_PAUSE
+                _prewarm_consec_fail = 0
+                print(f"[prewarm] pausing {PREWARM_FAIL_PAUSE}s after "
+                      f"consecutive failures", flush=True)
+    finally:
+        _prewarm_inflight.discard(code)
 
 
 async def _prewarm_loop():
@@ -5169,34 +5283,7 @@ async def _prewarm_loop():
                        last_result="queue empty / all in backoff")
                 await asyncio.sleep(60)
                 continue
-            _wstat("prewarm", current=code)
-            try:
-                await _prewarm_one(code)
-                _prewarm_consec_fail = 0
-                with db() as conn:
-                    conn.execute(
-                        "UPDATE prewarm_queue SET status='done', updated_at=? WHERE fund_code=?",
-                        (time.time(), code))
-                _wstat("prewarm", current=None, last_run=time.time(),
-                       last_result=f"done {code}")
-            except Exception as e:
-                _prewarm_consec_fail += 1
-                log_error("prewarm", f"{code}: {e!r}")
-                _wstat("prewarm", current=None, last_run=time.time(),
-                       last_result=f"failed {code}: {e!r}")
-                with db() as conn:
-                    conn.execute(
-                        "UPDATE prewarm_queue SET attempts=attempts+1, updated_at=?, "
-                        "status=CASE WHEN attempts+1>=? THEN 'failed' ELSE 'pending' END "
-                        "WHERE fund_code=?",
-                        (time.time(), PREWARM_MAX_ATTEMPTS, code))
-                print(f"[prewarm] {code} failed "
-                      f"({_prewarm_consec_fail} consecutive): {e!r}", flush=True)
-                if _prewarm_consec_fail >= 3:
-                    _prewarm_paused_until = time.time() + PREWARM_FAIL_PAUSE
-                    _prewarm_consec_fail = 0
-                    print(f"[prewarm] pausing {PREWARM_FAIL_PAUSE}s after "
-                          f"consecutive failures", flush=True)
+            await _prewarm_one_guarded(code)
             counts = await asyncio.to_thread(_prewarm_counts)
             print(f"[prewarm] done {counts['done']}/{counts['total']} "
                   f"pending {counts['pending']} failed {counts['failed']}", flush=True)
@@ -5509,6 +5596,432 @@ def admin_system_status(session: Optional[str] = Cookie(default=None)):
             "boards": boards, "workers": workers,
             "next_tasks": next_tasks, "errors": errors,
             "files": _system_files()}
+
+
+
+# ---------------------------------------------------------------- fund detail page (v1.5.0)
+# Holder counts + in-library ranking, long NAV history, HS300 benchmark,
+# industry distribution and the sector fund-flow board. Everything is
+# cached in SQLite; a missing upstream value stays missing (never faked).
+
+async def _fetch_holders_bg(code: str):
+    try:
+        await fetch_fund_holders(code)
+    except Exception:
+        pass
+
+
+async def _fetch_holders_em(code: str) -> Optional[dict]:
+    """Best-effort Eastmoney holder-count fallback: the fundf10 概况 page
+    sometimes carries a 持有人户数 figure. Unverified across funds; None
+    when the pattern is absent (fuyao stays the primary source)."""
+    try:
+        resp = await upstream_get(
+            f"https://fundf10.eastmoney.com/jbgk_{code}.html",
+            referer="https://fundf10.eastmoney.com/", timeout=15)
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", resp.text))
+        m = re.search(r"持有人户数[^\d]{0,10}([\d,]+)\s*户", text)
+        if m:
+            return {"holder_count": int(m.group(1).replace(",", "")),
+                    "report_date": None}
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_fund_holders(code: str) -> Optional[dict]:
+    """{"holder_count", "report_date"} for one fund, DB-cached 7 days.
+    Primary: fuyao fund/holders/detail (merged share classes,
+    holder_amount). Fallback: Eastmoney fundf10 概况 page parse.
+    Never raises; None when no source yields a count."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT holder_count, report_date, updated_at FROM fund_holders WHERE fund_code=?",
+            (code,)).fetchone()
+    if row and row["holder_count"] and time.time() - row["updated_at"] < HOLDER_TTL:
+        return {"holder_count": row["holder_count"], "report_date": row["report_date"]}
+    got = None
+    if FUYAO_ENABLED:
+        try:
+            node = await _fuyao_get(
+                f"/api/fund/holders/detail?thscode={code}.OF&merge_scope=merged")
+            items = [it for it in (node.get("item") or []) if isinstance(it, dict)]
+            merged = next((it for it in items if it.get("merge_scope") == "merged"), items[0] if items else None)
+            if merged and merged.get("holder_amount"):
+                got = {"holder_count": int(merged["holder_amount"]),
+                       "report_date": _fuyao_date(merged.get("report_date_ms"))}
+        except Exception:
+            got = None
+    if got is None:
+        got = await _fetch_holders_em(code)
+    if got is None:
+        return {"holder_count": row["holder_count"], "report_date": row["report_date"]} if row and row["holder_count"] else None
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO fund_holders(fund_code, holder_count, report_date, updated_at) "
+            "VALUES(?,?,?,?) ON CONFLICT(fund_code) DO UPDATE SET "
+            "holder_count=excluded.holder_count, report_date=excluded.report_date, "
+            "updated_at=excluded.updated_at",
+            (code, got["holder_count"], got["report_date"], time.time()))
+    return got
+
+
+def _holder_library_codes() -> set:
+    """Funds in the holder-ranking library: every distinct watchlist fund
+    plus every fund currently shown on a ranking board (prewarm pool).
+    The library only grows; as it grows the in-library rank approaches
+    the real full-market rank."""
+    codes = set()
+    with db() as conn:
+        codes.update(r[0] for r in conn.execute(
+            "SELECT DISTINCT fund_code FROM user_funds").fetchall())
+    try:
+        codes |= _prewarm_pool_codes()
+    except Exception:
+        pass
+    return codes
+
+
+def _holder_rank(code: str) -> Optional[dict]:
+    """{"rank", "total"} for a fund among library funds whose holder count
+    is known (cached rows only — no upstream calls). None when unknown."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT fund_code, holder_count FROM fund_holders WHERE holder_count IS NOT NULL"
+        ).fetchall()
+    known = {r["fund_code"]: r["holder_count"] for r in rows}
+    lib = _holder_library_codes()
+    pool = {c: n for c, n in known.items() if c in lib}
+    if code not in pool:
+        return None
+    rank = 1 + sum(1 for n in pool.values() if n > pool[code])
+    return {"rank": rank, "total": len(pool)}
+
+
+async def fetch_nav_history_detail(code: str, days: int = 750) -> list:
+    """[(date, nav, change_pct)] newest first, up to `days` NAV days,
+    cached in fund_nav_history (24h). Primary: lsjz paging (20/page,
+    0.15s spacing so a 3y pull stays well under the fund-API limit).
+    Partial pages are kept; on total failure, fuyao range=tyear (3y) /
+    year. [] when no source yields history (never fabricated)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT date, nav, change_pct, fetched_at FROM fund_nav_history "
+            "WHERE fund_code=? ORDER BY date DESC", (code,)).fetchall()
+    if rows and time.time() - max(r["fetched_at"] for r in rows) < NAV_HISTORY_TTL:
+        return [(r["date"], r["nav"], r["change_pct"]) for r in rows[:days]]
+    out = []
+    try:
+        page, pages = 1, max(1, math.ceil(days / 20))
+        while len(out) < days and page <= pages:
+            resp = await upstream_get(
+                f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}"
+                f"&pageIndex={page}&pageSize=20",
+                referer=f"https://fund.eastmoney.com/f10/jjjz_{code}.html",
+            )
+            items = (resp.json().get("Data") or {}).get("LSJZList") or []
+            if not items:
+                break
+            for it in items:
+                try:
+                    out.append((it["FSRQ"], float(it["DWJZ"]), float(it["JZZZL"] or 0)))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            page += 1
+            if len(out) < days and page <= pages:
+                await asyncio.sleep(0.15)
+    except Exception:
+        pass
+    if not out and FUYAO_ENABLED:
+        try:
+            rng = "tyear" if days > 365 else "year"
+            node = await _fuyao_get(
+                f"/api/fund/performance/nav?thscode={code}.OF&range={rng}&nav_type=unit")
+            items = [it for it in (node.get("item") or [])
+                     if isinstance(it, dict) and it.get("unit_nav") is not None]
+            items.sort(key=lambda it: it.get("nav_date") or 0)
+            for i, it in enumerate(items):
+                cur = float(it["unit_nav"])
+                prev = float(items[i - 1]["unit_nav"]) if i else None
+                chg = round((cur / prev - 1) * 100, 2) if prev else 0.0
+                out.append((_fuyao_date(it.get("nav_date")), cur, chg))
+            out = out[::-1]
+        except Exception:
+            out = []
+    if out:
+        now = time.time()
+        with db() as conn:
+            conn.executemany(
+                "INSERT INTO fund_nav_history(fund_code, date, nav, change_pct, fetched_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(fund_code, date) DO UPDATE SET "
+                "nav=excluded.nav, change_pct=excluded.change_pct, fetched_at=excluded.fetched_at",
+                [(code, d, n, c, now) for d, n, c in out])
+    return out[:days]
+
+
+async def _estimate_one(code: str, fund_name: str = "") -> dict:
+    """Single-fund live estimate, mirroring /api/estimates for one fund
+    (same helpers, same β calibration, feeder/bond branches). Used by the
+    detail page so it works even for funds outside the viewer's watchlist."""
+    try:
+        nav = await fetch_nav(code)
+    except Exception:
+        nav = {"nav_date": None, "dwjz": None, "jzzzl": None,
+               "prev_nav_date": None, "prev_dwjz": None, "prev_jzzzl": None, "stale": True}
+    try:
+        hold = await fetch_holdings(code)
+    except Exception:
+        hold = {"holdings": [], "report_label": None, "report_date": None, "stale": True}
+    mmap = await fetch_stock_market_map(code)
+    syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
+    try:
+        stock_position = await fetch_stock_position(code)
+    except Exception:
+        stock_position = None
+    quotes = await fetch_quotes([s for s in syms if s] + ["sh511260"])
+    coverage = sum(h["weight"] for h in hold["holdings"])
+    est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes, stock_position)
+    ftype = await fetch_fund_type(code) or ""
+    is_mrf = ftype == "香港互认基金" or code[:3] in ("968", "969")
+    feeder_applied = bond_applied = False
+    if coverage == 0 and _is_feeder(fund_name, hold["holdings"]):
+        idx = await resolve_fund_index(code)
+        if idx and idx.get("secid"):
+            async with _trends_sem:
+                tr = await fetch_stock_trends(
+                    idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
+            chg = _index_latest_chg(tr)
+            if chg is not None:
+                feeder_applied, est_pct, coverage = True, chg, 100.0
+    if coverage == 0 and not feeder_applied and "债券" in ftype:
+        bq = quotes.get("sh511260")
+        if bq:
+            bond_applied, est_pct = True, bq["change_pct"]
+    no_stock = coverage == 0 and not feeder_applied and not bond_applied
+    if not feeder_applied and not bond_applied and not no_stock and not is_mrf:
+        est_pct = _apply_beta(est_pct, _beta_row(code))
+    est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
+    return {"est_change_pct": round(est_pct, 2),
+            "est_nav": round(est_nav, 4) if est_nav else None,
+            "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
+            "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"),
+            "prev_jzzzl": nav.get("prev_jzzzl"),
+            "coverage_pct": round(coverage, 2),
+            "fund_type": ftype, "is_mrf": is_mrf,
+            "bond_est": bond_applied, "no_stock_holdings": no_stock,
+            "report_label": hold["report_label"], "report_date": hold["report_date"]}
+
+
+_FTYPE_CAT = (("股票", "gp"), ("混合", "hh"), ("债券", "zq"),
+              ("指数", "zs"), ("QDII", "qdii"), ("FOF", "fof"))
+
+
+def _nav_history_cached(code: str, days: int):
+    """Fresh cached NAV history or None (never fetches upstream)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT date, nav, change_pct, fetched_at FROM fund_nav_history "
+            "WHERE fund_code=? ORDER BY date DESC", (code,)).fetchall()
+    if rows and time.time() - max(r["fetched_at"] for r in rows) < NAV_HISTORY_TTL:
+        return [(r["date"], r["nav"], r["change_pct"]) for r in rows[:days]]
+    return None
+
+
+@app.get("/api/fund/{code}")
+async def fund_detail(code: str, session: Optional[str] = Cookie(default=None)):
+    """Single-fund detail page data (v1.5.0): live estimate, 1y return and
+    NAV history (up to 3y, cached), HS300 benchmark curve, tracking-index
+    info, same-category fund count, industry distribution, holder count
+    + in-library rank. Sections that fail upstream return null/empty —
+    the frontend shows a loading/empty state, never invented numbers."""
+    current_user_id(session)
+    if not FUND_CODE_RE.fullmatch(code):
+        raise HTTPException(400, "基金代码需为 6 位数字")
+    name = None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT fund_name FROM user_funds WHERE fund_code=? ORDER BY id LIMIT 1",
+            (code,)).fetchone()
+    if row and row["fund_name"] and row["fund_name"] != code:
+        name = row["fund_name"]
+    if not name:
+        try:
+            resp = await upstream_get(
+                f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={code}")
+            name = next((d["NAME"] for d in resp.json().get("Datas", [])
+                         if d.get("CODE") == code and _is_fund_entry(d)), None)
+        except Exception:
+            name = None
+    name = name or code
+    est = await _estimate_one(code, name)
+    # NAV history + 1y return (latest NAV vs the trading day ~365d ago).
+    # Cache-first: a cold fund's 3y pull takes 60-80s upstream, so the
+    # detail page must NOT block on it — return what is cached now,
+    # start the fetch in the background, and tell the frontend to poll
+    # (warming=true) instead of opening on an empty page.
+    hist = _nav_history_cached(code, 750)
+    warming = False
+    if hist is None:
+        warming = True
+        hist = []
+        asyncio.create_task(fetch_nav_history_detail(code, 750))
+    y1 = None
+    if len(hist) >= 2:
+        try:
+            latest_d = datetime.strptime(hist[0][0], "%Y-%m-%d").date()
+            target = latest_d - timedelta(days=365)
+            old = next((h for h in hist
+                        if datetime.strptime(h[0], "%Y-%m-%d").date() <= target), None)
+            if old and old[1]:
+                y1 = round((hist[0][1] / old[1] - 1) * 100, 2)
+        except Exception:
+            y1 = None
+    # HS300 benchmark: cumulative return aligned to the NAV dates
+    hs300 = []
+    try:
+        closes = await fetch_daily_closes(HS300_SECID, days=1100)
+        dates = sorted(closes)
+        if dates:
+            base = closes[dates[0]]
+            by_date = {}
+            for d in dates:
+                by_date[d] = closes[d]
+            for hdate, _nav, _chg in reversed(hist):  # oldest -> newest
+                c = by_date.get(hdate)
+                if c is None:
+                    earlier = [d for d in dates if d <= hdate]
+                    c = closes[earlier[-1]] if earlier else None
+                if c and base:
+                    hs300.append({"date": hdate,
+                                  "ret": round((c / base - 1) * 100, 2)})
+    except Exception:
+        hs300 = []
+    # Tracking index (feeder funds) + today's index change
+    index_info = None
+    try:
+        idx = await resolve_fund_index(code)
+        if idx:
+            index_info = {"name": idx["index_name"], "secid": idx["secid"],
+                          "change_pct": None}
+            closes = await fetch_daily_closes(idx["secid"]) if idx.get("secid") else {}
+            ds = sorted(closes)
+            if len(ds) >= 2 and closes[ds[-2]]:
+                index_info["change_pct"] = round(
+                    (closes[ds[-1]] / closes[ds[-2]] - 1) * 100, 2)
+    except Exception:
+        index_info = None
+    # Same-category fund count from the cached returns board (if warmed)
+    same_cat_count = None
+    try:
+        ftype = est["fund_type"] or ""
+        cat = next((c for k, c in _FTYPE_CAT if k in ftype), None)
+        if cat:
+            payload, _fetched = await asyncio.to_thread(rank_cache_get, f"returns_{cat}")
+            if payload:
+                same_cat_count = len(payload.get("rows") or [])
+    except Exception:
+        same_cat_count = None
+    # Industry distribution: holdings grouped by industry (absolute % of
+    # NAV), with the same live quotes feeding each industry's change.
+    industries = []
+    try:
+        hold = await fetch_holdings(code)
+        holdings = hold["holdings"]
+        if holdings:
+            mmap = await fetch_stock_market_map(code)
+            syms = [await holding_quote_symbol(h, mmap) for h in holdings]
+            quotes = await fetch_quotes([s for s in syms if s])
+            inds = {}
+            for h, sym in zip(holdings, syms):
+                ind = await fetch_industry(h["code"])
+                if not ind or not h["weight"]:
+                    continue
+                a = inds.setdefault(ind, {"w": 0.0, "num": 0.0, "den": 0.0})
+                a["w"] += h["weight"]
+                q = quotes.get(sym) if sym else None
+                if q:
+                    a["num"] += h["weight"] * q["change_pct"]
+                    a["den"] += h["weight"]
+            industries = sorted(
+                ({"name": _short_industry(k),
+                  "share_pct": round(v["w"], 1),
+                  "change_pct": round(v["num"] / v["den"], 2) if v["den"] else None}
+                 for k, v in inds.items()),
+                key=lambda x: -x["share_pct"])
+        if not industries and FUYAO_ENABLED:
+            sec = await fetch_industry_allocation_fuyao(code)
+            if sec:
+                industries = [{"name": sec["name"], "share_pct": sec["share_pct"],
+                               "change_pct": sec.get("change_pct")}]
+    except Exception:
+        industries = []
+    holders = await fetch_fund_holders(code)
+    rank = _holder_rank(code) if holders else None
+    return {
+        "fund_code": code, "fund_name": name,
+        "fund_type": est["fund_type"], "is_qdii": bool("QDII" in (est["fund_type"] or "")),
+        "is_mrf": est["is_mrf"], "bond_est": est["bond_est"],
+        "no_stock_holdings": est["no_stock_holdings"],
+        "est_change_pct": est["est_change_pct"], "est_nav": est["est_nav"],
+        "nav_date": est["nav_date"], "dwjz": est["dwjz"], "jzzzl": est["jzzzl"],
+        "prev_nav_date": est["prev_nav_date"], "prev_dwjz": est["prev_dwjz"],
+        "prev_jzzzl": est["prev_jzzzl"],
+        "coverage_pct": est["coverage_pct"],
+        "report_label": est["report_label"], "report_date": est["report_date"],
+        "y1_return": y1,
+        "warming": warming,
+        "nav_history": [{"date": d, "nav": n, "change": c} for d, n, c in hist],
+        "hs300": hs300,
+        "index": index_info, "same_cat_count": same_cat_count,
+        "industries": industries,
+        "holders": ({"count": holders["holder_count"],
+                     "report_date": holders["report_date"],
+                     "rank": rank["rank"] if rank else None,
+                     "total": rank["total"] if rank else None}
+                    if holders else None),
+    }
+
+
+async def _compute_sector_flow() -> dict:
+    """Sector fund-flow board (v1.5.0): Eastmoney push2 clist, industry
+    boards (m:90 t:2) sorted by 主力净流入 (f62). One request per refresh,
+    60s cache. fuyao capital-flow is AI-client-only (code 2004) and is
+    deliberately NOT used."""
+    resp = await upstream_get(
+        "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=50&po=1&np=1"
+        "&ut=bd1d9ddb04089700cf9c27f6f742628&fltt=2&invt=2&fid=f62&fs=m:90+t:2"
+        "&fields=f12,f14,f3,f62,f184,f66,f69,f72",
+        referer="https://quote.eastmoney.com/", timeout=15)
+    diff = ((resp.json().get("data") or {}).get("diff")) or []
+    items = []
+    for d in diff:
+        # clist fields: f12 = 板块代码, f14 = 板块名称, f3 = 涨跌幅%,
+        # f62 = 主力净流入(元), f184 = 超大单净流入, f66 = 大单净流入.
+        if not isinstance(d, dict) or d.get("f14") is None:
+            continue
+        items.append({
+            "code": d.get("f12"),
+            "name": d["f14"],
+            "change_pct": _fnum(d.get("f3")),
+            "main_net": round((d.get("f62") or 0) / 1e8, 2),
+            "super_net": round((d.get("f184") or 0) / 1e8, 2),
+            "big_net": round((d.get("f66") or 0) / 1e8, 2),
+        })
+    if not items:
+        raise ValueError("empty sector flow")
+    return {"items": items, "updated_at": now_iso()}
+
+
+@app.get("/api/rank/sector-flow")
+async def rank_sector_flow(session: Optional[str] = Cookie(default=None)):
+    current_user_id(session)
+    got = await _board_payload("sector_flow", SECTOR_FLOW_TTL, _compute_sector_flow)
+    if got is None:
+        return _warming_response("sector_flow")
+    payload, stale = got
+    return {"updated_at": payload["updated_at"], "total": len(payload["items"]),
+            "stale": stale,
+            "items": [{"rank": i + 1, **x} for i, x in enumerate(payload["items"])]}
 
 
 @app.get("/api/rank/returns")
