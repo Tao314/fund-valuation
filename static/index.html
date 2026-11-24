@@ -95,10 +95,8 @@
   /* customer data status (v1.4.9): top pill + alert bar + detail cards */
   .ds-dot.warn { background: #D97706; }
   .ds-badge.warn { background: transparent; color: #B45309; border: 1px solid #D97706; }
-  .ds-pill { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 600; color: #374151; flex: none; }
+  .ds-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: none; }
   .ds-pill .ds-dot { margin-right: 0; }
-  .ds-alert { border: 1px solid #FDE68A; background: #FFFBEB; color: #92400E; font-size: 12.5px; line-height: 1.5; border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; }
-  .ds-alert.bad { border-color: #FECACA; background: #FEF2F2; color: #991B1B; }
   .ds-svc { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
   .ds-svc:last-child { border-bottom: none; }
   .ds-svc .ds-svc-name { font-size: 14px; font-weight: 600; color: #202939; }
@@ -320,7 +318,7 @@
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
         <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
-        <button class="ds-pill" id="ds-pill" title="数据服务状态"><span class="ds-dot ok" id="ds-pill-dot"></span><span id="ds-pill-text">数据正常</span></button>
+        <button class="ds-pill" id="ds-pill" title="数据服务状态"><span class="ds-dot ok" id="ds-pill-dot"></span><span id="ds-pill-text">数据状态</span></button>
         <div class="sort-toggle">
           <button class="secondary active" id="sort-default">默认顺序</button>
           <button class="secondary" id="sort-change">按涨跌幅</button>
@@ -344,7 +342,6 @@
         </div>
         <div class="err" id="bind-err"></div>
       </div>
-      <div class="ds-alert" id="ds-alert" style="display:none"></div>
       <div class="card">
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">加载中…</div>
@@ -2061,28 +2058,15 @@ function applyDataFlow(ok) {
 let dataStatusCache = null;
 const DS_TEXT = { normal: "数据正常", delayed: "数据延迟", degraded: "部分异常", outage: "暂不可用" };
 const DS_BADGE = { normal: "ok", delayed: "warn", degraded: "warn", outage: "bad" };
-const DS_IMPACT = { market: "实时行情可能延迟", nav: "部分基金估值可能受到影响", valuation: "基金实时估值可能暂时无法更新" };
 function dsStatusText(s) { return DS_TEXT[s] || "数据正常"; }
 async function loadDataStatus() {
   try {
     const d = await api("/api/data-status");
     dataStatusCache = d;
-    const dot = $("ds-pill-dot"), txt = $("ds-pill-text");
+    const dot = $("ds-pill-dot");
     if (dot) dot.className = "ds-dot " + (DS_BADGE[d.overall_status] || "ok");
-    if (txt) txt.textContent = dsStatusText(d.overall_status);
-    renderDataStatusAlert(d);
     if ($("view-datastatus").style.display !== "none") renderDataStatusDetail(d);
   } catch { /* stays on last known state; estimates refresh retries */ }
-}
-function renderDataStatusAlert(d) {
-  const bar = $("ds-alert");
-  if (!bar) return;
-  const bad = (d.services || []).filter(s => s.status !== "normal");
-  if (d.overall_status === "normal" || !bad.length) { bar.style.display = "none"; return; }
-  bar.className = "ds-alert" + (d.overall_status === "outage" ? " bad" : "");
-  bar.innerHTML = "<b>" + esc(d.overall_message) + "</b>" + bad.map(s =>
-    "<div>" + esc(s.name) + "：" + esc(s.message) + "，" + esc(DS_IMPACT[s.key] || "") + "。</div>").join("");
-  bar.style.display = "";
 }
 function renderDataStatusDetail(d) {
   const rows = (d.services || []).map(s =>
