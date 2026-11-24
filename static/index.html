@@ -92,6 +92,20 @@
   .ds-badge.none { background: #ECEEF2; color: #667085; }
   .ds-badge.fb { background: #EBF1FF; color: #2563EB; }
   .ds-badge.nofb { background: #FEF3C7; color: #B45309; }
+  /* customer data status (v1.4.9): top pill + alert bar + detail cards */
+  .ds-dot.warn { background: #D97706; }
+  .ds-badge.warn { background: transparent; color: #B45309; border: 1px solid #D97706; }
+  .ds-pill { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 600; color: #374151; flex: none; }
+  .ds-pill .ds-dot { margin-right: 0; }
+  .ds-alert { border: 1px solid #FDE68A; background: #FFFBEB; color: #92400E; font-size: 12.5px; line-height: 1.5; border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; }
+  .ds-alert.bad { border-color: #FECACA; background: #FEF2F2; color: #991B1B; }
+  .ds-svc { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
+  .ds-svc:last-child { border-bottom: none; }
+  .ds-svc .ds-svc-name { font-size: 14px; font-weight: 600; color: #202939; }
+  .ds-svc .ds-svc-desc { font-size: 12px; color: #667085; margin-top: 2px; }
+  .ds-svc .ds-svc-msg { font-size: 12px; color: #667085; margin-top: 2px; }
+  .ds-svc .ds-svc-right { text-align: right; flex: none; }
+  .ds-svc .ds-svc-time { font-size: 11px; color: #98A2B3; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .ft-dir > summary { cursor: pointer; list-style: none; }
   .ft-dir > summary::-webkit-details-marker { display: none; }
   .ft-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #475467; padding: 3px 0; border-bottom: 1px solid #F0F2F5; min-width: 0; }
@@ -306,6 +320,7 @@
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
         <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
+        <button class="ds-pill" id="ds-pill" title="数据服务状态"><span class="ds-dot ok" id="ds-pill-dot"></span><span id="ds-pill-text">数据正常</span></button>
         <div class="sort-toggle">
           <button class="secondary active" id="sort-default">默认顺序</button>
           <button class="secondary" id="sort-change">按涨跌幅</button>
@@ -329,10 +344,18 @@
         </div>
         <div class="err" id="bind-err"></div>
       </div>
+      <div class="ds-alert" id="ds-alert" style="display:none"></div>
       <div class="card">
         <div id="fund-cards"></div>
         <div class="muted" id="empty-tip">加载中…</div>
         <div class="err" id="dash-err"></div>
+      </div>
+    </div>
+
+    <div id="view-datastatus" style="display:none">
+      <div class="card">
+        <h3>数据服务状态</h3>
+        <div id="ds-detail"><div class="muted">加载中…</div></div>
       </div>
     </div>
 
@@ -532,6 +555,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.4.9</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">修复盘前净值标签与估值基数：净值日期按日历日判定（昨日净值不再叫今日净值），盘前曲线不再显示昨日分时（显示「今日尚未开盘」），自算估值始终以最新已公布净值为基数；本地缓存（估值/曲线）按日历日校验，隔夜缓存不再首屏误显；客户数据状态：估值页顶部指示灯（数据正常/部分异常/暂不可用）+「数据服务状态」详情页（行情数据/基金净值/估值服务三类业务状态），后端单独白名单接口，不透露任何供应商与接口信息</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.8</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">同花顺兜底补齐：A股日线（东财日线失败时）、A股实时行情（新浪失败时）、基金行业配置（F10 行业失败时，仅显示行业与占比）；港美股日线/行情、基金搜索、排行榜仍无独立兜底</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.7</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">接入同花顺官方接口作净值/持仓/股票仓位兜底（东财失败时自动切换）；「数据接口」页按数据类型分组卡片展示，一眼看出每组有无兜底、是否异常；用户管理按注册顺序编号</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.6</div><div class="es-main"><div class="es-date">2026-11-23</div><div class="es-desc">数据流异常时页面底部自动提示、恢复后消失（200 空数据的软限流也算异常）；管理页新增「数据接口」子页（全部上游接口与最近状态）；系统状态页增加系统文件目录树</div></div></div>
@@ -550,7 +574,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.8 · 更新于 2026-11-24 00:25</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.4.9 · 更新于 2026-11-24 09:45</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -704,11 +728,37 @@ function prevTradingDay(dateStr) {
   const p = n => String(n).padStart(2, "0");
   return dt.getFullYear() + "-" + p(dt.getMonth() + 1) + "-" + p(dt.getDate());
 }
+// Calendar date (browser local time; the user's phone is in Beijing).
+function todayStr(now) {
+  now = now || new Date();
+  const p = n => String(n).padStart(2, "0");
+  return now.getFullYear() + "-" + p(now.getMonth() + 1) + "-" + p(now.getDate());
+}
+// The trading day whose NAV is expected: today on weekdays (a fund
+// publishes today's NAV in the evening, even before the open), last
+// Friday on weekends. NOTE: this is NOT lastTradingDay() — before 09:30
+// on a weekday lastTradingDay() is yesterday, which mislabeled
+// yesterday's NAV as 今日净值 (v1.4.9 fix).
+function sessionDay(now) {
+  now = now || new Date();
+  return (now.getDay() >= 1 && now.getDay() <= 5) ? todayStr(now) : lastTradingDay(now);
+}
 // QDII funds publish NAV T-1; domestic funds (incl. A+H via 港股通) publish
 // same-day. Judge by fund type (backend is_qdii from Eastmoney FTYPE), not
 // by holdings' markets — an A+H fund with HK holdings is NOT T-1.
-function expectedNavDate(f) {
-  return (f.is_qdii || f.is_mrf) ? prevTradingDay(lastTradingDay()) : lastTradingDay();
+function expectedNavDate(f, now) {
+  return (f.is_qdii || f.is_mrf) ? prevTradingDay(sessionDay(now)) : sessionDay(now);
+}
+// NAV row label, by calendar date: only a NAV dated today is 今日净值;
+// yesterday's (last trading day's) NAV is 昨日净值; older ones show their
+// own date. 已确认 belongs to the published NAV row either way — the NAV
+// is official for its date.
+function navLabelFor(f, now) {
+  if (!f.nav_date) return "净值";
+  const today = todayStr(now);
+  if (f.nav_date === today) return `今日净值（${f.nav_date}）`;
+  if (f.nav_date === prevTradingDay(today)) return `昨日净值（${f.nav_date}）`;
+  return `净值（${f.nav_date}）`;
 }
 // Note shown instead of the estimate for funds with no stock holdings.
 function noStockNote(f) {
@@ -733,6 +783,7 @@ function showView(name) {
   $("view-admin").style.display = name === "admin" ? "" : "none";
   $("view-settings").style.display = name === "settings" ? "" : "none";
   $("view-evo").style.display = name === "evo" ? "" : "none";
+  $("view-datastatus").style.display = name === "datastatus" ? "" : "none";
   $("toolbar-row2").style.display = name === "main" ? "" : "none";
   $("nav-main").className = "tab-btn" + (name === "main" ? " active" : "");
   $("nav-rank").className = "tab-btn" + (name === "rank" ? " active" : "");
@@ -742,6 +793,7 @@ function showView(name) {
   if (name === "rank") loadRank(); else stopRankPoll();
   if (name !== "admin") stopStatusTimer();
   if (name === "admin") loadAdmin();
+  if (name === "datastatus") loadDataStatus();
 }
 $("nav-main").onclick = () => showView("main");
 $("nav-rank").onclick = () => showView("rank");
@@ -1272,6 +1324,10 @@ function renderCachedEstimates() {
     if (!raw) return;
     const data = JSON.parse(raw);
     if (!data || !Array.isArray(data.funds)) return;
+    // First paint only from today's payload: a cache saved yesterday
+    // (e.g. a tab left open overnight) must never render as today's
+    // numbers (v1.4.9 fix — 09:27 pre-open showed yesterday's +8.28%).
+    if (data._cache_date && data._cache_date !== todayStr()) return;
     window.estimateData = data;
     addedCodes = new Set(data.funds.map(f => f.fund_code));
     loadCachedHistory();
@@ -1547,18 +1603,20 @@ let historySeries = {};
 function historyCacheKey() { return "fv-history-" + myUsername; }
 function saveCachedHistory() {
   try {
+    // Keyed by calendar date, not lastTradingDay(): before 09:30 the
+    // latter is yesterday, which restored yesterday's curve as today's.
     localStorage.setItem(historyCacheKey(),
-      JSON.stringify({ date: lastTradingDay(), series: historySeries }));
+      JSON.stringify({ date: todayStr(), series: historySeries }));
   } catch { /* quota/private mode */ }
 }
 function loadCachedHistory() {
   // Instant first paint for curves too: restore the last series from
-  // localStorage (same session day only) before the fresh request lands.
+  // localStorage (same calendar day only) before the fresh request lands.
   try {
     const raw = localStorage.getItem(historyCacheKey());
     if (!raw) return;
     const data = JSON.parse(raw);
-    if (data && data.date === lastTradingDay() &&
+    if (data && data.date === todayStr() &&
         data.series && typeof data.series === "object") historySeries = data.series;
   } catch { /* corrupted cache -> ignore, fresh load will replace it */ }
 }
@@ -1645,7 +1703,7 @@ function tradingMinutesAt(ts, segs) {
   }
   return acc;
 }
-function sparklineHtml(f, published) {
+function sparklineHtml(f, published, preopen) {
   const raw = historySeries[f.fund_code];
   const hasPts = Array.isArray(raw) && raw.length >= 2;
   const segs = sparkSegments(f);
@@ -1733,7 +1791,7 @@ function sparklineHtml(f, published) {
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${gridH}${gridV}${zero}${lines}</svg>
     <span class="sp-max">${fmtLbl(bound)}</span>
     <span class="sp-min">${fmtLbl(-bound)}</span>
-    ${hasPts ? "" : '<span class="sp-loading">曲线加载中</span>'}
+    ${hasPts ? "" : `<span class="sp-loading">${preopen ? "今日尚未开盘" : "曲线加载中"}</span>`}
     ${dot}
     <div class="sp-times"><span class="sp-t-first">${fmtHM(t0)}</span>${joinLabels}<span class="sp-t-last">${fmtHM(t1)}</span></div>
   </div>`;
@@ -1803,10 +1861,12 @@ function renderFunds(data) {
       // - market still live (e.g. QDII in US pre/trading): published NAV row
       //   on top, then the normal estimate (base = latest NAV, targets the
       //   next NAV) still labeled 预估, ext row as-is, no accuracy diff.
-      // The published row is labeled 今日净值 only when the NAV date is the
-      // last trading day; a QDII fund on Monday shows Friday's NAV as
-      // 昨日净值 (still 已确认 — it is the official NAV for that date).
-      const navLabel = f.nav_date === lastTradingDay() ? "今日净值" : "昨日净值";
+      // navLabelFor compares against the calendar day (v1.4.9): yesterday's
+      // NAV is 昨日净值 even before 09:30, when lastTradingDay() is still
+      // yesterday. The estimate in the published&&!live branch is the
+      // published day's session estimate (base = prev NAV); in every other
+      // branch it is today's estimate (base = latest NAV, backend est_nav).
+      const navLabel = navLabelFor(f);
       const prevRow = f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : "";
       const credCls = f.credibility === "高" ? " fc-cred-hi" : f.credibility === "中" ? " fc-cred-mid" : " fc-cred-lo";
       const credTag = f.credibility ? `<span class="fc-cred${credCls}">可信度·${f.credibility}</span>` : "";
@@ -1816,21 +1876,22 @@ function renderFunds(data) {
         ? `<div class="fc-row"><span class="fc-label fc-note">${noStockNote(f)}</span></div>`
         : f.no_stock_holdings
         // Bond/money funds: NAV rows only, no estimate, no curve.
-        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b>${published ? ` ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span>` : ""}</span></div>
+        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b>${published ? ` ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span>` : ""}</span></div>
         ${prevRow}
         <div class="fc-row"><span class="fc-label fc-note">${noStockNote(f)}</span></div>`
         : (published && !live)
-        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
+        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
         ${prevRow}
         <div class="fc-row"><span class="fc-label">${estLabel}</span><span class="fc-val"><b>${estNavFromPrev(f)}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state">预估</span></span></div>
         ${extRow(f, true)}
-        <div class="fc-row fc-row-diff"><span class="fc-label">估值偏差</span><span class="fc-val fc-diff">${fmtDiff(estDiff(f))}</span></div>`
+        ${(() => { const t = todayStr(); const showDiff = f.jzzzl != null && (f.nav_date === t || f.nav_date === prevTradingDay(t)); return showDiff ? `<div class="fc-row fc-row-diff"><span class="fc-label">估值偏差</span><span class="fc-val fc-diff">${fmtDiff(estDiff(f))}</span></div>` : ""; })()}`
         : published
-        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
+        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
         ${prevRow}
         <div class="fc-row"><span class="fc-label">${estLabel}</span><span class="fc-val"><b>${f.est_nav ?? "-"}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state" data-code="${f.fund_code}">${st.state}</span></span></div>
         ${extRow(f, false)}`
-        : `<div class="fc-row"><span class="fc-label">昨日净值（${f.nav_date ?? ""}）</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b></span></div>
+        : `<div class="fc-row"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b>${f.jzzzl != null ? ` ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span>` : ""}</span></div>
+        ${prevRow}
         <div class="fc-row"><span class="fc-label">${estLabel}</span><span class="fc-val"><b>${f.est_nav ?? "-"}</b> ${fmtPct(f.est_change_pct)}<span class="fc-state" data-code="${f.fund_code}">${st.state}</span></span></div>
         ${extRow(f, false)}`;
       const metaParts = [];
@@ -1845,7 +1906,7 @@ function renderFunds(data) {
       </div>
       <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${metaParts.join(" · ")}</div>
       ${rows}
-      ${f.no_stock_holdings ? "" : sparklineHtml(f, published)}
+      ${f.no_stock_holdings ? "" : sparklineHtml(f, published, st.session === "preopen")}
       </div>`;
     });
   });
@@ -1994,6 +2055,48 @@ function applyDataFlow(ok) {
   const b = $("dataflow-banner");
   if (b) b.style.display = ok === false ? "" : "none";
 }
+/* ---- customer data status (v1.4.9): business names only, whitelist
+   fields from GET /api/data-status — no provider/interface ever reaches
+   the client. Four levels: 正常 / 更新延迟 / 部分异常 / 暂不可用. */
+let dataStatusCache = null;
+const DS_TEXT = { normal: "数据正常", delayed: "数据延迟", degraded: "部分异常", outage: "暂不可用" };
+const DS_BADGE = { normal: "ok", delayed: "warn", degraded: "warn", outage: "bad" };
+const DS_IMPACT = { market: "实时行情可能延迟", nav: "部分基金估值可能受到影响", valuation: "基金实时估值可能暂时无法更新" };
+function dsStatusText(s) { return DS_TEXT[s] || "数据正常"; }
+async function loadDataStatus() {
+  try {
+    const d = await api("/api/data-status");
+    dataStatusCache = d;
+    const dot = $("ds-pill-dot"), txt = $("ds-pill-text");
+    if (dot) dot.className = "ds-dot " + (DS_BADGE[d.overall_status] || "ok");
+    if (txt) txt.textContent = dsStatusText(d.overall_status);
+    renderDataStatusAlert(d);
+    if ($("view-datastatus").style.display !== "none") renderDataStatusDetail(d);
+  } catch { /* stays on last known state; estimates refresh retries */ }
+}
+function renderDataStatusAlert(d) {
+  const bar = $("ds-alert");
+  if (!bar) return;
+  const bad = (d.services || []).filter(s => s.status !== "normal");
+  if (d.overall_status === "normal" || !bad.length) { bar.style.display = "none"; return; }
+  bar.className = "ds-alert" + (d.overall_status === "outage" ? " bad" : "");
+  bar.innerHTML = "<b>" + esc(d.overall_message) + "</b>" + bad.map(s =>
+    "<div>" + esc(s.name) + "：" + esc(s.message) + "，" + esc(DS_IMPACT[s.key] || "") + "。</div>").join("");
+  bar.style.display = "";
+}
+function renderDataStatusDetail(d) {
+  const rows = (d.services || []).map(s =>
+    '<div class="ds-svc"><div><div class="ds-svc-name">' + esc(s.name) + '</div>' +
+    '<div class="ds-svc-desc">' + esc(s.desc) + '</div>' +
+    '<div class="ds-svc-msg">' + esc(s.message) + '</div></div>' +
+    '<div class="ds-svc-right"><span class="ds-badge ' + (DS_BADGE[s.status] || "ok") + '">' + dsStatusText(s.status) + '</span>' +
+    '<div class="ds-svc-time">' + (s.updated_at ? "最近更新 " + fmtLocalTime(s.updated_at) : "暂无记录") + '</div></div></div>').join("");
+  $("ds-detail").innerHTML =
+    '<div style="font-size:14px;font-weight:600;margin-bottom:2px">' + esc(d.overall_message) + '</div>' +
+    '<div class="muted" style="margin-bottom:6px">最近状态检查 ' + fmtLocalTime(d.checked_at) + '</div>' + rows +
+    '<div class="muted" style="margin-top:10px;font-size:11.5px">数据服务状态仅反映数据获取及更新情况，不代表基金估值的准确性，实际净值以基金管理人公布的数据为准。</div>';
+}
+$("ds-pill").onclick = () => showView("datastatus");
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
@@ -2005,6 +2108,7 @@ async function loadEstimates() {
     const data = await api("/api/estimates");
     window.estimateData = data;
     applyDataFlow(data.data_flow_ok);
+    loadDataStatus();  // top pill + alert bar; never rejects
     if (data.refresh_seconds && data.refresh_seconds !== refreshSeconds) {
       refreshSeconds = data.refresh_seconds;
       startAutoRefresh(); resetCountdown();
@@ -2013,7 +2117,7 @@ async function loadEstimates() {
     addedCodes = new Set(funds.map(f => f.fund_code));
     $("empty-tip").style.display = funds.length ? "none" : "";
     if (!funds.length) $("empty-tip").textContent = "列表为空，去「设置」里搜索添加基金。";
-    try { localStorage.setItem(estimatesCacheKey(), JSON.stringify(data)); } catch { /* quota/private mode */ }
+    try { localStorage.setItem(estimatesCacheKey(), JSON.stringify({ ...data, _cache_date: todayStr() })); } catch { /* quota/private mode */ }
     await histP;
     renderFunds(data);
     renderSettings(data);

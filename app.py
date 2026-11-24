@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.4.8"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.4.9"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -1624,6 +1624,105 @@ def _data_flow_ok() -> bool:
     if consec_bad and fails >= _FLOW_CONSEC_FAILS:
         return False
     return True
+
+
+# Customer-facing service status (v1.4.9): the three business names a
+# client ever sees, mapped onto the internal upstream catalog. The
+# client API below returns ONLY these whitelisted fields — never a
+# provider name, interface name, URL, raw error, HTTP code, call count
+# or latency. Admin-only sources (search, rankings, code suggest, fund
+# profile, IP geo) are deliberately not mapped to any client service.
+_CUSTOM_SERVICES = [
+    # key, name, desc, internal source keys, freshness-checked
+    ("market", "行情数据", "股票行情及市场数据",
+     ["sina", "em_ulist", "fuyao_snapshot"], True),
+    ("nav", "基金净值", "基金净值及历史数据",
+     ["em_nav", "fuyao_nav", "yahoo_nav"], False),
+    ("valuation", "估值服务", "基金实时估值计算",
+     ["em_holdings", "em_pingzhong", "fuyao_holdings", "fuyao_asset",
+      "em_kline", "fuyao_kline", "em_f10", "fuyao_industry",
+      "em_trends", "yahoo_trends", "tencent"], True),
+]
+_DELAY_SECS = 900           # no success in 15 min during a live session
+_CUSTOM_MSG = {
+    "normal": "数据更新正常",
+    "delayed": "数据更新较慢，请稍后查看",
+    "degraded": "部分数据源暂时异常，系统正在恢复中",
+    "outage": "数据暂时无法获取，系统正在恢复中",
+}
+_CUSTOM_OVERALL_MSG = {
+    "normal": "所有数据服务运行正常",
+    "degraded": "部分数据服务暂时异常",
+    "outage": "部分数据服务暂不可用",
+}
+
+
+def _live_session(now: datetime) -> bool:
+    """True while any market the tool tracks is trading: CN weekday
+    09:30-16:30, or the US regular session (ET). Outside a session a
+    stale last-success is expected (off-hours / holiday) and must NOT
+    be reported as a delay."""
+    if _cn_market_open(now):
+        return True
+    return us_session(now.astimezone(ET_TZ)) == "trading"
+
+
+def _customer_data_status(stats=None, now_ts=None, fuyao_enabled=None):
+    """Aggregate internal upstream stats into the client-safe status
+    object. Pure over its inputs (injectable for tests): `stats` is a
+    _source_stats-shaped dict, `now_ts` epoch seconds, `fuyao_enabled`
+    defaults to the module flag. Rules per service, over sources that
+    actually ran (unconfigured fuyao excluded, no records = no signal):
+    every considered source's latest call failed -> 暂不可用; some
+    failed, some ok -> 部分异常; all ok but no success in the last 15
+    minutes during a live session (market/valuation only; NAV is daily
+    data) -> 更新延迟; otherwise 正常. Overall: any 暂不可用 ->
+    outage; any 部分异常/更新延迟 -> degraded; else normal."""
+    stats = _source_stats if stats is None else stats
+    now_ts = time.time() if now_ts is None else now_ts
+    if fuyao_enabled is None:
+        fuyao_enabled = FUYAO_ENABLED
+    now = datetime.fromtimestamp(now_ts, CN_TZ)
+    in_session = _live_session(now)
+    services = []
+    worst = "normal"
+    for key, name, desc, src_keys, fresh in _CUSTOM_SERVICES:
+        considered = []
+        for k in src_keys:
+            if k.startswith("fuyao_") and not fuyao_enabled:
+                continue
+            st = stats.get(k)
+            if st and (st["ok"] or st["fail"]):
+                considered.append(st)
+        last_ok = max((st["last_ok"] or 0 for st in considered), default=0) or None
+        if not considered:
+            status = "normal"
+        else:
+            failing = [st for st in considered
+                       if (st["last_fail"] or 0) > (st["last_ok"] or 0)]
+            oking = [st for st in considered
+                     if (st["last_ok"] or 0) >= (st["last_fail"] or 0)]
+            if failing and not oking:
+                status = "outage"
+            elif failing:
+                status = "degraded"
+            elif fresh and in_session and last_ok and \
+                    now_ts - last_ok > _DELAY_SECS:
+                status = "delayed"
+            else:
+                status = "normal"
+        if status == "outage":
+            worst = "outage"
+        elif status in ("degraded", "delayed") and worst == "normal":
+            worst = "degraded"
+        services.append({
+            "key": key, "name": name, "desc": desc, "status": status,
+            "updated_at": _iso(last_ok) if last_ok else None,
+            "message": _CUSTOM_MSG[status],
+        })
+    return {"overall_status": worst,
+            "overall_message": _CUSTOM_OVERALL_MSG[worst],
+            "checked_at": _iso(now_ts), "services": services}
 
 
 async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10,
@@ -4046,6 +4145,19 @@ _series_gen = {}     # uid -> mutation counter; stale computes don't overwrite
 _SERIES_TTL = 20
 
 
+def _preopen_no_us(now_cn, holdings: list) -> bool:
+    """True on a weekday before 09:30 (Asia/Shanghai) when none of the
+    fund's holdings is a US stock: nothing in the fund's markets has
+    traded today yet. US holdings are excluded — their overnight session
+    (21:30-05:00 Beijing) is the current session and its data is real.
+    Feeder/bond funds (empty holdings) count as non-US."""
+    if now_cn.weekday() >= 5:
+        return False
+    if now_cn.hour * 60 + now_cn.minute >= 570:
+        return False
+    return not any(market_of_holding(h.get("code")) == "US" for h in holdings)
+
+
 async def _compute_series(uid):
     """Intraday estimate curve per watchlisted fund for the current
     session day, computed from holdings' Eastmoney minute trends and
@@ -4111,6 +4223,12 @@ async def _compute_series(uid):
     series = {}
     for code, fund_name, holdings, _, syms, stock_position in per_fund:
       try:
+        if _preopen_no_us(now_cn, holdings):
+            # Weekday pre-open, no US holdings: nothing has traded today.
+            # Never serve yesterday's session (trends stale-cache fallback
+            # or est_history snapshots) as today's curve.
+            series[code] = []
+            continue
         raw_cov = sum(h["weight"] for h in holdings)
         pts = _fund_curve(holdings, trends_by_code, start_ts,
                           _residual_pct(raw_cov, stock_position))
@@ -5325,6 +5443,16 @@ def admin_data_sources(session: Optional[str] = Cookie(default=None)):
     return {"version": APP_VERSION, "now": _iso(time.time()),
             "data_flow_ok": _data_flow_ok(), "fuyao_configured": FUYAO_ENABLED,
             "sources": items, "groups": groups}
+
+
+@app.get("/api/data-status")
+def customer_data_status(session: Optional[str] = Cookie(default=None)):
+    """Client-safe data status (v1.4.9): any logged-in user may read it.
+    Returns ONLY whitelisted business fields — no provider names,
+    interface names, URLs, raw errors, HTTP codes, counts or timings.
+    It never reuses the admin data-sources payload."""
+    current_user_id(session)  # 401 when unauthenticated
+    return _customer_data_status()
 
 
 @app.get("/api/admin/system-status")
