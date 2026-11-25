@@ -635,6 +635,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.6.1</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">新增 tests/ 最小测试护栏（52 个测试：TrueNAV 回归、日期判断、排行榜规范化、数据源降级、启动冒烟），app.py 业务代码未动；已知节假日日历仍缺，国庆误判已用 expectedFailure 钉住</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.0</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">数据源兜底补齐：港美股日线（东财失败时切 Yahoo）、港美股实时行情（新浪失败时切 Yahoo）、基金搜索（东财失败时切全量基金代码表，失败带 fallback 标记不再 500）；排行榜页级容错（单页失败跳过拼局部榜）；排行榜仍无独立第二数据源</div></div></div>
           <div class="es-row"><div class="es-ver">v1.5.0</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">单个基金详情页：点卡片进入，当日涨幅/近1年涨幅/持有人数与库内排名；业绩走势（本基金 vs 沪深300，近1月/3月/6月/1年/3年切换+净值表）；关联板块改为基金当日估值走势，可分享成图片；行业分布条形图；排行榜新增板块资金流榜（东财行业板块主力净流入）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.4.9</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">修复盘前净值标签与估值基数：净值日期按日历日判定（昨日净值不再叫今日净值），盘前曲线不再显示昨日分时（显示「今日尚未开盘」），自算估值始终以最新已公布净值为基数；本地缓存（估值/曲线）按日历日校验，隔夜缓存不再首屏误显；客户数据状态功能已整项移除</div></div></div>
@@ -657,7 +658,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.0 · 更新于 2026-11-25 10:58</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.1 · 更新于 2026-11-25 20:55</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;

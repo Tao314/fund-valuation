@@ -167,6 +167,18 @@ rm -rf /opt/fund-valuation
 - `tools/smtp_test.py` 独立 SMTP 发信测试（见「部署配置」）
 - `tools/backtest.py` 估值回测基线（见 backtest-report.md）
 
+## 测试
+
+最小测试护栏（标准库 unittest，无新增依赖，`requirements.txt` 不动）：
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+覆盖 TrueNAV 核心回归、日期判断边界、排行榜规范化、数据源降级和启动冒烟，详见 `tests/README.md`。已知缺口：暂无节假日日历，工作日节假日仍会被当成交易日（`tests/test_dates.py` 里有一处 expectedFailure 钉住这一点）。
+
 ## 部署配置（邮箱验证码，可选，默认关闭）
 
 邮箱验证码功能由 `EMAIL_AUTH` 开关控制，**默认关闭**（用户名+密码注册，页面不显示邮箱相关入口，邮箱接口返回 404）。确认 SMTP 可用后再设 `EMAIL_AUTH=1` 开启。开启后注册/找回密码的验证码邮件走 SMTP，配置只从环境变量读取（不写进代码仓库）。未配置 `SMTP_HOST` 时进入日志模式：验证码只写服务日志（`[email-code] to=... code=...`），便于本地测试；正式部署请配齐以下变量后重启服务：
@@ -208,6 +220,12 @@ python3 tools/smtp_test.py 你的收件邮箱@example.com
 ## 版本演变
 
 版本规则：一天最多一个正式版本，当天所有改动合并为一个版本；版本号为「主.次.补丁」，次号按发版日递增，补丁号仅用于当天紧急修复，主号仅在架构大改时变动。TrueNAV 估值算法版本单独编号（1.0 前十大加权 → 1.1 未披露仓位补齐 → 1.2 β 校准），与软件版本分开。2026-11-23 前的旧编号（v1.6.0–v1.22.0）已按此规则按天合并重编，下方每组标注了包含的旧版本号范围，Git 提交历史保持原样。
+
+### v1.6.1（2026-11-25）
+
+- 新增 `tests/` 最小测试护栏（标准库 unittest，不加新依赖）：52 个测试全过，另 1 处 expectedFailure；覆盖 TrueNAV 核心回归（加权、残差补齐、OLS β 校准手算值钉死、可信度分档）、日期判断边界、排行榜规范化（缺字段/坏数字/短行过滤、页级容错）、数据源降级（空数据判失败、东财挂切 Yahoo、全挂返旧缓存）、启动冒烟（`/` 200、`/api/config` 返回当前版本、未登录搜索 401）；一条命令跑全套：`python -m unittest discover -s tests -v`
+- `app.py` 业务代码未动，TrueNAV 算法口径不变，表结构不变
+- 已知缺口：节假日日历仍缺，工作日节假日（如 2026-10-01 国庆）会被当成交易日，`tests/test_dates.py` 里用 expectedFailure 钉住，补日历那天去掉装饰器
 
 ### v1.6.0（2026-11-25）
 
