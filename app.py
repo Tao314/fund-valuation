@@ -1683,6 +1683,61 @@ def _is_fund_entry(d: dict) -> bool:
     return d.get("FundBaseInfo") is not None
 
 
+# Fund-search fallback (2026-11-25): Eastmoney's full fund-code list
+# (fundcode_search.js, ~28k rows: [code, pinyin-abbr, name, type,
+# pinyin-full]). Served from memory for 24h after one download, so a
+# fundsuggest outage costs one 3MB fetch, not one per search.
+_FUNDCODE_CACHE: dict = {"rows": None, "fetched_at": 0.0}
+_FUNDCODE_TTL = 86400
+
+
+async def _fetch_fundcode_list() -> list:
+    """All-fund [code, abbr, name, pinyin-full] rows from fundcode_search.js
+    (memory-cached). [] when the list cannot be fetched and no stale
+    in-memory copy exists."""
+    if _FUNDCODE_CACHE["rows"] is not None and \
+            time.time() - _FUNDCODE_CACHE["fetched_at"] < _FUNDCODE_TTL:
+        return _FUNDCODE_CACHE["rows"]
+    try:
+        resp = await upstream_get(
+            "https://fund.eastmoney.com/js/fundcode_search.js", timeout=30)
+        m = re.search(r"var r = (\[.*\]);", resp.text, re.S)
+        rows = await asyncio.to_thread(json.loads, m.group(1)) if m else []
+        rows = [[r[0], r[1], r[2], r[4]] for r in rows
+                if isinstance(r, list) and len(r) > 4 and r[0] and r[2]]
+    except Exception:
+        rows = []
+    if rows:
+        _FUNDCODE_CACHE.update(rows=rows, fetched_at=time.time())
+        return rows
+    return _FUNDCODE_CACHE["rows"] or []
+
+
+def _match_fundcode(rows: list, q: str) -> list:
+    """Top-20 {code, name} matches from the fund-code list: code prefix
+    first, then name/pinyin substring (case-insensitive). The list is
+    fund-only, so no category filter is needed."""
+    qu = q.strip().upper()
+    if not qu:
+        return []
+    out, seen = [], set()
+    for code, _abbr, name, _full in rows:
+        if code.startswith(qu) and code not in seen:
+            out.append({"code": code, "name": name})
+            seen.add(code)
+        if len(out) >= 20:
+            return out
+    for code, abbr, name, full in rows:
+        if code in seen:
+            continue
+        if qu in name or qu in (abbr or "") or qu in (full or ""):
+            out.append({"code": code, "name": name})
+            seen.add(code)
+        if len(out) >= 20:
+            return out
+    return out
+
+
 @app.get("/api/search")
 async def search(q: str, session: Optional[str] = Cookie(default=None)):
     current_user_id(session)
@@ -1690,10 +1745,16 @@ async def search(q: str, session: Optional[str] = Cookie(default=None)):
     if not q:
         return {"results": []}
     from urllib.parse import quote
-    resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={quote(q)}")
-    data = resp.json()
-    results = [{"code": d.get("CODE"), "name": d.get("NAME")} for d in data.get("Datas", []) if d.get("CODE") and _is_fund_entry(d)]
-    return {"results": results[:20]}
+    try:
+        resp = await upstream_get(f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={quote(q)}")
+        data = resp.json()
+        results = [{"code": d.get("CODE"), "name": d.get("NAME")} for d in data.get("Datas", []) if d.get("CODE") and _is_fund_entry(d)]
+        return {"results": results[:20]}
+    except Exception:
+        # fundsuggest down -> fund-code list fallback. An empty list is
+        # the honest degraded answer; search never 500s on an outage.
+        rows = await _fetch_fundcode_list()
+        return {"results": _match_fundcode(rows, q), "fallback": True}
 
 
 async def fetch_fund_type(code: str) -> Optional[str]:
@@ -2662,6 +2723,62 @@ async def _fetch_em_quotes(secids: list[str]) -> dict:
     return out
 
 
+def _sina_to_secid(sym: str) -> Optional[str]:
+    """Eastmoney secid for a Sina HK/US symbol (hk00700 -> 116.00700,
+    gb_nvda -> 105.NVDA). None for A-shares (sh/sz)."""
+    if not sym:
+        return None
+    if sym.startswith("hk") and re.fullmatch(r"\d{5}", sym[2:]):
+        return "116." + sym[2:]
+    if sym.startswith("gb_") and len(sym) > 3:
+        return "105." + sym[3:].upper()
+    return None
+
+
+async def _fetch_yahoo_quotes(symbols: list[str]) -> dict:
+    """{sina_symbol: quote} for HK/US symbols from Yahoo chart meta
+    (regularMarketPrice / chartPreviousClose), one chart call per symbol
+    across query1/query2. Only used when Sina produced nothing for these
+    symbols, so a Yahoo failure just leaves the stale cache in place."""
+    async def one(sym: str):
+        secid = _sina_to_secid(sym)
+        ysym = _yahoo_symbol(secid) if secid else None
+        if not ysym:
+            return sym, None
+        for host in ("query1", "query2"):
+            try:
+                resp = await upstream_get(
+                    f"https://{host}.finance.yahoo.com/v8/finance/chart/{ysym}"
+                    "?interval=1d&range=1d",
+                    timeout=15)
+                found = (resp.json().get("chart") or {}).get("result")
+                if not found:
+                    continue
+                meta = found[0].get("meta") or {}
+                cur = _fnum(meta.get("regularMarketPrice"))
+                prev = _fnum(meta.get("chartPreviousClose"))
+                if not cur or not prev or prev <= 0 or cur <= 0:
+                    return sym, None
+                rmt = meta.get("regularMarketTime")
+                qtime = datetime.fromtimestamp(rmt, tz=CN_TZ).strftime(
+                    "%Y-%m-%d %H:%M:%S") if rmt else None
+                return sym, {"name": meta.get("shortName") or meta.get("longName"),
+                             "prev_close": prev, "current": cur,
+                             "change_pct": (cur - prev) / prev * 100,
+                             "quote_time": qtime}
+            except Exception:
+                continue
+        return sym, None
+
+    out = {}
+    for sym, quote in await asyncio.gather(*(one(s) for s in symbols)):
+        if quote:
+            out[sym] = quote
+    if out:
+        print(f"[quotes] {sorted(out)} via yahoo", flush=True)
+    return out
+
+
 async def _refresh_quotes(symbols: list[str]) -> dict:
     """Fetch quotes (Sina for A/HK/US, Eastmoney ulist for JP/KR/TW secids)
     and merge into the cache. Caller holds the lock."""
@@ -2715,12 +2832,19 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
         sina_failed = True
     # A-share symbols Sina produced nothing for (hard failure, or empty
     # lines under throttling) fall back to fuyao snapshot (v1.4.8). HK/US
-    # have no fuyao coverage and keep whatever is cached.
+    # have no fuyao coverage and fall back to Yahoo chart quotes instead.
     if FUYAO_ENABLED:
         missing_a = [s for s in sina_syms
                      if s not in quotes and re.fullmatch(r"(sh|sz)\d{6}", s)]
         if missing_a:
             quotes.update(await fetch_snapshot_fuyao(missing_a))
+    missing_hk_us = [s for s in sina_syms
+                     if s not in quotes and (s.startswith("hk") or s.startswith("gb_"))]
+    if missing_hk_us:
+        try:
+            quotes.update(await _fetch_yahoo_quotes(missing_hk_us))
+        except Exception:
+            pass
     if quotes or not sina_failed:
         _quote_cache.update(at=now, quotes={**cached, **quotes})
     return {s: _quote_cache["quotes"][s] for s in symbols if s in _quote_cache["quotes"]}
@@ -4345,22 +4469,35 @@ RANK_CATS = {"all", "gp", "hh", "zq", "zs", "qdii", "fof"}
 async def fetch_returns_all(ft: str = "all") -> list:
     """Full rankhandler dataset for one fund category (ft=all/gp/hh/zq/zs/
     qdii/fof). Page count comes from the response's allRecords (5000 rows
-    per page); parse in a thread so the event loop stays responsive."""
+    per page); parse in a thread so the event loop stays responsive. Each
+    page is retried once; a failed later page is skipped (partial board)
+    instead of failing the whole fetch -- page 1 failing still raises."""
     async def one_page(page):
-        resp = await upstream_get(
-            f"https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft={ft}&rs=&gs=0"
-            f"&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi={page}&pn=5000&dx=1&v=0.123456",
-            referer=RANK_REF, timeout=60,
-        )
-        return resp.text
+        for _ in range(2):
+            try:
+                resp = await upstream_get(
+                    f"https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft={ft}&rs=&gs=0"
+                    f"&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi={page}&pn=5000&dx=1&v=0.123456",
+                    referer=RANK_REF, timeout=60,
+                )
+                return resp.text
+            except Exception:
+                continue
+        return None
 
     first = await one_page(1)
+    if not first:
+        raise ValueError("empty rank data")
     m = re.search(r"allRecords:(\d+)", first)
     total = int(m.group(1)) if m else 5000
     pages = max(1, math.ceil(total / 5000))
     texts = [first]
     if pages > 1:
-        texts += await asyncio.gather(*(one_page(p) for p in range(2, pages + 1)))
+        rest = await asyncio.gather(*(one_page(p) for p in range(2, pages + 1)))
+        lost = [p for p, t in zip(range(2, pages + 1), rest) if not t]
+        if lost:
+            print(f"[rank] {ft}: pages {lost} failed, serving partial board", flush=True)
+        texts += [t for t in rest if t]
     rows = []
     for t in texts:
         rows += await asyncio.to_thread(parse_rank_rows, t)
@@ -4370,15 +4507,21 @@ async def fetch_returns_all(ft: str = "all") -> list:
 
 
 async def fetch_qdii_rows() -> list:
-    resp = await upstream_get(
-        "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=qdii&rs=&gs=0"
-        "&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi=1&pn=500&dx=1&v=0.123456",
-        referer=RANK_REF, timeout=30,
-    )
-    rows = parse_rank_rows(resp.text)
-    if not rows:
-        raise ValueError("empty qdii data")
-    return rows
+    # Single page: one retry, then the stale-cache/202 path in
+    # _board_payload takes over (same as the returns board).
+    for _ in range(2):
+        try:
+            resp = await upstream_get(
+                "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=qdii&rs=&gs=0"
+                "&sc=zzf&st=desc&sd=&ed=&qdii=&tabSubtype=,,,,,&pi=1&pn=500&dx=1&v=0.123456",
+                referer=RANK_REF, timeout=30,
+            )
+            rows = parse_rank_rows(resp.text)
+            if rows:
+                return rows
+        except Exception:
+            continue
+    raise ValueError("empty qdii data")
 
 
 def market_of_holding(code: str) -> str:
@@ -4543,13 +4686,69 @@ async def fetch_nav_history(code: str, days: int = BETA_WINDOW) -> list:
     return rows[:days]
 
 
+async def _fetch_yahoo_daily_closes(secid: str, days: int = 240) -> dict:
+    """{date: close} daily closes from the Yahoo Finance chart API (1d)
+    as the fallback when the Eastmoney kline fails and fuyao has no
+    coverage (HK/US/JP/KR/TW -- fuyao is A-share only). Prefers
+    split/div-adjusted closes when Yahoo reports them (closest to EM
+    forward-adjusted fqt=1); dates are the market-local calendar day.
+    {} on any failure (caller keeps the stale cache)."""
+    symbol = _yahoo_symbol(secid)
+    if not symbol:
+        return {}
+    prefix = secid.split(".", 1)[0]
+    if prefix == "116":
+        tz = ZoneInfo("Asia/Hong_Kong")
+    elif prefix in ("105", "106", "107"):
+        tz = ET_TZ
+    else:
+        tz = CN_TZ
+    rng = "2y" if days > 300 else "1y"
+    result = None
+    for host in ("query1", "query2"):
+        try:
+            resp = await upstream_get(
+                f"https://{host}.finance.yahoo.com/v8/finance/chart/{symbol}"
+                f"?interval=1d&range={rng}",
+                timeout=15)
+            found = (resp.json().get("chart") or {}).get("result")
+            if found:
+                result = found[0]
+                break
+        except Exception:
+            continue
+    if not result:
+        return {}
+    timestamps = result.get("timestamp") or []
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    adj = ((result.get("indicators") or {}).get("adjclose") or [{}])[0].get("adjclose") or []
+    series = adj if len(adj) == len(timestamps) else closes
+    out, last = {}, None
+    for ts, close in zip(timestamps, series):
+        c = _fnum(close)
+        if c is None:
+            if last is None:
+                continue
+            c = last
+        last = c
+        if c <= 0:
+            continue
+        out[datetime.fromtimestamp(int(ts), tz=tz).strftime("%Y-%m-%d")] = c
+    if len(out) < 2:
+        return {}
+    print(f"[kline] {secid} via yahoo", flush=True)
+    return out
+
+
 async def fetch_daily_closes(secid: str, days: int = 240) -> dict:
     """{date: close} daily closes for one secid from the Eastmoney kline
     API (klt=101, fqt=1), DB-cached in stock_daily_cache. A cache younger
     than a day is served as-is when it already reaches back `days` (plus
     buffer). When Eastmoney fails or returns nothing, A-share secids fall
     back to fuyao daily closes (v1.4.8, written to the same cache); other
-    markets return whatever is cached."""
+    markets fall back to Yahoo daily closes, and anything still empty
+    returns whatever is cached."""
     with db() as conn:
         rows = conn.execute(
             "SELECT date, close, fetched_at FROM stock_daily_cache WHERE secid=?",
@@ -4581,6 +4780,14 @@ async def fetch_daily_closes(secid: str, days: int = 240) -> dict:
         # Eastmoney kline failed/empty -> fuyao fallback (v1.4.8, A-share
         # only; other markets keep whatever is cached).
         fresh = await fetch_daily_closes_fuyao(secid)
+    if not fresh:
+        # Kline + fuyao both empty (HK/US have no fuyao coverage) ->
+        # Yahoo daily closes; still {} when Yahoo fails, and the stale
+        # cache below is what the caller gets.
+        try:
+            fresh = await _fetch_yahoo_daily_closes(secid, days)
+        except Exception:
+            fresh = {}
     if fresh:
         now = time.time()
         with db() as conn:
