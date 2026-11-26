@@ -131,15 +131,16 @@ class TestValidateUpstreamPayload(unittest.TestCase):
         self.assertTrue(app._validate_upstream_payload(
             _em_trends_url(), resp, now=cn(2026, 11, 21, 10, 0))[0])  # Sat
 
-    def test_trends_empty_on_holiday_weekday_is_failure(self):
-        # No holiday calendar, so a holiday weekday is (wrongly) treated
-        # as in-session — but the failure mode is safe: an empty payload
-        # is flagged, never read as a normal zero-change day.
+    def test_trends_empty_on_holiday_weekday_is_legitimate(self):
+        # CN_HOLIDAYS calendar (item 1): 2026-10-01 National Day is
+        # off-session, so an empty intraday payload is expected, not
+        # a failure. (Was test_trends_empty_on_holiday_weekday_is_failure
+        # before the calendar landed.)
         body = json.dumps({"data": {"trends": []}})
         ok, _ = app._validate_upstream_payload(
             _em_trends_url(), FakeResp(text=body, content=body.encode()),
             now=cn(2026, 10, 1, 10, 0))
-        self.assertFalse(ok)
+        self.assertTrue(ok)
 
     def test_sina_empty_quotes_is_failure(self):
         ok, _ = app._validate_upstream_payload(

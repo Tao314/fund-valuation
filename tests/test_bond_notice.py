@@ -36,6 +36,15 @@ BOND_QUOTES = {
     "sh511260": {"name": "十年国债ETF国泰", "prev_close": 135.83,
                  "current": 135.882, "change_pct": 0.04,
                  "quote_time": "2026-11-26 14:00"},
+    "sh511380": {"name": "可转债ETF博时", "prev_close": 11.685,
+                 "current": 11.626, "change_pct": -0.50,
+                 "quote_time": "2026-11-26 14:00"},
+    "sh511360": {"name": "短融ETF海富通", "prev_close": 114.20,
+                 "current": 114.21, "change_pct": 0.01,
+                 "quote_time": "2026-11-26 14:00"},
+    "sh511200": {"name": "信用债ETF华夏", "prev_close": 102.70,
+                 "current": 102.73, "change_pct": 0.03,
+                 "quote_time": "2026-11-26 14:00"},
 }
 
 _TMPDIR = None
@@ -91,6 +100,29 @@ class TestBondProxy(unittest.TestCase):
 
     def test_missing_511260_quote_blocks_proxy(self):
         self.assertIsNone(app._bond_proxy_change(0.0, "债券型基金", {}))
+
+    def test_convertible_bond_fund_uses_511380(self):
+        self.assertEqual(
+            app._bond_proxy_change(0.0, "债券型-可转债", BOND_QUOTES), -0.50)
+
+    def test_short_bond_fund_uses_511360(self):
+        self.assertEqual(
+            app._bond_proxy_change(0.0, "债券型-中短债", BOND_QUOTES), 0.01)
+
+    def test_credit_bond_fund_uses_511200(self):
+        self.assertEqual(
+            app._bond_proxy_change(0.0, "债券型-信用债", BOND_QUOTES), 0.03)
+
+    def test_long_and_mixed_bond_funds_keep_511260(self):
+        self.assertEqual(
+            app._bond_proxy_change(0.0, "债券型-长债", BOND_QUOTES), 0.04)
+        self.assertEqual(
+            app._bond_proxy_change(0.0, "债券型-混合债", BOND_QUOTES), 0.04)
+
+    def test_missing_proxy_quote_blocks_proxy(self):
+        quotes = {k: v for k, v in BOND_QUOTES.items() if k != "sh511380"}
+        self.assertIsNone(
+            app._bond_proxy_change(0.0, "债券型-可转债", quotes))
 
 
 class TestMarketOfHolding(unittest.TestCase):
@@ -154,7 +186,15 @@ class TestEstimateOneBond(unittest.IsolatedAsyncioTestCase):
         est = await app._estimate_one("004103", "中信保诚稳悦债券C")
         self.assertTrue(est["bond_est"])
         self.assertEqual(est["est_change_pct"], 0.04)
+        self.assertEqual(est["bond_proxy_name"], "十年国债ETF国泰")
         self.assertEqual(est["coverage_pct"], 81.03)
+
+    async def test_convertible_bond_fund_uses_511380(self):
+        self._ftype = "债券型-可转债"
+        est = await app._estimate_one("004103", "中信保诚稳悦债券C")
+        self.assertTrue(est["bond_est"])
+        self.assertEqual(est["est_change_pct"], -0.50)
+        self.assertEqual(est["bond_proxy_name"], "可转债ETF博时")
 
     async def test_non_bond_fund_does_not_use_proxy(self):
         self._ftype = "混合型基金"

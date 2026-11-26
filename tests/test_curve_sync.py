@@ -42,13 +42,13 @@ class TestCalibrateCurve(unittest.TestCase):
 
 class TestSeriesStaleThreshold(unittest.TestCase):
     def test_stale_max_exceeds_ttl(self):
-        # The wait path must only trigger well past the normal 20s
-        # refresh cadence, never on every request.
+        # The wait path must only trigger past the normal refresh
+        # cadence, never on every request.
         self.assertGreater(app._SERIES_STALE_MAX, app._SERIES_TTL)
-        self.assertEqual(app._SERIES_TTL, 20)
-        # Must stay below the ~60s frontend poll interval: a 60s-old
-        # series was observed live 0.43pp away from the card.
-        self.assertEqual(app._SERIES_STALE_MAX, 30)
+        self.assertEqual(app._SERIES_TTL, 60)
+        # 90s, not minutes: the sparkline's last point is overridden
+        # with the card value, so only mid-curve staleness is at stake.
+        self.assertEqual(app._SERIES_STALE_MAX, 90)
 
 
 class TestHistoryTodayStale(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +73,7 @@ class TestHistoryTodayStale(unittest.IsolatedAsyncioTestCase):
     async def test_too_stale_waits_for_recompute(self):
         stale = {"024481": [[1000, 1.0], [2000, 2.0]]}
         fresh = {"024481": [[1000, 1.0], [2000, 4.11]]}
-        app._series_cache[self.UID] = (time.time() - 60, stale)
+        app._series_cache[self.UID] = (time.time() - 100, stale)
 
         async def updater():
             app._series_cache[self.UID] = (time.time(), fresh)
@@ -86,7 +86,7 @@ class TestHistoryTodayStale(unittest.IsolatedAsyncioTestCase):
 
     async def test_moderately_stale_returns_immediately(self):
         stale = {"024481": [[1000, 1.0], [2000, 2.0]]}
-        app._series_cache[self.UID] = (time.time() - 25, stale)
+        app._series_cache[self.UID] = (time.time() - 70, stale)
         event = asyncio.Event()
         task = asyncio.create_task(event.wait())
         app._series_tasks[self.UID] = task
@@ -115,3 +115,62 @@ class TestSparklineOverride(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefreshSeriesFailureFallback(unittest.IsolatedAsyncioTestCase):
+    UID = 8
+
+    async def asyncSetUp(self):
+        self._orig_compute = app._compute_series
+        self._cache = dict(app._series_cache)
+
+    async def asyncTearDown(self):
+        app._compute_series = self._orig_compute
+        app._series_cache.clear()
+        app._series_cache.update(self._cache)
+
+    async def test_failed_fund_keeps_fresh_old_curve(self):
+        old = {"024481": [[1000, 1.0], [2000, 2.0]]}
+        app._series_cache[self.UID] = (time.time(), old)
+
+        async def failing(uid):
+            return {"024481": None}
+
+        app._compute_series = failing
+        await app._refresh_series(self.UID)
+        _, series = app._series_cache[self.UID]
+        self.assertEqual(series, old)
+
+    async def test_failed_fund_drops_stale_old_curve(self):
+        old = {"024481": [[1000, 1.0], [2000, 2.0]]}
+        app._series_cache[self.UID] = (time.time() - 3600, old)
+
+        async def failing(uid):
+            return {"024481": None}
+
+        app._compute_series = failing
+        await app._refresh_series(self.UID)
+        _, series = app._series_cache[self.UID]
+        self.assertEqual(series, {"024481": []})
+
+
+class TestLoadEstimatesDecoupling(unittest.TestCase):
+    def test_cards_render_before_history(self):
+        html = (REPO_ROOT / "static" / "index.html").read_text()
+        start = html.index("async function loadEstimates()")
+        end = html.index('$("refresh-btn").onclick = loadEstimates;', start)
+        body = html[start:end]
+        self.assertLess(body.index("renderFunds(data)"),
+                        body.index("histP.then"))
+        self.assertNotIn("await histP;", body)
+        self.assertIn("refreshSparklines(data)", body)
+
+    def test_stale_cache_paints_with_flag(self):
+        html = (REPO_ROOT / "static" / "index.html").read_text()
+        self.assertIn("refreshSparklines", html)
+        self.assertIn("_stale_cache", html)
+        self.assertIn("昨日缓存", html)
+        start = html.index("function renderCachedEstimates()")
+        end = html.index("function showDash(", start)
+        body = html[start:end]
+        self.assertIn("prevTradingDay(todayStr())", body)

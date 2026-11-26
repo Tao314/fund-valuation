@@ -685,7 +685,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
-                    <div class="es-row"><div class="es-ver">v1.6.8</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">用户名/邮箱登录：新增改用户名接口，仅已绑定邮箱的用户可改（3–32 字符唯一），改名不清除现有会话；登录先按邮箱查再按用户名查，已绑邮箱的用户须用邮箱+密码登录、用户名登录被拒，无邮箱用户仍用用户名+密码；绑邮箱复用现有验证码（6 位、10 分钟有效）；设置页新增改用户名/绑定邮箱入口，登录框改为“用户名或邮箱”，无邮箱用户登录后提示绑定邮箱；新增 tests/test_username_email.py（11 个测试）</div></div></div>
+                    <div class="es-row"><div class="es-ver">v1.6.9</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">美股/沪深节假日表：前后端同套 US/CN 节假日表，休市日显示休市、无估值；首屏卡片不再等曲线，曲线随后单独补；自动备份改到每天 1 点；债券按子类型选代理 ETF（可转债/短债/信用/城投/地方债各配其一，长债/混合/未知仍用 511260）；新增 tests/test_holidays.py、tests/test_series_batch.py</div></div></div>
+<div class="es-row"><div class="es-ver">v1.6.8</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">用户名/邮箱登录：新增改用户名接口，仅已绑定邮箱的用户可改（3–32 字符唯一），改名不清除现有会话；登录先按邮箱查再按用户名查，已绑邮箱的用户须用邮箱+密码登录、用户名登录被拒，无邮箱用户仍用用户名+密码；绑邮箱复用现有验证码（6 位、10 分钟有效）；设置页新增改用户名/绑定邮箱入口，登录框改为“用户名或邮箱”，无邮箱用户登录后提示绑定邮箱；新增 tests/test_username_email.py（11 个测试）</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.6</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">通知栏超长自动循环滚动：长消息内容复制一份、@keyframes 横向平移 -50% 循环，仅超宽时滚动，短消息不滚；时间戳放进滚动内容里一起走，不再截断；通知栏加 touch-action: pan-x pan-y，手动横滑也可用</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.5</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">债券基金估值修 0：511260 代理触发条件从 coverage==0 改为无可报价持仓（quoted 权重为 0）且类型含债券，卡片、曲线末点、详情三处同改；债券码前后端标“债券”；新增管理员临时通知栏：标题下有消息才显示、没消息不占位，带时间戳，管理页可发可清除，30 秒轮询；新增 tests/test_bond_notice.py（15 个测试）</div></div></div>
@@ -715,7 +716,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.8 · 更新于 2026-11-26 16:09</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.9 · 更新于 2026-11-27 00:48</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -783,8 +784,9 @@ function updateMarketStatus() {
 }
 setInterval(updateMarketStatus, 60000);
 // Per-fund market status from holdings codes: 6-digit=A股, 5-digit=港股, alphabetic=美股.
-// A/HK sessions by browser local time, Mon-Fri only, holidays ignored.
-// US sessions computed in ET via Intl (DST-aware), Mon-Fri ET, holidays ignored.
+// A sessions by browser local time with the CN holiday table; HK
+// weekday-only (its calendar differs). US sessions computed in ET via
+// Intl (DST-aware) with the NYSE holiday table.
 const ET_FMT = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", weekday: "short",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23"
@@ -795,6 +797,25 @@ function etParts(now) {
   const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
   return { day: wd[parts.weekday], mins: parseInt(parts.hour, 10) * 60 + parseInt(parts.minute, 10) };
 }
+// ET calendar date (YYYY-MM-DD) for the US holiday lookup.
+const ET_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit"
+});
+function etDateStr(now) { return ET_DATE_FMT.format(now || new Date()); }
+// Trading-holiday calendars (mirror of app.py US_HOLIDAYS / CN_HOLIDAYS).
+// NYSE full closures 2026-2027 (+2025-12-25 lookback); SSE 2026 weekday
+// closures (上证公告〔2025〕45号). HK keeps weekday-only: its calendar
+// differs (it trades on some CN holidays) and is out of scope.
+const US_HOLIDAYS = new Set(["2025-12-25",
+  "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+  "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+  "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"]);
+const CN_HOLIDAYS = new Set(["2026-01-01",
+  "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20",
+  "2026-02-23", "2026-04-06", "2026-05-01", "2026-05-04", "2026-05-05",
+  "2026-06-19", "2026-09-25", "2026-10-01", "2026-10-02", "2026-10-05",
+  "2026-10-06", "2026-10-07"]);
 function marketOfCode(code) {
   const c = String(code || "").trim();
   if (/^\d{6}$/.test(c)) return "a";
@@ -808,6 +829,7 @@ function marketSession(market, now) {
   const weekday = day >= 1 && day <= 5;
   if (market === "a") { // 09:30-11:30, 13:00-15:00
     if (!weekday) return "closed";
+    if (CN_HOLIDAYS.has(todayStr(now))) return "closed";
     if (mins < 570) return "preopen";
     if (mins < 690) return "trading";
     if (mins < 780) return "lunch";
@@ -823,6 +845,7 @@ function marketSession(market, now) {
     return "closed";
   }
   if (market === "us") { // ET Mon-Fri: pre 04:00-09:30, trading 09:30-16:00, post 16:00-20:00; 20:00 -> next 04:00 (incl. weekends) is "postext" (last post price reused, not a live session)
+    if (US_HOLIDAYS.has(etDateStr(now))) return "closed";
     const et = etParts(now);
     if (et.day >= 1 && et.day <= 5) {
       if (et.mins >= 240 && et.mins < 570) return "pre";
@@ -838,6 +861,14 @@ function fundMarketStatus(f, now) {
   const markets = new Set();
   (f.holdings || []).forEach(h => { const m = marketOfCode(h.code); if (m) markets.add(m); });
   const sessions = [...markets].map(m => marketSession(m, now));
+  // US holiday: a fund holding only US stocks has no session today.
+  // Backend sends us_holiday; older cached payloads fall back to the
+  // local computation from holdings + the holiday table.
+  const allUs = (f.holdings || []).length > 0 &&
+    (f.holdings || []).every(h => marketOfCode(h.code) === "us");
+  if (f.us_holiday || (allUs && US_HOLIDAYS.has(etDateStr(now)))) {
+    return { session: "closed", label: "休市", state: "休市无估值" };
+  }
   let s = "closed"; // priority: trading > pre > post > postext > lunch > preopen > closed
   for (const p of ["trading", "pre", "post", "postext", "lunch", "preopen"]) {
     if (sessions.includes(p)) { s = p; break; }
@@ -849,23 +880,24 @@ function fundMarketStatus(f, now) {
   // the estimate is always 预估; 已确认 belongs to the published NAV/change row.
   return { session: s, label, state: "预估" };
 }
-// Last trading day (Mon-Fri, holidays ignored): today if weekday and >=09:30,
-// previous weekday if before 09:30, last Friday on weekend.
+// Last A-share trading day (CN holidays skipped): today if a trading
+// day and >=09:30, previous trading day if before 09:30, last Friday
+// on weekend.
 function lastTradingDay(now) {
   now = now || new Date();
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const mins = now.getHours() * 60 + now.getMinutes();
-  if (!(d.getDay() >= 1 && d.getDay() <= 5 && mins >= 570)) {
-    do { d.setDate(d.getDate() - 1); } while (!(d.getDay() >= 1 && d.getDay() <= 5));
+  if (!(d.getDay() >= 1 && d.getDay() <= 5 && mins >= 570 && !CN_HOLIDAYS.has(todayStr(now)))) {
+    do { d.setDate(d.getDate() - 1); } while (!(d.getDay() >= 1 && d.getDay() <= 5 && !CN_HOLIDAYS.has(todayStr(d))));
   }
   const p = n => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
 }
-// Previous trading day (Mon-Fri, holidays ignored) before a YYYY-MM-DD date.
+// Previous A-share trading day (CN holidays skipped) before a YYYY-MM-DD date.
 function prevTradingDay(dateStr) {
   const [y, m, d] = String(dateStr).split("-").map(Number);
   const dt = new Date(y, m - 1, d);
-  do { dt.setDate(dt.getDate() - 1); } while (!(dt.getDay() >= 1 && dt.getDay() <= 5));
+  do { dt.setDate(dt.getDate() - 1); } while (!(dt.getDay() >= 1 && dt.getDay() <= 5 && !CN_HOLIDAYS.has(todayStr(dt))));
   const p = n => String(n).padStart(2, "0");
   return dt.getFullYear() + "-" + p(dt.getMonth() + 1) + "-" + p(dt.getDate());
 }
@@ -1516,10 +1548,15 @@ function renderCachedEstimates() {
     if (!raw) return;
     const data = JSON.parse(raw);
     if (!data || !Array.isArray(data.funds)) return;
-    // First paint only from today's payload: a cache saved yesterday
-    // (e.g. a tab left open overnight) must never render as today's
-    // numbers (v1.4.9 fix — 09:27 pre-open showed yesterday's +8.28%).
-    if (data._cache_date && data._cache_date !== todayStr()) return;
+    // Trading-day validity: a payload from the last trading day may
+    // still paint before 09:30 (no session yet), flagged stale so it
+    // is never mistaken for today's numbers (v1.4.9 fix — 09:27
+    // pre-open showed yesterday's +8.28%). Anything older never paints.
+    if (data._cache_date && data._cache_date !== todayStr()) {
+      const mins = new Date().getHours() * 60 + new Date().getMinutes();
+      if (data._cache_date !== prevTradingDay(todayStr()) || mins >= 570) return;
+      data._stale_cache = true;
+    }
     window.estimateData = data;
     addedCodes = new Set(data.funds.map(f => f.fund_code));
     loadCachedHistory();
@@ -1960,6 +1997,9 @@ function sparkGeom(f, published) {
   return { pts, vals, hasPts, segs, bound, t0, t1, totalMins, W, H, X, Y, last: hasPts ? vals[vals.length - 1] : 0 };
 }
 function sparklineHtml(f, published, preopen) {
+  // US holiday: no session today — show that instead of a curve
+  // (the backend also suppresses today's series for these funds).
+  if (f.us_holiday) return `<div class="fc-spark" data-code="${f.fund_code}" style="height:94px"><span class="sp-loading" style="top:40px">今日休市</span></div>`;
   const raw = historySeries[f.fund_code];
   const hasPts = Array.isArray(raw) && raw.length >= 2;
   const segs = sparkSegments(f);
@@ -2430,7 +2470,7 @@ function renderFunds(data) {
       const prevRow = f.prev_dwjz != null ? `<div class="fc-row fc-row-prev"><span class="fc-label">前一交易日净值（${f.prev_nav_date ?? ""}）</span><span class="fc-val">${f.prev_dwjz} ${fmtPct(f.prev_jzzzl)}</span></div>` : "";
       const credCls = f.credibility === "高" ? " fc-cred-hi" : f.credibility === "中" ? " fc-cred-mid" : " fc-cred-lo";
       const credTag = f.credibility ? `<span class="fc-cred${credCls}">可信度·${f.credibility}</span>` : "";
-      const estLabel = `自算估值${f.bond_est ? '<span class="fc-note">（按十年国债ETF估算）</span>' : ""}${credTag}`;
+      const estLabel = `自算估值${f.bond_est ? `<span class="fc-note">（按${esc(f.bond_proxy_name || "十年国债ETF")}估算）</span>` : ""}${credTag}`;
       const rows = (f.is_mrf && f.dwjz == null)
         // MRF fund without a reachable NAV source: note only, no fake data.
         ? `<div class="fc-row"><span class="fc-label fc-note">${noStockNote(f)}</span></div>`
@@ -2459,6 +2499,7 @@ function renderFunds(data) {
       if (ov != null) metaParts.push(ov);
       metaParts.push(`${esc(f.report_label ?? "-")} ${f.report_date ?? ""}`.trim());
       if (f.stale && !f.no_stock_holdings) metaParts.push("数据可能过期");
+      if (data._stale_cache) metaParts.push("昨日缓存");
       html += `<div class="fund-card${ch ? " changed" : ""}" onclick="openDetail('${f.fund_code}')">
       <div class="fc-head">
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-code-status"><span class="fc-code">${f.fund_code}</span><span class="fc-status" data-code="${f.fund_code}">${st.label}</span></span></div>
@@ -2684,6 +2725,22 @@ async function fetchNotice() {
 }
 window.addEventListener("resize", updateNoticeScroll);
 function startNoticeTimer() { clearInterval(noticeTimer); fetchNotice(); noticeTimer = setInterval(fetchNotice, 30000); }
+// Curves arrive on a separate (slower) cycle than cards: when the
+// history payload lands, repaint only the sparkline frames in place —
+// no full re-render, no scroll jump. Published/preopen come from the
+// frame itself / live session state, as in renderFunds.
+function refreshSparklines(data) {
+  (data.funds || []).forEach(f => {
+    if (f.no_stock_holdings) return;
+    const box = document.querySelector('.fc-spark[data-code="' + f.fund_code + '"]');
+    if (!box) return;
+    const published = box.dataset.pub === "1";
+    const preopen = fundMarketStatus(f).session === "preopen";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = sparklineHtml(f, published, preopen);
+    if (tmp.firstChild) box.replaceWith(tmp.firstChild);
+  });
+}
 async function loadEstimates() {
   if (refreshing) return;
   refreshing = true;
@@ -2704,10 +2761,13 @@ async function loadEstimates() {
     $("empty-tip").style.display = funds.length ? "none" : "";
     if (!funds.length) $("empty-tip").textContent = "列表为空，去「设置」里搜索添加基金。";
     try { localStorage.setItem(estimatesCacheKey(), JSON.stringify({ ...data, _cache_date: todayStr() })); } catch { /* quota/private mode */ }
-    await histP;
+    // Cards first: the curve request is heavier and must no longer
+    // block the first paint — refreshSparklines() fills the curves in
+    // when the history payload lands.
     renderFunds(data);
     renderSettings(data);
     setErr("");
+    histP.then(() => { if (window.estimateData === data) refreshSparklines(data); });
   } catch (e) { if (String(e.message).includes("登录")) showAuth(); else setErr(e.message); }
   finally { refreshing = false; rb.disabled = false; rb.classList.remove("spinning"); }
 }

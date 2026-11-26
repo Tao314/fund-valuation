@@ -1,10 +1,8 @@
 """Date / trading-session boundary tests.
 
-Current state, pinned honestly: the session helpers are weekday-only
-("Holidays ignored" in their own docstrings) — there is no holiday
-calendar yet. The holiday case below is therefore an expectedFailure:
-it documents the gap instead of blessing the wrong answer, and it will
-turn into a loud unexpected-success the day a calendar lands.
+The session helpers are holiday-aware now (US_HOLIDAYS / CN_HOLIDAYS
+in app.py, mirrored in static/index.html); the 2026-10-01 National Day
+case below used to be an expectedFailure documenting the gap.
 What IS guarded today: a session with no quotes must never be read as
 a normal trading day at the payload-validation layer (see
 test_fallback.py) — an empty intraday payload inside market hours is a
@@ -31,12 +29,9 @@ class TestCnMarketOpen(unittest.TestCase):
         self.assertFalse(app._cn_market_open(cn(2026, 11, 21, 10, 0)))  # Sat
         self.assertFalse(app._cn_market_open(cn(2026, 11, 22, 10, 0)))  # Sun
 
-    @unittest.expectedFailure
     def test_holiday_weekday_is_not_a_trading_day(self):
-        # 2026-10-01 is National Day (Thu): the market is closed, but
-        # _cn_market_open only looks at the weekday. KNOWN GAP — no
-        # holiday calendar yet (ChatGPT P0 / TrueNAV 1.6 direction).
-        # When a calendar is added, remove this decorator.
+        # 2026-10-01 is National Day (Thu): the market is closed.
+        # Fixed by the CN_HOLIDAYS calendar (item 1); was expectedFailure.
         self.assertFalse(app._cn_market_open(cn(2026, 10, 1, 10, 0)))
 
 
@@ -77,3 +72,15 @@ class TestUsSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNextBackupTime(unittest.TestCase):
+    def test_before_0100_is_same_day(self):
+        self.assertEqual(app._next_backup_time(cn(2026, 11, 27, 0, 15)),
+                         cn(2026, 11, 27, 1, 0))
+        self.assertEqual(app._next_backup_time(cn(2026, 11, 27, 0, 45)),
+                         cn(2026, 11, 27, 1, 0))
+
+    def test_after_0100_is_next_day(self):
+        self.assertEqual(app._next_backup_time(cn(2026, 11, 27, 2, 0)),
+                         cn(2026, 11, 28, 1, 0))

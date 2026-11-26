@@ -25,7 +25,7 @@ import time
 from email.message import EmailMessage
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.6.8"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.6.9"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -1267,8 +1267,18 @@ def _restore_backup(name: str) -> dict:
     return pre
 
 
+def _next_backup_time(now: datetime) -> datetime:
+    """Next 01:00 (Asia/Shanghai) after now (same day if before 01:00).
+    01:00, not 00:00: the midnight cache rollover is the first-paint
+    window — a backup then competes with the fresh-load burst."""
+    nxt = now.replace(hour=1, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=1)
+    return nxt
+
+
 async def _backup_loop():
-    """Daily 00:00 (Asia/Shanghai) automatic backup; creates one initial
+    """Daily 01:00 (Asia/Shanghai) automatic backup; creates one initial
     backup at startup when none exists so the feature is visibly on."""
     await asyncio.sleep(15)
     try:
@@ -1282,7 +1292,7 @@ async def _backup_loop():
         print(f"[backup] initial backup failed: {e!r}", flush=True)
     while True:
         now = datetime.now(CN_TZ)
-        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        nxt = _next_backup_time(now)
         _wstat("backup", next_run=nxt.timestamp())
         await asyncio.sleep(max(1.0, (nxt - now).total_seconds()))
         try:
@@ -1523,11 +1533,13 @@ def _resp_json(resp):
 
 
 def _cn_market_open(now: datetime) -> bool:
-    """Weekday 09:30-16:30 Asia/Shanghai: A/HK (and JP/KR/TW) sessions
-    have started, so an empty intraday payload is suspicious rather
-    than pre-open."""
+    """A-share trading day 09:30-16:30 Asia/Shanghai (CN_HOLIDAYS
+    excluded): A/HK (and JP/KR/TW) sessions have started, so an empty
+    intraday payload is suspicious rather than pre-open. NOTE: HK has
+    its own calendar (it trades on some CN holidays) — this is the
+    A-share rule, used as the shared proxy as before."""
     mins = now.hour * 60 + now.minute
-    return now.weekday() < 5 and 9 * 60 + 30 <= mins <= 16 * 60 + 30
+    return _is_cn_trading_day(now.date()) and 9 * 60 + 30 <= mins <= 16 * 60 + 30
 
 
 def _validate_upstream_payload(url: str, resp, now: Optional[datetime] = None):
@@ -2663,11 +2675,86 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
 
 
+# Trading-holiday calendars (hard-coded: no reliable free calendar API
+# in the current sources — Eastmoney/Sina don't expose one).
+# NYSE: nyse.com holiday calendar, full closures only. Early closes
+# (day after Thanksgiving, Christmas Eve) are still trading days, so
+# they are NOT listed. 2025-12-25 is a lookback anchor for
+# last-trading-day queries in early Jan 2026.
+# SSE: 2026 notice 上证公告〔2025〕45号, weekday closures only
+# (weekends are already excluded by the weekday check). The 2027 SSE
+# notice is published each December — extend CN_HOLIDAYS when it lands
+# (Dec 2026); unknown years degrade to weekday-only.
+US_HOLIDAYS = frozenset({
+    date(2025, 12, 25),
+    date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16),
+    date(2026, 4, 3), date(2026, 5, 25), date(2026, 6, 19),
+    date(2026, 7, 3), date(2026, 9, 7), date(2026, 11, 26),
+    date(2026, 12, 25),
+    date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15),
+    date(2027, 3, 26), date(2027, 5, 31), date(2027, 6, 18),
+    date(2027, 7, 5), date(2027, 9, 6), date(2027, 11, 25),
+    date(2027, 12, 24),
+})
+CN_HOLIDAYS = frozenset({
+    date(2026, 1, 1),
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18),
+    date(2026, 2, 19), date(2026, 2, 20), date(2026, 2, 23),
+    date(2026, 4, 6),
+    date(2026, 5, 1), date(2026, 5, 4), date(2026, 5, 5),
+    date(2026, 6, 19),
+    date(2026, 9, 25),
+    date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5),
+    date(2026, 10, 6), date(2026, 10, 7),
+})
+
+
+def _is_us_trading_day(d) -> bool:
+    return d.weekday() < 5 and d not in US_HOLIDAYS
+
+
+def _is_cn_trading_day(d) -> bool:
+    return d.weekday() < 5 and d not in CN_HOLIDAYS
+
+
+def _last_us_trading_day(d):
+    """Most recent US trading day on or before date d."""
+    while not _is_us_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _last_cn_trading_day(d):
+    """Most recent A-share trading day on or before date d."""
+    while not _is_cn_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _us_quote_ref_day(now_et: datetime):
+    """ET date a US quote must carry to be fresh: today once the
+    session has started (09:30 ET), else the previous trading day
+    (pre-open / overnight quotes are still the last close)."""
+    if now_et.hour * 60 + now_et.minute >= 570:
+        return _last_us_trading_day(now_et.date())
+    return _last_us_trading_day(now_et.date() - timedelta(days=1))
+
+
+def _cn_quote_ref_day(now_cn: datetime):
+    """Same rule for A/HK quotes (09:30 Asia/Shanghai)."""
+    if now_cn.hour * 60 + now_cn.minute >= 570:
+        return _last_cn_trading_day(now_cn.date())
+    return _last_cn_trading_day(now_cn.date() - timedelta(days=1))
+
+
 def us_session(now_et: Optional[datetime] = None) -> str:
     """US market session in ET (Mon-Fri): pre 04:00-09:30, trading 09:30-16:00,
-    post 16:00-20:00, else closed. Holidays ignored."""
+    post 16:00-20:00, else closed. US holidays (US_HOLIDAYS) are closed
+    all day — no pre/post session either."""
     if now_et is None:
         now_et = datetime.now(ET_TZ)
+    if now_et.date() in US_HOLIDAYS:
+        return "closed"
     if now_et.weekday() >= 5:
         return "closed"
     mins = now_et.hour * 60 + now_et.minute
@@ -2708,11 +2795,12 @@ def parse_ext_timestamp(s: str, now_et: datetime) -> Optional[datetime]:
 
 
 def _last_regular_close(now_et: datetime) -> datetime:
-    """Most recent weekday 16:00 ET at or before now_et (holidays ignored)."""
+    """Most recent trading-day 16:00 ET at or before now_et (weekends
+    and US holidays skipped)."""
     d = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
     if d > now_et:
         d -= timedelta(days=1)
-    while d.weekday() >= 5:
+    while d.weekday() >= 5 or d.date() in US_HOLIDAYS:
         d -= timedelta(days=1)
     return d
 
@@ -2744,11 +2832,31 @@ def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
         # Pre-open Sina may return 0 as current; treat as prev close (0 change).
         cur = prev
         change_pct = 0.0
+    if now_et.date() in US_HOLIDAYS:
+        # Holiday: no US session today — Sina replays the last close
+        # with the previous session's change (2026-11-26 Thanksgiving:
+        # 002891 replayed 11-25's -1.39%). Carry the close, no move.
+        change_pct = 0.0
+        cur = prev
+    else:
+        # Stale quote: the Beijing timestamp (field 3), read in ET,
+        # must be the last session day (see _us_quote_ref_day); anything
+        # older is a stuck feed, not today's move. Unparseable -> keep.
+        try:
+            qt = (fields[3] if len(fields) > 3 else "") or ""
+            qet = datetime.strptime(qt.strip(), "%Y-%m-%d %H:%M:%S") \
+                .replace(tzinfo=CN_TZ).astimezone(ET_TZ).date()
+            if qet < _us_quote_ref_day(now_et):
+                change_pct = 0.0
+                cur = prev
+        except (ValueError, TypeError, IndexError):
+            pass
     change_pct_ext = None
     current_ext = None
     try:
         sess = us_session(now_et)
-        if sess != "trading" and len(fields) > 24 and fields[21]:
+        if sess != "trading" and now_et.date() not in US_HOLIDAYS \
+                and len(fields) > 24 and fields[21]:
             ext_price = float(fields[21])
             ext_dt = parse_ext_timestamp(fields[24], now_et)
             if ext_price > 0 and prev > 0 and ext_dt is not None:
@@ -2848,9 +2956,21 @@ async def _fetch_yahoo_quotes(symbols: list[str]) -> dict:
                 rmt = meta.get("regularMarketTime")
                 qtime = datetime.fromtimestamp(rmt, tz=CN_TZ).strftime(
                     "%Y-%m-%d %H:%M:%S") if rmt else None
+                chg = (cur - prev) / prev * 100
+                if sym.startswith("gb_"):
+                    # Same holiday / stale rules as the Sina path: on a
+                    # US holiday Yahoo also replays the last close with
+                    # the previous session's change.
+                    now_et = datetime.now(ET_TZ)
+                    if now_et.date() in US_HOLIDAYS:
+                        chg, cur = 0.0, prev
+                    elif rmt:
+                        qet = datetime.fromtimestamp(rmt, tz=ET_TZ).date()
+                        if qet < _us_quote_ref_day(now_et):
+                            chg, cur = 0.0, prev
                 return sym, {"name": meta.get("shortName") or meta.get("longName"),
                              "prev_close": prev, "current": cur,
-                             "change_pct": (cur - prev) / prev * 100,
+                             "change_pct": chg,
                              "quote_time": qtime}
             except Exception:
                 continue
@@ -2872,6 +2992,7 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
     if not symbols:
         return {}
     now = time.time()
+    now_cn = datetime.now(CN_TZ)
     cached = _quote_cache["quotes"]
     sina_syms = [s for s in symbols if "." not in s]
     em_syms = [s for s in symbols if "." in s]
@@ -2901,16 +3022,38 @@ async def _refresh_quotes(symbols: list[str]) -> dict:
                     prev, cur = float(fields[3]), float(fields[6])
                     if cur <= 0 and prev > 0:
                         cur = prev  # pre-open current=0 -> prev close (0 change)
+                    chg = (cur - prev) / prev * 100 if prev else 0.0
+                    # Stale-date check only (no HK holiday table — HK
+                    # trades on some CN holidays; see _cn_market_open).
+                    try:
+                        qd = datetime.strptime(fields[17], "%Y-%m-%d").date()
+                        if qd < _cn_quote_ref_day(now_cn):
+                            chg, cur = 0.0, prev
+                    except (ValueError, IndexError):
+                        pass
                     quotes[sym] = {"name": fields[1], "prev_close": prev, "current": cur,
-                                   "change_pct": (cur - prev) / prev * 100 if prev else 0.0,
+                                   "change_pct": chg,
                                    "quote_time": f"{fields[17]} {fields[18]}" if len(fields) > 18 else None}
                 else:
                     # A-share layout: 0=name,1=open,2=prev close,3=current,30=date,31=time
                     prev, cur = float(fields[2]), float(fields[3])
                     if cur <= 0 and prev > 0:
                         cur = prev  # pre-open current=0 -> prev close (0 change)
+                    chg = (cur - prev) / prev * 100 if prev else 0.0
+                    if now_cn.date() in CN_HOLIDAYS:
+                        # A-share holiday: same replay as US holidays —
+                        # Sina carries the last close with the previous
+                        # session's change. Carry the close, no move.
+                        chg, cur = 0.0, prev
+                    else:
+                        try:
+                            qd = datetime.strptime(fields[30], "%Y-%m-%d").date()
+                            if qd < _cn_quote_ref_day(now_cn):
+                                chg, cur = 0.0, prev
+                        except (ValueError, IndexError):
+                            pass
                     quotes[sym] = {"name": fields[0], "prev_close": prev, "current": cur,
-                                   "change_pct": (cur - prev) / prev * 100 if prev else 0.0,
+                                   "change_pct": chg,
                                    "quote_time": f"{fields[30]} {fields[31]}" if len(fields) > 31 else None}
             except (ValueError, IndexError):
                 continue
@@ -2989,18 +3132,20 @@ TRENDS_FAIL_BACKOFF = 900   # seconds, per-secid upstream failure backoff (v1.4.
 
 
 def _in_trading_window(now: Optional[datetime] = None) -> bool:
-    """True during CN day session (weekdays 09:15-16:30 Asia/Shanghai) or
-    the US session as seen from Beijing (21:00-05:00; the after-midnight
-    part belongs to the previous weekday's US session, so Tue-Sat
-    00:00-05:00 counts). Weekends outside that: False."""
+    """True during CN day session (trading days 09:15-16:30
+    Asia/Shanghai) or the US session as seen from Beijing (21:00-05:00;
+    the after-midnight part belongs to the previous weekday's US
+    session, so Tue-Sat 00:00-05:00 counts). Holiday sessions don't
+    count on either leg: the ET date of the US session in question
+    must be a US trading day. Weekends outside that: False."""
     now = now or datetime.now(CN_TZ)
     mins = now.hour * 60 + now.minute
     wd = now.weekday()  # Mon=0 .. Sun=6
-    if wd < 5 and 9 * 60 + 15 <= mins <= 16 * 60 + 30:
+    if _is_cn_trading_day(now.date()) and 9 * 60 + 15 <= mins <= 16 * 60 + 30:
         return True
-    if wd < 5 and mins >= 21 * 60:
-        return True
-    if 1 <= wd <= 5 and mins <= 5 * 60:
+    et_date = now.astimezone(ET_TZ).date()
+    if _is_us_trading_day(et_date) and (
+            (wd < 5 and mins >= 21 * 60) or (1 <= wd <= 5 and mins <= 5 * 60)):
         return True
     return False
 
@@ -3621,15 +3766,46 @@ def _quoted_weight(holdings: list, syms: list, quotes: dict) -> float:
     return w
 
 
+# Bond-ETF proxies by fund subtype (live Sina quotes, same path as the
+# old single 511260 proxy; verified 2026-11-26). Keys are matched as
+# substrings of the Eastmoney FTYPE, first match wins.
+BOND_PROXIES = {
+    "可转债": ("1.511380", "sh511380", "可转债ETF博时"),
+    "中短债": ("1.511360", "sh511360", "短融ETF海富通"),
+    "短债": ("1.511360", "sh511360", "短融ETF海富通"),
+    "信用": ("1.511200", "sh511200", "信用债ETF华夏"),
+    "城投": ("1.511220", "sh511220", "城投债ETF海富通"),
+    "地方债": ("1.511060", "sh511060", "5年地方债ETF海富通"),
+}
+BOND_PROXY_DEFAULT = ("1.511260", "sh511260", "十年国债ETF国泰")
+BOND_PROXY_SYMBOLS = sorted(
+    {p[1] for p in BOND_PROXIES.values()} | {BOND_PROXY_DEFAULT[1]})
+
+
+def _bond_proxy_for(fund_type: str):
+    """(trends secid, Sina symbol, display name) for a bond fund's
+    subtype. Duration-weighted holdings aren't feasible — holdings are
+    individual bonds with no live price (7-digit codes have no Sina
+    symbol, 6-digit come back 0.00%) and no duration in the F10
+    payload — so the proxy is chosen by subtype instead: convertibles
+    move with equities, short bonds barely move, credit and rates sit
+    in between. Long/mixed/unknown subtypes keep the old 511260."""
+    t = fund_type or ""
+    for key, proxy in BOND_PROXIES.items():
+        if key in t:
+            return proxy
+    return BOND_PROXY_DEFAULT
+
+
 def _bond_proxy_change(quoted_w: float, fund_type: str, quotes: dict):
-    """511260 daily change when a bond-type fund has no quotable holding.
+    """Proxy-ETF daily change when a bond-type fund has no quotable holding.
 
     Returns the change% or None (not a bond fund, some holding is
-    quotable, or the 511260 quote is missing -- callers then keep the
+    quotable, or the proxy quote is missing -- callers then keep the
     holdings-based estimate).
     """
     if quoted_w == 0 and fund_type and "债券" in fund_type:
-        bq = quotes.get("sh511260")
+        bq = quotes.get(_bond_proxy_for(fund_type)[1])
         if bq and bq.get("change_pct") is not None:
             return bq["change_pct"]
     return None
@@ -3678,7 +3854,7 @@ async def _quote_warm_loop():
                         s = await holding_quote_symbol(h, mmap)
                         if s:
                             syms.add(s)
-                syms.add("sh511260")  # bond-fund estimate source
+                syms.update(BOND_PROXY_SYMBOLS)  # bond-proxy ETF quotes
                 if syms:
                     async with _quote_refresh_lock:
                         await _refresh_quotes(sorted(syms))
@@ -3760,10 +3936,15 @@ async def _trends_warm_loop():
                         async with _trends_sem:
                             await fetch_stock_trends(idx["secid"], date_str)
                         n += 1
-                # Bond-fund curve source: 10Y treasury ETF minute trends.
-                async with _trends_sem:
-                    await fetch_stock_trends("1.511260", date_str)
-                n += 1
+                # Bond-fund curve sources: every bond-proxy ETF's minute trends.
+                proxy_secids = {pr[0] for pr in BOND_PROXIES.values()} | {BOND_PROXY_DEFAULT[0]}
+
+                async def _warm_proxy(secid):
+                    async with _trends_sem:
+                        await fetch_stock_trends(secid, date_str)
+
+                await asyncio.gather(*[_warm_proxy(s) for s in sorted(proxy_secids)])
+                n += len(proxy_secids)
                 _wstat("trends_warm", last_run=time.time(),
                        last_result=f"refreshed {n} secids for {len(rows)} funds")
                 print(f"[trends-warm] refreshed {n} secids "
@@ -4099,9 +4280,9 @@ async def _compute_estimates(uid):
 
     per_fund = await asyncio.gather(*[_fund_inputs(r) for r in rows])
     all_symbols = [s for (_, _, _, syms, _) in per_fund for s in syms if s]
-    # Bond funds (no stock holdings) are estimated from the 10Y treasury
-    # ETF (511260) daily change; always fetch its quote alongside.
-    all_symbols.append("sh511260")
+    # Bond funds (no stock holdings) are estimated from a bond-ETF
+    # proxy (see _bond_proxy_for); always fetch every proxy quote.
+    all_symbols.extend(BOND_PROXY_SYMBOLS)
     quotes = await fetch_quotes(all_symbols)
     q_stale = quotes_stale()
     # Industries/sectors for the union of holding codes (A-share via F10,
@@ -4157,12 +4338,23 @@ async def _compute_estimates(uid):
         # Main estimate: same helper the history endpoint uses for its
         # final curve point (same quotes, same formula).
         est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes, stock_position)
+        # US holiday: a fund whose holdings are all US has no session
+        # today — its estimate stays at the last close (US quotes are
+        # already forced to 0.00% in us_quote_with_ext); the flag lets
+        # the frontend show 休市 / 休市无估值 and hide today's curve.
+        today_et = datetime.now(ET_TZ).date()
+        us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
+                      and all(market_of_holding(h["code"]) == "US"
+                              for h in hold["holdings"]))
         # ETF feeder funds have no usable stock holdings (est would be a
         # meaningless 0.00%): use the tracking index's latest change.
         feeder_applied = False
         if coverage == 0 and _is_feeder(r["fund_name"], hold["holdings"]):
             idx = await resolve_fund_index(r["fund_code"])
-            if idx and idx.get("secid"):
+            us_idx_holiday = (idx and idx.get("secid")
+                              and idx["secid"].split(".", 1)[0] in ("105", "106", "107")
+                              and today_et in US_HOLIDAYS)
+            if idx and idx.get("secid") and not us_idx_holiday:
                 async with _trends_sem:
                     tr = await fetch_stock_trends(
                         idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
@@ -4177,20 +4369,21 @@ async def _compute_estimates(uid):
                                "change_pct": round(chg, 2), "change_pct_ext": None}]
                     skipped = []
                     quote_time = datetime.fromtimestamp(ts_last, CN_TZ).strftime("%Y-%m-%d %H:%M")
-        # Bond funds disclose no stock holdings: estimate from the 10Y
-        # treasury ETF (511260) daily change, like other apps' bond-index
-        # estimates. Money-market funds stay NAV-only (different semantics).
+        # Bond funds disclose no stock holdings: estimate from a bond-ETF
+        # proxy chosen by subtype (see _bond_proxy_for), like other apps'
+        # bond-index estimates. Money-market funds stay NAV-only (different semantics).
         bond_applied = False
         ftype0 = fund_types.get(r["fund_code"]) or ""
+        bond_proxy = _bond_proxy_for(ftype0)
         bond_chg = _bond_proxy_change(
             _quoted_weight(hold["holdings"], syms, quotes), ftype0, quotes)
         if bond_chg is not None and not feeder_applied:
             bond_applied = True
             est_pct = bond_chg
-            detail = [{"code": "511260", "name": "十年国债ETF国泰", "weight": 100.0,
+            detail = [{"code": bond_proxy[1][2:], "name": bond_proxy[2], "weight": 100.0,
                        "change_pct": round(bond_chg, 2), "change_pct_ext": None}]
             skipped = []
-            quote_time = quotes["sh511260"]["quote_time"]
+            quote_time = quotes[bond_proxy[1]]["quote_time"]
         # Main sector: group top-10 holdings by industry/sector, take the
         # largest summed weight; sector change = weighted change of that
         # sector's own holdings (same quotes as the estimate). share_pct
@@ -4257,6 +4450,8 @@ async def _compute_estimates(uid):
             "id": r["id"], "fund_code": r["fund_code"], "fund_name": r["fund_name"], "category": r["category"] or "",
             "fund_type": ftype, "is_qdii": is_qdii, "is_mrf": is_mrf,
             "bond_est": bond_applied, "no_stock_holdings": no_stock_holdings,
+            "bond_proxy_name": bond_proxy[2] if bond_applied else None,
+            "us_holiday": us_holiday,
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
@@ -4340,17 +4535,20 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
 _series_cache = {}   # uid -> (computed_at_epoch, series dict)
 _series_tasks = {}   # uid -> asyncio.Task running _refresh_series
 _series_gen = {}     # uid -> mutation counter; stale computes don't overwrite
-_SERIES_TTL = 20
+_SERIES_TTL = 60
 # A series older than this is too stale to show: the card already shows
 # the live estimate, so serving minutes-old points makes the two visibly
 # disagree (reported case: card +4.11% while the curve peaked at 2.44%).
 # Past this age the request waits for the recompute instead of returning
 # the old series; a failed refresh leaves the cache untouched, so the
-# old series is still the fallback. 30s, not minutes: the frontend polls
+# old series is still the fallback. 90s, not minutes: the frontend polls
 # every ~60s, and a 60s-old series was observed live to sit 0.43pp away
-# from the card on a fast-moving fund — the wait only triggers past the
-# 20s TTL, so rapid re-renders still hit the fast path.
-_SERIES_STALE_MAX = 30
+# from the card on a fast-moving fund — but the sparkline's last point
+# is overridden with the card value (sparkGeom) and cards now render
+# before curves, so mid-curve staleness is the only cost; the old 20s
+# TTL forced a full recompute (seconds of upstream calls) on nearly
+# every load. The wait only triggers past the 60s TTL.
+_SERIES_STALE_MAX = 90
 
 
 def _preopen_no_us(now_cn, holdings: list) -> bool:
@@ -4370,8 +4568,18 @@ async def _compute_series(uid):
     """Intraday estimate curve per watchlisted fund for the current
     session day, computed from holdings' Eastmoney minute trends and
     downsampled to 5-minute buckets for the fund-card sparklines. Falls
-    back to the legacy est_history snapshots when trends yield nothing."""
+    back to the legacy est_history snapshots when trends yield nothing.
+
+    Two passes: pass 1 computes holdings curves (sync) and collects
+    which funds need a feeder-index / bond-proxy fetch; those fetches
+    are batched across funds with asyncio.gather instead of awaiting
+    one fund at a time inside the loop. Pass 2 assembles each series
+    synchronously (no awaits). A per-fund failure yields None (not an
+    empty list) so the caller can keep the previous cached curve for
+    that fund — see _refresh_series.
+    """
     now_cn = datetime.now(CN_TZ)
+    us_holiday_today = now_cn.astimezone(ET_TZ).date() in US_HOLIDAYS
     date_str = now_cn.strftime("%Y-%m-%d")  # trends cache key = fetch date
     # Curve window starts at the session day's 00:00 (Asia/Shanghai): the
     # US session that opened the previous Beijing evening runs past
@@ -4425,99 +4633,170 @@ async def _compute_series(uid):
     # Live quotes from the same 45s cache /api/estimates reads, for the
     # final curve point (curve end == card estimate by construction).
     all_symbols = [s for (_, _, _, _, syms, _) in per_fund for s in syms if s]
-    all_symbols.append("sh511260")  # bond-fund estimate source (see _compute_estimates)
+    all_symbols.extend(BOND_PROXY_SYMBOLS)  # bond-proxy ETF quotes
     quotes = await fetch_quotes(all_symbols)
     now_ts = int(time.time())
-    series = {}
+
+    # Pass 1: holdings curves (sync) + which funds need a feeder/bond fetch.
+    state = {}
+    feeder_codes, bond_codes = [], []
     for code, fund_name, holdings, _, syms, stock_position in per_fund:
-      try:
-        if _preopen_no_us(now_cn, holdings):
-            # Weekday pre-open, no US holdings: nothing has traded today.
-            # Never serve yesterday's session (trends stale-cache fallback
-            # or est_history snapshots) as today's curve.
+        st = {"fund_name": fund_name, "holdings": holdings, "syms": syms,
+              "stock_position": stock_position, "pts": None,
+              "holdings_curve": False, "terminal": False,
+              "skip_fallback": False, "failed": False}
+        state[code] = st
+        try:
+            if us_holiday_today and holdings and all(
+                    market_of_holding(h.get("code")) == "US" for h in holdings):
+                # US holiday: no session today — never draw yesterday's
+                # session tail (21:30-05:00 Beijing spans midnight) as
+                # today's curve.
+                st["pts"], st["terminal"] = [], True
+                continue
+            if _preopen_no_us(now_cn, holdings):
+                # Weekday pre-open, no US holdings: nothing has traded today.
+                # Never serve yesterday's session (trends stale-cache fallback
+                # or est_history snapshots) as today's curve.
+                st["pts"], st["terminal"] = [], True
+                continue
+            raw_cov = sum(h["weight"] for h in holdings)
+            # Holdings-based curve: the only source whose buckets are raw
+            # (uncalibrated) weighted changes. Feeder/bond curves and the
+            # est_history fallback already carry their own anchor, so only
+            # this path gets the card's beta calibration below.
+            pts = _fund_curve(holdings, trends_by_code, start_ts,
+                              _residual_pct(raw_cov, stock_position))
+            if pts:
+                st["pts"], st["holdings_curve"] = pts, True
+            elif _is_feeder(fund_name, holdings):
+                feeder_codes.append(code)
+            else:
+                bond_codes.append(code)
+        except Exception as e:
+            print(f"[history] curve failed for {code}: {e!r}")
+            st["failed"] = True
+
+    # Pass 1b: batch the feeder index resolutions + fund-type lookups.
+    feeder_idx = {}
+    if feeder_codes:
+        got = await asyncio.gather(
+            *[resolve_fund_index(c) for c in feeder_codes],
+            return_exceptions=True)
+        feeder_idx = {c: (v if isinstance(v, dict) else None)
+                      for c, v in zip(feeder_codes, got)}
+    ftype_codes = sorted(set(bond_codes) | set(feeder_codes))
+    bond_ftype = {}
+    if ftype_codes:
+        got = await asyncio.gather(
+            *[fetch_fund_type(c) for c in ftype_codes],
+            return_exceptions=True)
+        bond_ftype = {c: (v if isinstance(v, str) else "")
+                      for c, v in zip(ftype_codes, got)}
+
+    # Pass 1c: batch the index-trend fetches (feeder secids + bond proxies).
+    async def _fetch_tr(secid):
+        async with _trends_sem:
+            return secid, await fetch_stock_trends(secid, date_str)
+
+    feeder_secid, bond_proxy = {}, {}
+    trend_secids = set()
+    for code in feeder_codes:
+        idx = feeder_idx.get(code)
+        if idx and idx.get("secid"):
+            if idx["secid"].split(".", 1)[0] in ("105", "106", "107") \
+                    and us_holiday_today:
+                # US index on a US holiday: no session — leave the curve
+                # empty and don't fall back to yesterday's est_history
+                # snapshots as today's curve.
+                state[code]["skip_fallback"] = True
+            else:
+                feeder_secid[code] = idx["secid"]
+                trend_secids.add(idx["secid"])
+    for code in ftype_codes:
+        if "债券" in (bond_ftype.get(code) or ""):
+            # Bond fund: curve from its subtype proxy's minute trends,
+            # same weight-100% machinery as feeder index curves.
+            bond_proxy[code] = _bond_proxy_for(bond_ftype.get(code) or "")[:2]
+            trend_secids.add(bond_proxy[code][0])
+    index_trends = {}
+    if trend_secids:
+        got = await asyncio.gather(
+            *[_fetch_tr(s) for s in sorted(trend_secids)],
+            return_exceptions=True)
+        index_trends = {s: (None if isinstance(v, Exception) else v[1])
+                        for s, v in zip(sorted(trend_secids), got)}
+
+    # Pass 2: assemble each fund's series (sync; no awaits).
+    series = {}
+    for code, st in state.items():
+        if st["failed"]:
+            series[code] = None
+            continue
+        if st["terminal"]:
             series[code] = []
             continue
-        raw_cov = sum(h["weight"] for h in holdings)
-        # Holdings-based curve: the only source whose buckets are raw
-        # (uncalibrated) weighted changes. Feeder/bond curves and the
-        # est_history fallback already carry their own anchor, so only
-        # this path gets the card's beta calibration below.
-        holdings_curve = True
-        pts = _fund_curve(holdings, trends_by_code, start_ts,
-                          _residual_pct(raw_cov, stock_position))
-        if not pts:
-            holdings_curve = False
-        feeder_tr = None
-        if not pts and _is_feeder(fund_name, holdings):
-            # ETF feeder fund: curve from its tracking index (weight 100%).
-            idx = await resolve_fund_index(code)
-            if idx and idx.get("secid"):
-                async with _trends_sem:
-                    feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
-                pts = _index_curve(feeder_tr, start_ts)
-        bond_tr = None
-        if not pts:
-            # Bond fund: curve from the 10Y treasury ETF (511260) minute
-            # trends, same weight-100% machinery as feeder index curves.
-            ftype_s = await fetch_fund_type(code) or ""
-            if "债券" in ftype_s:
-                async with _trends_sem:
-                    bond_tr = await fetch_stock_trends("1.511260", date_str)
-                pts = _index_curve(bond_tr, start_ts)
-        if not pts:
-            with db() as conn:
-                rows = conn.execute(
-                    "SELECT ts, est_change_pct FROM est_history WHERE fund_code=? AND ts>=? ORDER BY ts",
-                    (code, start_ts)).fetchall()
-            buckets = {}
-            for ts, pct in rows:
-                buckets[(ts // 300) * 300] = pct
-            pts = [[ts, pct] for ts, pct in sorted(buckets.items())]
-        if pts:
-            # Final point = live estimate from the same quotes/formula as
-            # /api/estimates (feeder funds: tracking index latest change).
-            est_pct, coverage = _live_est_pct(holdings, syms, quotes, stock_position)
-            if coverage == 0 and _is_feeder(fund_name, holdings):
-                if feeder_tr is None:
-                    idx = await resolve_fund_index(code)
-                    if idx and idx.get("secid"):
-                        async with _trends_sem:
-                            feeder_tr = await fetch_stock_trends(idx["secid"], date_str)
-                chg = _index_latest_chg(feeder_tr)
-                if chg is not None:
-                    est_pct = chg
-            bond_final = False
-            if bond_tr is not None and _quoted_weight(holdings, syms, quotes) == 0:
-                # Bond fund final point = 511260 quote change (same source
-                # as the card estimate), falling back to trends latest.
-                bq = quotes.get("sh511260")
-                chg = bq["change_pct"] if bq else _index_latest_chg(bond_tr)
-                if chg is not None:
-                    est_pct = chg
-                    bond_final = True
-            if coverage > 0 and not bond_final:
-                # Holdings-based estimate: same P1 β calibration as the
-                # card (feeder/bond overrides above only fire at
-                # coverage == 0), keeping curve end == card value.
-                _ensure_beta(code)
-                est_pct = _apply_beta(est_pct, _beta_row(code))
-            val = round(est_pct, 2)
-            if now_ts > pts[-1][0]:
-                pts.append([now_ts, val])
-            else:
-                pts[-1] = [pts[-1][0], val]
-            # Same beta calibration on every bucket, not just the final
-            # point: otherwise the mid-curve sits systematically below
-            # the card (raw 2.44% vs calibrated 4.11% in the reported
-            # case) even when the series is fresh. The last point is
-            # the live estimate, already calibrated above, so
-            # _calibrate_curve leaves it alone.
-            if holdings_curve and coverage > 0:
-                pts = _calibrate_curve(pts, _beta_row(code))
-        series[code] = pts
-      except Exception as e:
-        print(f"[history] curve failed for {code}: {e!r}")
-        series[code] = []
+        try:
+            holdings, syms = st["holdings"], st["syms"]
+            stock_position, fund_name = st["stock_position"], st["fund_name"]
+            pts = st["pts"]
+            if pts is None:
+                if code in feeder_secid:
+                    # ETF feeder fund: curve from its tracking index (weight 100%).
+                    pts = _index_curve(index_trends.get(feeder_secid[code]), start_ts)
+                if not pts and code in bond_proxy:
+                    pts = _index_curve(index_trends.get(bond_proxy[code][0]), start_ts)
+            if not pts and not st["skip_fallback"]:
+                with db() as conn:
+                    rows = conn.execute(
+                        "SELECT ts, est_change_pct FROM est_history WHERE fund_code=? AND ts>=? ORDER BY ts",
+                        (code, start_ts)).fetchall()
+                buckets = {}
+                for ts, pct in rows:
+                    buckets[(ts // 300) * 300] = pct
+                pts = [[ts, pct] for ts, pct in sorted(buckets.items())]
+            if pts:
+                # Final point = live estimate from the same quotes/formula as
+                # /api/estimates (feeder funds: tracking index latest change).
+                feeder_tr = index_trends.get(feeder_secid[code]) if code in feeder_secid else None
+                bond_tr = index_trends.get(bond_proxy[code][0]) if code in bond_proxy else None
+                est_pct, coverage = _live_est_pct(holdings, syms, quotes, stock_position)
+                if coverage == 0 and _is_feeder(fund_name, holdings):
+                    chg = _index_latest_chg(feeder_tr)
+                    if chg is not None:
+                        est_pct = chg
+                bond_final = False
+                if bond_tr is not None and _quoted_weight(holdings, syms, quotes) == 0:
+                    # Bond fund final point = proxy quote change (same source
+                    # as the card estimate), falling back to trends latest.
+                    bq = quotes.get(bond_proxy[code][1]) if code in bond_proxy else None
+                    chg = bq["change_pct"] if bq else _index_latest_chg(bond_tr)
+                    if chg is not None:
+                        est_pct = chg
+                        bond_final = True
+                if coverage > 0 and not bond_final:
+                    # Holdings-based estimate: same P1 β calibration as the
+                    # card (feeder/bond overrides above only fire at
+                    # coverage == 0), keeping curve end == card value.
+                    _ensure_beta(code)
+                    est_pct = _apply_beta(est_pct, _beta_row(code))
+                val = round(est_pct, 2)
+                if now_ts > pts[-1][0]:
+                    pts.append([now_ts, val])
+                else:
+                    pts[-1] = [pts[-1][0], val]
+                # Same beta calibration on every bucket, not just the final
+                # point: otherwise the mid-curve sits systematically below
+                # the card (raw 2.44% vs calibrated 4.11% in the reported
+                # case) even when the series is fresh. The last point is
+                # the live estimate, already calibrated above, so
+                # _calibrate_curve leaves it alone.
+                if st["holdings_curve"] and coverage > 0:
+                    pts = _calibrate_curve(pts, _beta_row(code))
+            series[code] = pts if pts else []
+        except Exception as e:
+            print(f"[history] curve failed for {code}: {e!r}")
+            series[code] = None
     return series
 
 
@@ -4526,6 +4805,15 @@ async def _refresh_series(uid):
     try:
         series = await _compute_series(uid)
         if _series_gen.get(uid, 0) == gen:  # not superseded by a mutation
+            # A per-fund failure (None) keeps the previous cached curve
+            # for that fund when it is still reasonably fresh (30 min);
+            # an older cache must never resurrect yesterday's curve.
+            old = _series_cache.get(uid)
+            if old is not None and time.time() - old[0] <= 1800:
+                for code, pts in series.items():
+                    if pts is None and old[1].get(code):
+                        series[code] = old[1][code]
+            series = {c: (v if v is not None else []) for c, v in series.items()}
             _series_cache[uid] = (time.time(), series)
     except Exception as e:
         print(f"[history] background refresh failed for uid {uid}: {e!r}")
@@ -4559,6 +4847,7 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
         return {"series": series}
     gen = _series_gen.get(uid, 0)
     series = await _compute_series(uid)
+    series = {c: (v if v is not None else []) for c, v in series.items()}
     if _series_gen.get(uid, 0) == gen:
         _series_cache[uid] = (time.time(), series)
     return {"series": series}
@@ -6162,15 +6451,22 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
         stock_position = await fetch_stock_position(code)
     except Exception:
         stock_position = None
-    quotes = await fetch_quotes([s for s in syms if s] + ["sh511260"])
+    quotes = await fetch_quotes([s for s in syms if s] + list(BOND_PROXY_SYMBOLS))
     coverage = sum(h["weight"] for h in hold["holdings"])
     est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes, stock_position)
     ftype = await fetch_fund_type(code) or ""
     is_mrf = ftype == "香港互认基金" or code[:3] in ("968", "969")
+    today_et = datetime.now(ET_TZ).date()
+    us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
+                  and all(market_of_holding(h["code"]) == "US"
+                          for h in hold["holdings"]))
     feeder_applied = bond_applied = False
     if coverage == 0 and _is_feeder(fund_name, hold["holdings"]):
         idx = await resolve_fund_index(code)
-        if idx and idx.get("secid"):
+        us_idx_holiday = (idx and idx.get("secid")
+                          and idx["secid"].split(".", 1)[0] in ("105", "106", "107")
+                          and today_et in US_HOLIDAYS)
+        if idx and idx.get("secid") and not us_idx_holiday:
             async with _trends_sem:
                 tr = await fetch_stock_trends(
                     idx["secid"], datetime.now(CN_TZ).strftime("%Y-%m-%d"))
@@ -6193,6 +6489,8 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
             "coverage_pct": round(coverage, 2),
             "fund_type": ftype, "is_mrf": is_mrf,
             "bond_est": bond_applied, "no_stock_holdings": no_stock,
+            "bond_proxy_name": _bond_proxy_for(ftype)[2] if bond_applied else None,
+            "us_holiday": us_holiday,
             "report_label": hold["report_label"], "report_date": hold["report_date"]}
 
 
