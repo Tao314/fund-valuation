@@ -663,7 +663,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
-          <div class="es-row"><div class="es-ver">v1.6.6</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">通知栏超长自动循环滚动：长消息内容复制一份、@keyframes 横向平移 -50% 循环，仅超宽时滚动，短消息不滚；时间戳放进滚动内容里一起走，不再截断；通知栏加 touch-action: pan-x pan-y，手动横滑也可用</div></div></div>
+                    <div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
+<div class="es-row"><div class="es-ver">v1.6.6</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">通知栏超长自动循环滚动：长消息内容复制一份、@keyframes 横向平移 -50% 循环，仅超宽时滚动，短消息不滚；时间戳放进滚动内容里一起走，不再截断；通知栏加 touch-action: pan-x pan-y，手动横滑也可用</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.5</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">债券基金估值修 0：511260 代理触发条件从 coverage==0 改为无可报价持仓（quoted 权重为 0）且类型含债券，卡片、曲线末点、详情三处同改；债券码前后端标“债券”；新增管理员临时通知栏：标题下有消息才显示、没消息不占位，带时间戳，管理页可发可清除，30 秒轮询；新增 tests/test_bond_notice.py（15 个测试）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.4</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">紧急修复：v1.6.3 上线后自选基金卡片全空，sparklineHtml 引用了未定义变量 totalMins（重构移进 sparkGeom 后解构时漏了），有持仓的基金渲染即抛错、整个列表出不来；补上解构（1 行），测试渲染用例改带持仓覆盖 segs 非空路径；后端与数据未动，自选数据无丢失</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.3</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线纵轴标签错位：-bound 标签被写死在 34px、贴在 0 线上方，现移到下沿（68px），中线加 0.00% 标签；曲线支持点按/悬停：卡片、详情日内与历史曲线取最近点弹浮标显示时间与涨跌幅，移开消失；新增 tests/test_curve_tip.py（6 个测试）</div></div></div>
@@ -691,7 +692,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.6 · 更新于 2026-11-26 14:53</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.7 · 更新于 2026-11-26 15:14</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -2573,24 +2574,28 @@ function fmtNoticeTime(ts) {
   if (!ts) return "";
   try { return new Date(ts * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }); } catch (e) { return ""; }
 }
+let noticeShown = { message: "", time: "" };
 function updateNoticeScroll() {
   const bar = $("notice-bar"), track = $("notice-track");
   if (!bar || !track || bar.style.display === "none") return;
   // duplicate the content once so a -50% loop is seamless; only scroll when it overflows
   track.querySelectorAll(".nt-copy").forEach(n => n.remove());
+  const tm = $("notice-time");
+  if (!tm.textContent.endsWith("    ")) tm.textContent += "    ";
+  // single-copy width, measured BEFORE the copy is appended: the loop
+  // translates -50% (= one copy), so duration must be w/60, not 2w/60
   const w = track.scrollWidth, bw = bar.clientWidth;
   if (w > bw + 4) {
     // second copy identical to the first (same text/time spans, no ids),
-    // so a -50% translate loops seamlessly
+    // so a -50% translate loops seamlessly. Deep clone: a shallow clone
+    // copies empty spans, which made the loop jump back mid-message.
     const copy = document.createElement("span");
     copy.className = "nt-copy";
-    const tm = $("notice-time");
-    if (!tm.textContent.endsWith("    ")) tm.textContent += "    ";
-    const t2 = $("notice-text").cloneNode(false); t2.removeAttribute("id");
-    const tm2 = tm.cloneNode(false); tm2.removeAttribute("id");
+    const t2 = $("notice-text").cloneNode(true); t2.removeAttribute("id");
+    const tm2 = tm.cloneNode(true); tm2.removeAttribute("id");
     copy.appendChild(t2); copy.appendChild(tm2);
     track.appendChild(copy);
-    track.style.animationDuration = Math.max(8, track.scrollWidth / 60) + "s";
+    track.style.animationDuration = Math.max(8, w / 60) + "s";
     bar.classList.add("scrolling");
   } else {
     track.style.animationDuration = "";
@@ -2602,11 +2607,17 @@ async function fetchNotice() {
     const d = await api("/api/notice");
     const bar = $("notice-bar");
     if (d.message) {
+      const time = fmtNoticeTime(d.created_at);
+      // unchanged message: leave the running marquee alone. Rewriting the
+      // text and rebuilding the copy restarts the animation on every 30s poll.
+      if (noticeShown.message === d.message && noticeShown.time === time) return;
+      noticeShown = { message: d.message, time };
       $("notice-text").textContent = d.message;
-      $("notice-time").textContent = fmtNoticeTime(d.created_at);
+      $("notice-time").textContent = time;
       bar.style.display = "block";
       requestAnimationFrame(updateNoticeScroll);
     } else {
+      noticeShown = { message: "", time: "" };
       bar.classList.remove("scrolling");
       bar.style.display = "none";
     }
