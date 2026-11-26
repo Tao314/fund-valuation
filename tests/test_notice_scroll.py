@@ -8,6 +8,17 @@ poll, restarting the animation. Fix: cloneNode(true), duration from the
 single-copy width (w/60), and skip the re-fill when message+time are
 unchanged. Verified live in Node with a faithful DOM stub (shallow
 clone really copies nothing; widths computed from content).
+
+Follow-up (2026-11-26, no version bump): the loop still jumped ~1.9px
+at the seam and iOS showed the text enlarged. Causes: (1) the 4 spaces
+appended after the timestamp collapse to one space in the original but
+are trimmed entirely at the end of the copy, so the copies differed by
+3.81px; fixed by a 4px margin-right on .nt-time instead. (2) every
+resize rebuilt the copy -- iOS fires resize while scrolling; fixed by
+skipping the rebuild when bar width and message are unchanged, and by
+only re-setting animationDuration when it changes. (3) iOS
+text-size-adjust on the wide track; fixed by pinning 100% on
+#notice-bar and font-size 12px on .nt-track/.nt-copy.
 """
 import json
 import os
@@ -31,7 +42,7 @@ function makeEl(tag) {
     style: {}, className: "", clientWidth: 360, _cls: new Set(),
     get scrollWidth() {
       if (this.children.length) return this.children.reduce((a, c) => a + c.scrollWidth, 0);
-      return textW(this.textContent) + (this.className.includes("nt-time") ? 8 : 0);
+      return textW(this.textContent) + (this.className.includes("nt-time") ? 12 : 0);  // margin-left 8 + margin-right 4
     },
     classList: { add(c) { el._cls.add(c); }, remove(c) { el._cls.delete(c); },
       contains(c) { return el._cls.has(c); } },
@@ -59,6 +70,8 @@ global.requestAnimationFrame = fn => fn();
 let apiMsg = null;
 global.api = async () => apiMsg;
 eval(code);
+let durSets = 0, _dur = "";
+Object.defineProperty(track, "style", { value: { get animationDuration() { return _dur; }, set animationDuration(v) { if (v !== _dur) { durSets++; _dur = v; } } } });
 const _upd = updateNoticeScroll;
 let updCalls = 0;
 updateNoticeScroll = (...a) => { updCalls++; return _upd(...a); };
@@ -77,12 +90,16 @@ async function fetch(msg, ts) { apiMsg = { message: msg, created_at: ts }; await
     trackWidth: track.scrollWidth, duration: track.style.animationDuration,
     timeShown: timeEl.textContent };
   out.callsAfterLong = updCalls;
+  out.durSets = durSets;
   await fetch(LONG, ts);
   out.callsAfterRepoll = updCalls;
   out.durationAfterRepoll = track.style.animationDuration;
   out.copiesAfterRepoll = copies().length;
+  const cp0 = copies()[0];
   updateNoticeScroll(); updateNoticeScroll();
   out.copiesAfterResize = copies().length;
+  out.copySameAfterResize = copies()[0] === cp0;
+  out.durSetsAfterResize = durSets;
   out.timeAfterResize = timeEl.textContent;
   await fetch("系统维护中，预计十分钟后恢复，请大家稍等片刻不要着急", ts);
   out.changedScrolling = bar._cls.has("scrolling");
@@ -133,7 +150,7 @@ class TestNoticeMarqueeSeamless(unittest.TestCase):
 
     def test_duration_uses_single_width(self):
         o = self.out
-        self.assertEqual(o["duration"], "8s")  # w=434, max(8, 434/60)
+        self.assertEqual(o["duration"], "8s")  # w=422 (336 msg + 74 time + 12 time margins), max(8, 422/60)
 
     def test_poll_does_not_restart_animation(self):
         o = self.out
@@ -141,7 +158,11 @@ class TestNoticeMarqueeSeamless(unittest.TestCase):
         self.assertEqual(o["durationAfterRepoll"], o["duration"])
         self.assertEqual(o["copiesAfterRepoll"], 1)
         self.assertEqual(o["copiesAfterResize"], 1)
-        self.assertRegex(o["timeAfterResize"], r"[^ ] {4}$")  # no space build-up
+        self.assertEqual(o["timeAfterResize"], "11/26 14:35")  # no trailing-space hack
+        # resize with unchanged bar width must not rebuild the copy or
+        # re-set the duration: the live marquee is left alone
+        self.assertTrue(o["copySameAfterResize"])
+        self.assertEqual(o["durSetsAfterResize"], o["durSets"])
 
     def test_changed_and_short_messages(self):
         o = self.out
@@ -160,3 +181,18 @@ class TestNoticeMarqueeSource(unittest.TestCase):
         self.assertNotIn("cloneNode(false)", seg)
         self.assertIn("w / 60", seg)
         self.assertIn("noticeShown.message === d.message", seg)
+
+    def test_font_size_pinned_and_gap_is_margin(self):
+        # iOS Safari auto-enlarges text in the ultra-wide track; pin it.
+        css = HTML[HTML.index("<style>"):HTML.index("</style>")]
+        self.assertIn("-webkit-text-size-adjust: 100%", css)
+        self.assertIn("text-size-adjust: 100%", css)
+        self.assertIn(".nt-copy { font-size: 12px; }", css)
+        self.assertIn("margin-right: 4px", css)
+        seg = HTML[HTML.index("function fmtNoticeTime"):HTML.index("function startNoticeTimer()")]
+        # trailing spaces after the time are trimmed at the end of the
+        # copy, so the two copies measured apart and the loop jumped
+        self.assertNotIn('endsWith("    ")', seg)
+        self.assertNotIn('+= "    "', seg)
+        # resize with unchanged width skips the rebuild
+        self.assertIn("noticeScrollW", seg)

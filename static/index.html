@@ -25,11 +25,12 @@
   /* admin notice bar: only rendered when a message exists;
      long messages auto-scroll (marquee) instead of wrapping;
      short messages stay still. */
-  #notice-bar { display: none; overflow: hidden; touch-action: pan-x pan-y; white-space: nowrap; scrollbar-width: none; font-size: 12px; color: #92400E; background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 8px; padding: 5px 10px; margin-top: 6px; }
-  #notice-bar .nt-track { display: inline-block; white-space: nowrap; will-change: transform; }
+  #notice-bar { display: none; overflow: hidden; touch-action: pan-x pan-y; white-space: nowrap; scrollbar-width: none; font-size: 12px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; color: #92400E; background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 8px; padding: 5px 10px; margin-top: 6px; }
+  #notice-bar .nt-track { display: inline-block; white-space: nowrap; will-change: transform; font-size: 12px; }
+  #notice-bar .nt-copy { font-size: 12px; }
   #notice-bar.scrolling .nt-track { animation: notice-marquee linear infinite; }
   @keyframes notice-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-  #notice-bar .nt-time { color: #B45309; margin-left: 8px; }
+  #notice-bar .nt-time { color: #B45309; margin-left: 8px; margin-right: 4px; }
   .title-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 
   .toolbar-card { position: sticky; top: var(--header-h); z-index: 20; max-width: 100%; }
@@ -2575,30 +2576,40 @@ function fmtNoticeTime(ts) {
   try { return new Date(ts * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }); } catch (e) { return ""; }
 }
 let noticeShown = { message: "", time: "" };
+let noticeScrollKey = "", noticeScrollW = -1;  // what the live copy was built for
 function updateNoticeScroll() {
   const bar = $("notice-bar"), track = $("notice-track");
   if (!bar || !track || bar.style.display === "none") return;
+  const bw = bar.clientWidth;
+  // same bar width + same message: leave the running marquee alone.
+  // Rebuilding the copy on every resize — iOS fires resize while
+  // scrolling — visibly restarts the animation.
+  const key = noticeShown.message + "\n" + noticeShown.time;
+  if (bw === noticeScrollW && key === noticeScrollKey && track.querySelectorAll(".nt-copy").length) return;
+  noticeScrollW = bw; noticeScrollKey = key;
   // duplicate the content once so a -50% loop is seamless; only scroll when it overflows
   track.querySelectorAll(".nt-copy").forEach(n => n.remove());
-  const tm = $("notice-time");
-  if (!tm.textContent.endsWith("    ")) tm.textContent += "    ";
   // single-copy width, measured BEFORE the copy is appended: the loop
   // translates -50% (= one copy), so duration must be w/60, not 2w/60
-  const w = track.scrollWidth, bw = bar.clientWidth;
+  const w = track.scrollWidth;
   if (w > bw + 4) {
     // second copy identical to the first (same text/time spans, no ids),
     // so a -50% translate loops seamlessly. Deep clone: a shallow clone
     // copies empty spans, which made the loop jump back mid-message.
+    // The gap after the time is .nt-time margin-right, not trailing
+    // spaces: spaces at the end of the copy are trimmed, so the two
+    // copies measured ~3.81px apart and the loop point jumped.
     const copy = document.createElement("span");
     copy.className = "nt-copy";
     const t2 = $("notice-text").cloneNode(true); t2.removeAttribute("id");
-    const tm2 = tm.cloneNode(true); tm2.removeAttribute("id");
+    const tm2 = $("notice-time").cloneNode(true); tm2.removeAttribute("id");
     copy.appendChild(t2); copy.appendChild(tm2);
     track.appendChild(copy);
-    track.style.animationDuration = Math.max(8, w / 60) + "s";
+    const dur = Math.max(8, w / 60) + "s";
+    if (track.style.animationDuration !== dur) track.style.animationDuration = dur;
     bar.classList.add("scrolling");
   } else {
-    track.style.animationDuration = "";
+    if (track.style.animationDuration) track.style.animationDuration = "";
     bar.classList.remove("scrolling");
   }
 }
