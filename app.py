@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.6.4"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.6.5"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -291,6 +291,13 @@ def init_db():
         "id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, "
         "user_id INTEGER, success INTEGER NOT NULL, ip TEXT, "
         "user_agent TEXT, created_at TEXT NOT NULL)"
+    )
+    # Admin notice (added 2026-11-26): single latest message, shown under
+    # the page title; publishing overwrites the previous one.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS admin_notice("
+        "id INTEGER PRIMARY KEY CHECK(id=1), message TEXT NOT NULL, "
+        "created_at REAL NOT NULL)"
     )
     # Promote the configured admin account (idempotent; no-op until it registers)
     admin_name = os.environ.get("ADMIN_USERNAME", "allen314").strip()
@@ -1019,6 +1026,48 @@ def admin_login_logs(limit: int = 200, session: Optional[str] = Cookie(default=N
          "ip": r["ip"], "user_agent": (r["user_agent"] or "")[:120], "created_at": r["created_at"]}
         for r in rows
     ]}
+
+
+# ---------------------------------------------------------------- admin notice
+class NoticeBody(BaseModel):
+    message: str
+
+
+@app.get("/api/notice")
+def get_notice(session: Optional[str] = Cookie(default=None)):
+    """Latest admin notice for any logged-in user (message None = none)."""
+    current_user_id(session)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT message, created_at FROM admin_notice WHERE id=1").fetchone()
+    if not row:
+        return {"message": None, "created_at": None}
+    return {"message": row["message"], "created_at": row["created_at"]}
+
+
+@app.post("/api/admin/notice")
+def admin_publish_notice(body: NoticeBody, session: Optional[str] = Cookie(default=None)):
+    """Publish the (single) admin notice; overwrites the previous one."""
+    require_admin(session)
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(400, "通知内容不能为空")
+    if len(msg) > 500:
+        raise HTTPException(400, "通知内容最多 500 字")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO admin_notice(id, message, created_at) VALUES(1,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET message=excluded.message, "
+            "created_at=excluded.created_at", (msg, time.time()))
+    return {"ok": True}
+
+
+@app.post("/api/admin/notice/clear")
+def admin_clear_notice(session: Optional[str] = Cookie(default=None)):
+    require_admin(session)
+    with db() as conn:
+        conn.execute("DELETE FROM admin_notice WHERE id=1")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- backup
@@ -3514,6 +3563,41 @@ def _live_est_pct(holdings: list, syms: list, quotes: dict,
     return est_pct, coverage
 
 
+def _quoted_weight(holdings: list, syms: list, quotes: dict) -> float:
+    """Weight of holdings with a live quote that actually moved.
+
+    "Quoted" means more than "a quote row exists": Sina returns no line
+    for bank-market/exchange bonds (7-digit codes have no Sina symbol at
+    all; 6-digit bond codes come back with current 0.000, which the
+    parsers rewrite to prev close, i.e. a forced 0.00%). Such a quote
+    carries no live price information, so it must not count as quotable
+    -- otherwise a bond fund like 004103 (top-10 all bonds, ~81.6%)
+    never reaches the bond proxy below. A genuinely flat stock also
+    reads 0.00%, but the proxy only fires for bond-type funds, where
+    the 511260 proxy is the better estimate anyway.
+    """
+    w = 0.0
+    for h, sym in zip(holdings, syms):
+        q = quotes.get(sym) if sym else None
+        if q and q.get("change_pct") not in (None, 0.0):
+            w += h["weight"]
+    return w
+
+
+def _bond_proxy_change(quoted_w: float, fund_type: str, quotes: dict):
+    """511260 daily change when a bond-type fund has no quotable holding.
+
+    Returns the change% or None (not a bond fund, some holding is
+    quotable, or the 511260 quote is missing -- callers then keep the
+    holdings-based estimate).
+    """
+    if quoted_w == 0 and fund_type and "债券" in fund_type:
+        bq = quotes.get("sh511260")
+        if bq and bq.get("change_pct") is not None:
+            return bq["change_pct"]
+    return None
+
+
 def _index_latest_chg(tr: Optional[dict]) -> Optional[float]:
     """Tracking index latest change% vs preClose (feeder-fund estimate)."""
     if tr and tr.get("pre_close") and tr["points"]:
@@ -4061,15 +4145,15 @@ async def _compute_estimates(uid):
         # estimates. Money-market funds stay NAV-only (different semantics).
         bond_applied = False
         ftype0 = fund_types.get(r["fund_code"]) or ""
-        if coverage == 0 and not feeder_applied and "债券" in ftype0:
-            bq = quotes.get("sh511260")
-            if bq:
-                bond_applied = True
-                est_pct = bq["change_pct"]
-                detail = [{"code": "511260", "name": "十年国债ETF国泰", "weight": 100.0,
-                           "change_pct": round(bq["change_pct"], 2), "change_pct_ext": None}]
-                skipped = []
-                quote_time = bq["quote_time"]
+        bond_chg = _bond_proxy_change(
+            _quoted_weight(hold["holdings"], syms, quotes), ftype0, quotes)
+        if bond_chg is not None and not feeder_applied:
+            bond_applied = True
+            est_pct = bond_chg
+            detail = [{"code": "511260", "name": "十年国债ETF国泰", "weight": 100.0,
+                       "change_pct": round(bond_chg, 2), "change_pct_ext": None}]
+            skipped = []
+            quote_time = quotes["sh511260"]["quote_time"]
         # Main sector: group top-10 holdings by industry/sector, take the
         # largest summed weight; sector change = weighted change of that
         # sector's own holdings (same quotes as the estimate). share_pct
@@ -4365,14 +4449,16 @@ async def _compute_series(uid):
                 chg = _index_latest_chg(feeder_tr)
                 if chg is not None:
                     est_pct = chg
-            if coverage == 0 and bond_tr is not None:
+            bond_final = False
+            if bond_tr is not None and _quoted_weight(holdings, syms, quotes) == 0:
                 # Bond fund final point = 511260 quote change (same source
                 # as the card estimate), falling back to trends latest.
                 bq = quotes.get("sh511260")
                 chg = bq["change_pct"] if bq else _index_latest_chg(bond_tr)
                 if chg is not None:
                     est_pct = chg
-            if coverage > 0:
+                    bond_final = True
+            if coverage > 0 and not bond_final:
                 # Holdings-based estimate: same P1 β calibration as the
                 # card (feeder/bond overrides above only fire at
                 # coverage == 0), keeping curve end == card value.
@@ -4563,12 +4649,18 @@ async def fetch_qdii_rows() -> list:
 def market_of_holding(code: str) -> str:
     """Mirror of frontend marketOfHolding: A / HK / US / JP / TW / KR / OTHER.
 
+    7-digit numeric codes are bonds (bank-market / exchange bonds such as
+    2600002), not stocks: label them 债券 instead of OTHER (display only;
+    the US checks elsewhere compare =="US", unaffected).
+
     NOTE: alpha ticker -> US here is only a rough guess; QDII US-share ranking
     must use is_us_holding() with the pingzhongdata market-prefix map instead.
     """
     c = (code or "").strip().upper()
     if re.fullmatch(r"\d{6}", c):
         return "A"
+    if re.fullmatch(r"\d{7}", c):
+        return "债券"
     if re.fullmatch(r"\d{5}", c):
         return "HK"
     if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", c):
@@ -6048,10 +6140,10 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
             chg = _index_latest_chg(tr)
             if chg is not None:
                 feeder_applied, est_pct, coverage = True, chg, 100.0
-    if coverage == 0 and not feeder_applied and "债券" in ftype:
-        bq = quotes.get("sh511260")
-        if bq:
-            bond_applied, est_pct = True, bq["change_pct"]
+    bond_chg = _bond_proxy_change(
+        _quoted_weight(hold["holdings"], syms, quotes), ftype, quotes)
+    if bond_chg is not None and not feeder_applied:
+        bond_applied, est_pct = True, bond_chg
     no_stock = coverage == 0 and not feeder_applied and not bond_applied
     if not feeder_applied and not bond_applied and not no_stock and not is_mrf:
         est_pct = _apply_beta(est_pct, _beta_row(code))
