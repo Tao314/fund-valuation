@@ -80,10 +80,10 @@ async def fetch_text(url: str, referer: str = None, retries: int = 3) -> str:
 
 # ------------------------------------------------------------------ NAV
 async def fetch_nav_history(code: str, days: int) -> list:
-    """[(date, jzzzl)] newest first, up to `days` rows (lsjz caps 20/page)."""
+    """[(date, jzzzl)] newest first, up to `days` rows (lsjz 20/page, max 30 pages = 600 rows)."""
     rows = []
     page = 1
-    while len(rows) < days and page <= 6:
+    while len(rows) < days and page <= 30:  # 500 NAV days = 25 pages
         url = (f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}"
                f"&pageIndex={page}&pageSize=20")
         data = json.loads(await fetch_text(
@@ -111,8 +111,8 @@ def yahoo_symbol(code: str) -> str:
 
 
 async def yahoo_closes(sym: str) -> dict:
-    """{local_date: close} from Yahoo chart API (6mo daily)."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1y&interval=1d"
+    """{local_date: close} from Yahoo chart API (2y daily)."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
     data = json.loads(await fetch_text(url))
     result = (data.get("chart") or {}).get("result")
     if not result:
