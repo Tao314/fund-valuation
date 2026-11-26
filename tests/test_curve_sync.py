@@ -101,8 +101,10 @@ class TestHistoryTodayStale(unittest.IsolatedAsyncioTestCase):
 class TestSparklineOverride(unittest.TestCase):
     def test_sparkline_overrides_last_point_with_card_value(self):
         html = (REPO_ROOT / "static" / "index.html").read_text()
-        start = html.index("function sparklineHtml")
-        end = html.index("/* ---- fund detail page", start)
+        # The copy + override moved into sparkGeom (shared by the renderer
+        # and the tap/hover tip binder); behaviour is unchanged.
+        start = html.index("function sparkGeom")
+        end = html.index("function sparklineHtml", start)
         body = html[start:end]
         # Copy (never mutate the shared historySeries) + override.
         self.assertIn("raw.map(p => [p[0], p[1]])", body)

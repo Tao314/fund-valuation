@@ -173,7 +173,12 @@
   .flow-row .rk-val small { display: block; font-size: 11px; font-weight: 400; color: #667085; }
   .fund-card .fc-spark .sp-max, .fund-card .fc-spark .sp-min { position: absolute; left: 0; font-size: 10px; line-height: 1; color: #98A2B3; font-variant-numeric: tabular-nums; pointer-events: none; }
   .fund-card .fc-spark .sp-max { top: 0; }
-  .fund-card .fc-spark .sp-min { top: 34px; }
+  .fund-card .fc-spark .sp-min { top: 68px; }
+  .fund-card .fc-spark .sp-zero { position: absolute; left: 0; top: 35px; font-size: 10px; line-height: 1; color: #98A2B3; font-variant-numeric: tabular-nums; pointer-events: none; }
+  .fund-card .fc-spark, .dt-chart { touch-action: pan-y; }
+  .fund-card .fc-spark .sp-tip, .dt-chart .sp-tip { position: absolute; display: none; z-index: 5; background: #202939; color: #fff; font-size: 11px; line-height: 1.4; padding: 3px 7px; border-radius: 5px; white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; transform: translate(-50%, -130%); }
+  .fund-card .fc-spark .sp-tip-dot, .dt-chart .sp-tip-dot { position: absolute; display: none; width: 7px; height: 7px; border-radius: 50%; background: #202939; border: 2px solid #fff; box-shadow: 0 0 0 1px #D0D5DD; transform: translate(-50%, -50%); pointer-events: none; z-index: 5; }
+  .dt-chart .sp-zero { position: absolute; left: 2px; top: 73px; font-size: 11px; color: #98A2B3; pointer-events: none; }
   .fund-card .fc-spark .sp-loading { position: absolute; left: 50%; top: 22px; transform: translate(-50%, -50%); font-size: 11px; color: #98A2B3; pointer-events: none; }
   .fund-card .fc-spark .sp-times { position: relative; height: 12px; font-size: 10px; color: #98A2B3; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .fund-card .fc-spark .sp-times span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
@@ -635,6 +640,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.6.3</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线纵轴标签错位：-bound 标签被写死在 34px、贴在 0 线上方，现移到下沿（68px），中线加 0.00% 标签；曲线支持点按/悬停：卡片、详情日内与历史曲线取最近点弹浮标显示时间与涨跌幅，移开消失；新增 tests/test_curve_tip.py（6 个测试）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.2</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线与卡片估值不同步：曲线整条过 β 校准（新增 _calibrate_curve，末点不动）、前端用卡片估值覆盖曲线末点、曲线序列过期超 30 秒等重算完再返回；新增 tests/test_curve_sync.py（7 个测试）；已知两接口采样时间差仍可留约 0.2pp 尾差，详情页分时图同类问题未修</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.1</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">新增 tests/ 最小测试护栏（52 个测试：TrueNAV 回归、日期判断、排行榜规范化、数据源降级、启动冒烟），app.py 业务代码未动；已知节假日日历仍缺，国庆误判已用 expectedFailure 钉住</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.0</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">数据源兜底补齐：港美股日线（东财失败时切 Yahoo）、港美股实时行情（新浪失败时切 Yahoo）、基金搜索（东财失败时切全量基金代码表，失败带 fallback 标记不再 500）；排行榜页级容错（单页失败跳过拼局部榜）；排行榜仍无独立第二数据源</div></div></div>
@@ -659,7 +665,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.2 · 更新于 2026-11-26 10:45</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.3 · 更新于 2026-11-26 11:51</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1803,6 +1809,42 @@ function tradingMinutesAt(ts, segs) {
   }
   return acc;
 }
+// Shared geometry for a card sparkline: points (copied, last point
+// overridden with the card's est_change_pct for live cards), symmetric
+// bound, and the compressed-time X / value Y maps. Used both to render
+// the curve and to place the tap/hover tip, so the tip always agrees
+// with the drawn line.
+function sparkGeom(f, published) {
+  const raw = historySeries[f.fund_code];
+  const hasPts = Array.isArray(raw) && raw.length >= 2;
+  const segs = sparkSegments(f);
+  const pts = hasPts ? raw.map(p => [p[0], p[1]]) : [];
+  if (!published && hasPts && f.est_change_pct != null) {
+    pts[pts.length - 1][1] = f.est_change_pct;
+  }
+  const vals = pts.map(p => p[1]);
+  const min = hasPts ? Math.min(...vals) : 0, max = hasPts ? Math.max(...vals) : 0;
+  // Symmetric scale around zero (stock-chart style): the bound covers
+  // the largest absolute move (floored at 0.5% so flat days don't blow
+  // up); top/bottom labels are the scale bounds, so the extreme point
+  // touches its label's edge and the zero line sits at the center.
+  // Empty frame: bound stays at the 0.5% floor.
+  const bound = Math.max(Math.abs(min), Math.abs(max), 0.5);
+  // Compressed trading-time axis: merged session segments of the fund's
+  // markets; the full session is pre-shown (labels = first open / last
+  // close) while the line only reaches "now". Fallback: linear data span.
+  const t0 = segs ? segs[0][0] : (pts[0] || [0])[0];
+  const t1 = segs ? segs[segs.length - 1][1] : (pts[pts.length - 1] || [0])[0];
+  const totalMins = segs ? segs.reduce((a, s) => a + (s[1] - s[0]) / 60, 0) : 0;
+  const W = 100, H = 80, YT = 2, YB = 78;
+  const X = p => {
+    if (segs && totalMins > 0) return Math.max(0, Math.min(W, tradingMinutesAt(p[0], segs) / totalMins * W));
+    const tSpan = t1 - t0;
+    return tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
+  };
+  const Y = v => YB - (v + bound) / (2 * bound) * (YB - YT);
+  return { pts, vals, hasPts, segs, bound, t0, t1, totalMins, W, H, X, Y, last: hasPts ? vals[vals.length - 1] : 0 };
+}
 function sparklineHtml(f, published, preopen) {
   const raw = historySeries[f.fund_code];
   const hasPts = Array.isArray(raw) && raw.length >= 2;
@@ -1823,32 +1865,8 @@ function sparklineHtml(f, published, preopen) {
   // cards keep the series' own last point (the curve then depicts
   // the published day's estimate path). Copy: historySeries is
   // shared (and cached to localStorage), so this must not mutate it.
-  const pts = hasPts ? raw.map(p => [p[0], p[1]]) : [];
-  if (!published && hasPts && f.est_change_pct != null) {
-    pts[pts.length - 1][1] = f.est_change_pct;
-  }
-  const vals = pts.map(p => p[1]);
-  const min = hasPts ? Math.min(...vals) : 0, max = hasPts ? Math.max(...vals) : 0;
-  // Symmetric scale around zero (stock-chart style): the bound covers
-  // the largest absolute move (floored at 0.5% so flat days don't blow
-  // up); top/bottom labels are the scale bounds, so the extreme point
-  // touches its label's edge and the zero line sits at the center.
-  // Empty frame: bound stays at the 0.5% floor.
-  const bound = Math.max(Math.abs(min), Math.abs(max), 0.5);
-  // Compressed trading-time axis: merged session segments of the fund's
-  // markets; the full session is pre-shown (labels = first open / last
-  // close) while the line only reaches "now". Fallback: linear data span.
-  const t0 = segs ? segs[0][0] : pts[0][0];
-  const t1 = segs ? segs[segs.length - 1][1] : pts[pts.length - 1][0];
-  const totalMins = segs ? segs.reduce((a, s) => a + (s[1] - s[0]) / 60, 0) : 0;
-  const W = 100, H = 80, YT = 2, YB = 78;
-  const X = p => {
-    if (segs && totalMins > 0) return Math.max(0, Math.min(W, tradingMinutesAt(p[0], segs) / totalMins * W));
-    const tSpan = t1 - t0;
-    return tSpan > 0 ? Math.max(0, Math.min(W, (p[0] - t0) / tSpan * W)) : 0;
-  };
-  const Y = v => YB - (v + bound) / (2 * bound) * (YB - YT);
-  const last = hasPts ? vals[vals.length - 1] : 0;
+  const { pts, vals, bound, t0, t1, X, Y, last } = sparkGeom(f, published);
+  const W = 100, H = 80;
   // Color follows the value the card displays (the 自算估值 row / big
   // number = est_change_pct), not the series' last point: historySeries
   // and estimates refresh on separate cycles, so a stale series could
@@ -1898,14 +1916,80 @@ function sparklineHtml(f, published, preopen) {
     `<span style="left:${j.x.toFixed(2)}%">${j.label}</span>`).join("");
   const fmtLbl = v => (v > 0 ? "+" : "") + v.toFixed(2) + "%";
   const dot = hasPts ? `<span class="sp-dot" style="left:${X(pts[pts.length - 1]).toFixed(2)}%;top:${Y(last).toFixed(2)}px;background:${color}"></span>` : "";
-  return `<div class="fc-spark">
+  return `<div class="fc-spark" data-code="${f.fund_code}" data-pub="${published ? 1 : 0}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${gridH}${gridV}${zero}${lines}</svg>
     <span class="sp-max">${fmtLbl(bound)}</span>
+    <span class="sp-zero">0.00%</span>
     <span class="sp-min">${fmtLbl(-bound)}</span>
     ${hasPts ? "" : `<span class="sp-loading">${preopen ? "今日尚未开盘" : "曲线加载中"}</span>`}
     ${dot}
     <div class="sp-times"><span class="sp-t-first">${fmtHM(t0)}</span>${joinLabels}<span class="sp-t-last">${fmtHM(t1)}</span></div>
   </div>`;
+}
+// Tap / hover a curve to read off the nearest point: time + change at
+// that point. One helper for card sparklines, detail intraday and the
+// detail performance chart. Series carry [ts, change_pct] only (no NAV),
+// so the tip shows time + change, never an invented NAV.
+function ensureChartTip(box) {
+  if (box._tip && box._tip.tip.isConnected) return box._tip;
+  const tip = document.createElement("div");
+  tip.className = "sp-tip";
+  const dot = document.createElement("div");
+  dot.className = "sp-tip-dot";
+  box.appendChild(tip);
+  box.appendChild(dot);
+  box._tip = { tip, dot };
+  return box._tip;
+}
+function bindChartTip(box, pts, xPct, yPx, labelOf) {
+  if (!box || !Array.isArray(pts) || pts.length < 2) return;
+  if (!box._tipBound) {
+    let hideTimer = null;
+    const hide = () => { const t = box._tip; if (t) { t.tip.style.display = "none"; t.dot.style.display = "none"; } };
+    const show = e => {
+      const cfg = box._tipCfg;
+      if (!cfg) return;
+      const t = ensureChartTip(box);
+      const r = box.getBoundingClientRect();
+      if (!r.width) return;
+      const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * 100;
+      let best = cfg.pts[0], bd = Infinity;
+      cfg.pts.forEach((p, i) => { const d = Math.abs(cfg.xPct(p, i) - frac); if (d < bd) { bd = d; best = p; } });
+      const x = cfg.xPct(best, cfg.pts.indexOf(best)), y = cfg.yPx(best);
+      t.tip.textContent = cfg.labelOf(best);
+      t.tip.style.left = Math.max(6, Math.min(94, x)) + "%";
+      t.tip.style.top = y + "px";
+      // Above the point, unless the point is near the top edge (the card
+      // clips overflow) -> drop the tip below the point instead.
+      t.tip.style.transform = y < 24 ? "translate(-50%, 30%)" : "translate(-50%, -130%)";
+      t.tip.style.display = "block";
+      t.dot.style.left = x + "%";
+      t.dot.style.top = y + "px";
+      t.dot.style.display = "block";
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    };
+    box.addEventListener("pointermove", show);
+    box.addEventListener("pointerdown", e => { e.stopPropagation(); show(e); });
+    box.addEventListener("pointerleave", hide);
+    box.addEventListener("pointerup", () => { hideTimer = setTimeout(hide, 1500); });
+    box.addEventListener("pointercancel", hide);
+    // Tapping the curve reads a point; it must not open the detail page
+    // (the card's onclick). Tapping anywhere else on the card still does.
+    box.addEventListener("click", e => e.stopPropagation());
+    box._tipBound = true;
+  }
+  ensureChartTip(box);
+  box._tipCfg = { pts, xPct, yPx, labelOf };
+}
+function bindSparkTips() {
+  document.querySelectorAll(".fc-spark[data-code]").forEach(box => {
+    const f = (currentFunds || []).find(x => x.fund_code === box.dataset.code);
+    if (!f) return;
+    const g = sparkGeom(f, box.dataset.pub === "1");
+    if (!g.hasPts) return;
+    bindChartTip(box, g.pts, p => g.X(p), p => g.Y(p[1]),
+      p => fmtHM(p[0]) + " " + fmtDiff(p[1]));
+  });
 }
 /* ---- fund detail page (v1.5.0) ---- */
 let detailCode = null, detailData = null, detailWindow = "1m", detailTab = "perf";
@@ -2046,6 +2130,11 @@ function renderPerf() {
     $("dt-chart").innerHTML = '<div class="muted">净值历史暂无数据</div>';
   } else {
     $("dt-chart").innerHTML = perfChartSvg(fPts, hsPts);
+    if (fPts.length >= 2) {
+      const perfBound = Math.max(0.5, ...fPts.concat(hsPts).map(p => Math.abs(p[1])));
+      const perfY = v => 148 - (v + perfBound) / (2 * perfBound) * 140;
+      bindChartTip($("dt-chart"), fPts, (p, i) => fPts.length <= 1 ? 0 : i / (fPts.length - 1) * 100, p => perfY(p[1]), p => p[0] + " " + fmtDiff(p[1]));
+    }
   }
   const rows = (d.nav_history || []).filter(r => r.date >= cutoff).slice(0, 30);
   $("dt-nav-table").innerHTML = rows.length
@@ -2082,13 +2171,14 @@ function detailIntradaySvg(f) {
   }
   const zero = Y(0);
   const fmtLbl = v => (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+  if (hasPts) window._dtIntraday = { pts, X, Y }; else window._dtIntraday = null;
   const dot = hasPts ? `<span class="sp-dot" style="left:${(X(pts[pts.length - 1]) / W * 100).toFixed(2)}%;top:${Y(last).toFixed(1)}px;background:${color}"></span>` : "";
   const preopen = f && fundMarketStatus(f).session === "preopen";
   return `<svg id="dt-intraday-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">`
     + `<line x1="0" y1="${YT}" x2="${W}" y2="${YT}" stroke="#F0F2F5" stroke-width="1"/>`
     + `<line x1="0" y1="${zero.toFixed(1)}" x2="${W}" y2="${zero.toFixed(1)}" stroke="#EAECF0" stroke-width="1" stroke-dasharray="4 3"/>`
     + `<line x1="0" y1="${YB}" x2="${W}" y2="${YB}" stroke="#F0F2F5" stroke-width="1"/>${lines}</svg>`
-    + `<span class="sp-max">${fmtLbl(bound)}</span><span class="sp-min">${fmtLbl(-bound)}</span>`
+    + `<span class="sp-max">${fmtLbl(bound)}</span><span class="sp-zero">0.00%</span><span class="sp-min">${fmtLbl(-bound)}</span>`
     + (hasPts ? "" : `<span class="sp-loading">${preopen ? "今日尚未开盘" : "曲线加载中"}</span>`)
     + dot
     + `<div class="dt-times"><span>${fmtHM(t0)}</span><span>${fmtHM(t1)}</span></div>`;
@@ -2105,6 +2195,8 @@ function renderSector() {
   if (!f) { $("dt-intraday").innerHTML = '<div class="muted">曲线加载中…</div>'; return; }
   const svg = detailIntradaySvg(f);
   $("dt-intraday").innerHTML = svg || '<div class="muted">曲线加载中…</div>';
+  const g = window._dtIntraday;
+  if (svg && g && g.pts && g.pts.length >= 2) bindChartTip($("dt-intraday"), g.pts, p => g.X(p), p => g.Y(p[1]), p => fmtHM(p[0]) + " " + fmtDiff(p[1]));
 }
 $("dt-share-btn").onclick = async () => {
   const d = detailData;
@@ -2265,6 +2357,7 @@ function renderFunds(data) {
     });
   });
   $("fund-cards").innerHTML = html;
+  bindSparkTips();
   prevSnapshot = {};
   funds.forEach(f => { prevSnapshot[f.fund_code] = { est_nav: f.est_nav, est_change_pct: f.est_change_pct, est_nav_ext: f.est_nav_ext, est_change_pct_ext: f.est_change_pct_ext, dwjz: f.dwjz }; });
   // fade out change markers after 4s
