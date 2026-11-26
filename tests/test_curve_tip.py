@@ -82,7 +82,7 @@ class TestChartTipWiring(unittest.TestCase):
         self.assertIn("function bindSparkTips()", HTML)
         self.assertIn("bindSparkTips();", HTML)
         self.assertIn("function sparkGeom(f, published)", HTML)
-        self.assertIn("const { pts, vals, bound, t0, t1, X, Y, last } = sparkGeom(f, published);", HTML)
+        self.assertIn("const { pts, vals, bound, t0, t1, totalMins, X, Y, last } = sparkGeom(f, published);", HTML)
         # Card tip label is time + change; detail intraday + perf the same.
         self.assertIn('p => fmtHM(p[0]) + " " + fmtDiff(p[1])', HTML)
         self.assertIn('p => p[0] + " " + fmtDiff(p[1])', HTML)
@@ -120,12 +120,13 @@ function fn(name) {
   const e = html.indexOf("\\n}\\n", s) + 3;
   return html.slice(s, e);
 }
-const src = ["fmtHM", "fmtDiff", "sparkSegments", "tradingMinutesAt", "sparkGeom", "sparklineHtml"].map(fn).join("\\n");
-eval(src);
+const src = ["fmtHM", "fmtDiff", "marketOfHolding", "tzWallEpoch", "sparkSegments", "tradingMinutesAt", "sparkGeom", "sparklineHtml"].map(fn).join("\\n");
+const _ms = html.indexOf("const MARKET_SESSIONS = {");
+eval(src + "\\n" + html.slice(_ms, html.indexOf("\\n};", _ms) + 3));
 global.lastTradingDay = () => "2026-11-26";
 function render(pts, code) {
   global.historySeries = { [code]: pts };
-  return sparklineHtml({ fund_code: code, holdings: [], est_change_pct: null }, false, false);
+  return sparklineHtml({ fund_code: code, holdings: [{code: "600000"}], est_change_pct: null }, false, false);
 }
 const t0 = 1793000000, t1 = 1793003600, t2 = 1793007200;
 const cases = {

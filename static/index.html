@@ -640,6 +640,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.6.4</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">紧急修复：v1.6.3 上线后自选基金卡片全空，sparklineHtml 引用了未定义变量 totalMins（重构移进 sparkGeom 后解构时漏了），有持仓的基金渲染即抛错、整个列表出不来；补上解构（1 行），测试渲染用例改带持仓覆盖 segs 非空路径；后端与数据未动，自选数据无丢失</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.3</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线纵轴标签错位：-bound 标签被写死在 34px、贴在 0 线上方，现移到下沿（68px），中线加 0.00% 标签；曲线支持点按/悬停：卡片、详情日内与历史曲线取最近点弹浮标显示时间与涨跌幅，移开消失；新增 tests/test_curve_tip.py（6 个测试）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.2</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线与卡片估值不同步：曲线整条过 β 校准（新增 _calibrate_curve，末点不动）、前端用卡片估值覆盖曲线末点、曲线序列过期超 30 秒等重算完再返回；新增 tests/test_curve_sync.py（7 个测试）；已知两接口采样时间差仍可留约 0.2pp 尾差，详情页分时图同类问题未修</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.1</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">新增 tests/ 最小测试护栏（52 个测试：TrueNAV 回归、日期判断、排行榜规范化、数据源降级、启动冒烟），app.py 业务代码未动；已知节假日日历仍缺，国庆误判已用 expectedFailure 钉住</div></div></div>
@@ -665,7 +666,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.3 · 更新于 2026-11-26 11:51</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.4 · 更新于 2026-11-26 12:03</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1865,7 +1866,7 @@ function sparklineHtml(f, published, preopen) {
   // cards keep the series' own last point (the curve then depicts
   // the published day's estimate path). Copy: historySeries is
   // shared (and cached to localStorage), so this must not mutate it.
-  const { pts, vals, bound, t0, t1, X, Y, last } = sparkGeom(f, published);
+  const { pts, vals, bound, t0, t1, totalMins, X, Y, last } = sparkGeom(f, published);
   const W = 100, H = 80;
   // Color follows the value the card displays (the 自算估值 row / big
   // number = est_change_pct), not the series' last point: historySeries
