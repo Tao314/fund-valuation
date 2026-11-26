@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.6.7"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.6.8"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -675,6 +675,10 @@ class BindEmailBody(BaseModel):
     code: str
 
 
+class ChangeUsernameBody(BaseModel):
+    username: str
+
+
 @app.get("/api/config")
 def public_config():
     # Unauthenticated bootstrap config for the frontend (the register form
@@ -770,20 +774,53 @@ def bind_email(body: BindEmailBody, session: Optional[str] = Cookie(default=None
     return {"ok": True, "email": email}
 
 
+@app.post("/api/username/change")
+def change_username(body: ChangeUsernameBody, session: Optional[str] = Cookie(default=None)):
+    uid = current_user_id(session)
+    new_name = body.username.strip()
+    if len(new_name) < 3 or len(new_name) > 32:
+        raise HTTPException(400, "用户名需 3-32 个字符")
+    with db() as conn:
+        row = conn.execute("SELECT username, email FROM users WHERE id=?", (uid,)).fetchone()
+        if not row or not row["email"]:
+            raise HTTPException(400, "请先绑定邮箱后再改用户名")
+        if new_name == row["username"]:
+            return {"ok": True, "username": new_name}
+        try:
+            conn.execute("UPDATE users SET username=? WHERE id=?", (new_name, uid))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "用户名已存在")
+    # Sessions are keyed by user_id, so renaming never logs anyone out.
+    return {"ok": True, "username": new_name}
+
+
 @app.post("/api/login")
 def login(body: AuthBody, response: Response, request: Request):
-    username = body.username.strip()
+    ident = body.username.strip()
     with db() as conn:
-        row = conn.execute("SELECT id, password_hash FROM users WHERE username=?", (username,)).fetchone()
+        # Email first, then username. A user with a bound (verified) email
+        # may only log in with that email; username login is rejected.
+        row = conn.execute(
+            "SELECT id, username, password_hash, email FROM users WHERE email=?",
+            (ident.lower(),)).fetchone()
+        by_email = row is not None
+        if row is None:
+            row = conn.execute(
+                "SELECT id, username, password_hash, email FROM users WHERE username=?",
+                (ident,)).fetchone()
+        if row and row["email"] and not by_email:
+            _log_login(conn, ident, row["id"], False, request)
+            conn.commit()  # db() skips its commit when the block raises
+            raise HTTPException(401, "该账号已绑定邮箱，请使用邮箱登录")
         if not row or not check_password(body.password, row["password_hash"]):
-            _log_login(conn, username, row["id"] if row else None, False, request)
+            _log_login(conn, ident, row["id"] if row else None, False, request)
             conn.commit()  # db() skips its commit when the block raises
             raise HTTPException(401, "用户名或密码错误")
         token = secrets.token_urlsafe(32)
         conn.execute("INSERT INTO sessions(token, user_id, created_at) VALUES(?,?,?)", (token, row["id"], now_iso()))
-        _log_login(conn, username, row["id"], True, request)
+        _log_login(conn, row["username"], row["id"], True, request)
     response.set_cookie("session", token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", path="/")
-    return {"ok": True, "username": username}
+    return {"ok": True, "username": row["username"]}
 
 
 @app.post("/api/logout")

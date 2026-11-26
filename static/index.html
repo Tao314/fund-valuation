@@ -312,7 +312,7 @@
   <div id="auth" class="card" style="display:none">
     <h3 id="auth-title">登录</h3>
     <div id="auth-login-fields">
-      <input id="username" placeholder="用户名" autocomplete="username">
+      <input id="username" placeholder="用户名或邮箱" autocomplete="username">
       <input id="password" type="password" placeholder="密码" autocomplete="current-password">
       <div class="row" id="auth-forgot-row"><button class="secondary" id="auth-forgot">忘记密码？</button></div>
     </div>
@@ -580,6 +580,26 @@
       <div class="card">
         <h3>账户</h3>
         <div class="muted" id="account-email">邮箱：-</div>
+        <div class="muted" id="account-username">用户名：-</div>
+        <div id="account-bind" style="display:none">
+          <input id="set-bind-email" type="email" placeholder="邮箱" autocomplete="email">
+          <div class="row">
+            <input id="set-bind-code" placeholder="邮箱验证码（6 位）" autocomplete="one-time-code" inputmode="numeric">
+            <button class="secondary" id="set-bind-send-code" style="flex:none">发送验证码</button>
+          </div>
+          <div class="row">
+            <button id="set-bind-btn">绑定邮箱</button>
+            <span class="muted" id="set-bind-ok"></span>
+          </div>
+          <div class="err" id="set-bind-err"></div>
+        </div>
+        <div class="row">
+          <input id="new-username" placeholder="新用户名（3-32 个字符）" autocomplete="username">
+          <button id="change-username-btn">改用户名</button>
+          <span class="muted" id="username-saved"></span>
+        </div>
+        <div class="err" id="username-err"></div>
+        <div class="muted">改用户名需先绑定邮箱；改名后当前登录保持有效。</div>
         <input id="old-password" type="password" placeholder="旧密码" autocomplete="current-password">
         <input id="new-password" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password">
         <input id="confirm-password" type="password" placeholder="确认新密码" autocomplete="new-password">
@@ -664,7 +684,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
-                    <div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
+                    <div class="es-row"><div class="es-ver">v1.6.8</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">用户名/邮箱登录：新增改用户名接口，仅已绑定邮箱的用户可改（3–32 字符唯一），改名不清除现有会话；登录先按邮箱查再按用户名查，已绑邮箱的用户须用邮箱+密码登录、用户名登录被拒，无邮箱用户仍用用户名+密码；绑邮箱复用现有验证码（6 位、10 分钟有效）；设置页新增改用户名/绑定邮箱入口，登录框改为“用户名或邮箱”，无邮箱用户登录后提示绑定邮箱；新增 tests/test_username_email.py（11 个测试）</div></div></div>
+<div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.6</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">通知栏超长自动循环滚动：长消息内容复制一份、@keyframes 横向平移 -50% 循环，仅超宽时滚动，短消息不滚；时间戳放进滚动内容里一起走，不再截断；通知栏加 touch-action: pan-x pan-y，手动横滑也可用</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.5</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">债券基金估值修 0：511260 代理触发条件从 coverage==0 改为无可报价持仓（quoted 权重为 0）且类型含债券，卡片、曲线末点、详情三处同改；债券码前后端标“债券”；新增管理员临时通知栏：标题下有消息才显示、没消息不占位，带时间戳，管理页可发可清除，30 秒轮询；新增 tests/test_bond_notice.py（15 个测试）</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.4</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">紧急修复：v1.6.3 上线后自选基金卡片全空，sparklineHtml 引用了未定义变量 totalMins（重构移进 sparkGeom 后解构时漏了），有持仓的基金渲染即抛错、整个列表出不来；补上解构（1 行），测试渲染用例改带持仓覆盖 segs 非空路径；后端与数据未动，自选数据无丢失</div></div></div>
@@ -693,7 +714,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.7 · 更新于 2026-11-26 15:14</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.8 · 更新于 2026-11-26 16:09</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1518,6 +1539,8 @@ function showDash(user, admin, userId, email, emailAuthFlag) {
   $("userbox").textContent = user;
   $("account-email").textContent = "邮箱：" + (myEmail || "未绑定");
   $("account-email").style.display = emailAuth ? "" : "none";
+  $("account-username").textContent = "用户名：" + user;
+  $("account-bind").style.display = (emailAuth && !myEmail) ? "" : "none";
   let dismissed = false;
   try { dismissed = !!localStorage.getItem("fv-bind-dismissed-" + myUsername); } catch {}
   $("bind-banner").style.display = (emailAuth && !myEmail && !dismissed) ? "" : "none";
@@ -1577,7 +1600,31 @@ $("bind-btn").onclick = async () => {
     myEmail = r.email;
     $("account-email").textContent = "邮箱：" + myEmail;
     $("bind-banner").style.display = "none";
+    $("account-bind").style.display = "none";
   } catch (e) { $("bind-err").textContent = e.message; }
+};
+$("change-username-btn").onclick = async () => {
+  $("username-err").textContent = ""; $("username-saved").textContent = "";
+  try {
+    const r = await api("/api/username/change", { method: "POST", body: JSON.stringify({ username: $("new-username").value.trim() }) });
+    myUsername = r.username;
+    $("userbox").textContent = r.username;
+    $("account-username").textContent = "用户名：" + r.username;
+    $("username-saved").textContent = "已改名";
+    $("new-username").value = "";
+  } catch (e) { $("username-err").textContent = e.message; }
+};
+$("set-bind-send-code").onclick = () => sendCode($("set-bind-email").value.trim(), "bind", $("set-bind-send-code"), $("set-bind-err"), $("set-bind-ok"));
+$("set-bind-btn").onclick = async () => {
+  $("set-bind-err").textContent = ""; $("set-bind-ok").textContent = "";
+  try {
+    const r = await api("/api/email/bind", { method: "POST", body: JSON.stringify({ email: $("set-bind-email").value.trim(), code: $("set-bind-code").value.trim() }) });
+    myEmail = r.email;
+    $("account-email").textContent = "邮箱：" + myEmail;
+    $("account-bind").style.display = "none";
+    $("bind-banner").style.display = "none";
+    $("set-bind-ok").textContent = "已绑定";
+  } catch (e) { $("set-bind-err").textContent = e.message; }
 };
 $("auth-btn").onclick = async () => {
   try {
