@@ -635,6 +635,7 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
+          <div class="es-row"><div class="es-ver">v1.6.2</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复分时曲线与卡片估值不同步：曲线整条过 β 校准（新增 _calibrate_curve，末点不动）、前端用卡片估值覆盖曲线末点、曲线序列过期超 30 秒等重算完再返回；新增 tests/test_curve_sync.py（7 个测试）；已知两接口采样时间差仍可留约 0.2pp 尾差，详情页分时图同类问题未修</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.1</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">新增 tests/ 最小测试护栏（52 个测试：TrueNAV 回归、日期判断、排行榜规范化、数据源降级、启动冒烟），app.py 业务代码未动；已知节假日日历仍缺，国庆误判已用 expectedFailure 钉住</div></div></div>
           <div class="es-row"><div class="es-ver">v1.6.0</div><div class="es-main"><div class="es-date">2026-11-25</div><div class="es-desc">数据源兜底补齐：港美股日线（东财失败时切 Yahoo）、港美股实时行情（新浪失败时切 Yahoo）、基金搜索（东财失败时切全量基金代码表，失败带 fallback 标记不再 500）；排行榜页级容错（单页失败跳过拼局部榜）；排行榜仍无独立第二数据源</div></div></div>
           <div class="es-row"><div class="es-ver">v1.5.0</div><div class="es-main"><div class="es-date">2026-11-24</div><div class="es-desc">单个基金详情页：点卡片进入，当日涨幅/近1年涨幅/持有人数与库内排名；业绩走势（本基金 vs 沪深300，近1月/3月/6月/1年/3年切换+净值表）；关联板块改为基金当日估值走势，可分享成图片；行业分布条形图；排行榜新增板块资金流榜（东财行业板块主力净流入）</div></div></div>
@@ -658,7 +659,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.1 · 更新于 2026-11-25 20:55</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.2 · 更新于 2026-11-26 10:45</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -1813,8 +1814,19 @@ function sparklineHtml(f, published, preopen) {
   // is no axis to draw -> nothing.
   if (!hasPts && !segs) return "";
   // The backend appends a final point computed from the same live
-  // quotes as the card estimate, so the line ends at that number.
-  const pts = hasPts ? raw : [];
+  // quotes as the card estimate, so the line ends at that number —
+  // but only when the series is fresh. historySeries refreshes on a
+  // separate cycle from estimates and can lag it by minutes, so for
+  // live (unpublished) cards the last point is overridden here with
+  // the card's own est_change_pct: every render then ends exactly at
+  // the card number, and the axis bound covers it too. Published
+  // cards keep the series' own last point (the curve then depicts
+  // the published day's estimate path). Copy: historySeries is
+  // shared (and cached to localStorage), so this must not mutate it.
+  const pts = hasPts ? raw.map(p => [p[0], p[1]]) : [];
+  if (!published && hasPts && f.est_change_pct != null) {
+    pts[pts.length - 1][1] = f.est_change_pct;
+  }
   const vals = pts.map(p => p[1]);
   const min = hasPts ? Math.min(...vals) : 0, max = hasPts ? Math.max(...vals) : 0;
   // Symmetric scale around zero (stock-chart style): the bound covers

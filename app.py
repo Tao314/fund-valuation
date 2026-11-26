@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.6.1"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v1.6.2"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -4220,6 +4220,16 @@ _series_cache = {}   # uid -> (computed_at_epoch, series dict)
 _series_tasks = {}   # uid -> asyncio.Task running _refresh_series
 _series_gen = {}     # uid -> mutation counter; stale computes don't overwrite
 _SERIES_TTL = 20
+# A series older than this is too stale to show: the card already shows
+# the live estimate, so serving minutes-old points makes the two visibly
+# disagree (reported case: card +4.11% while the curve peaked at 2.44%).
+# Past this age the request waits for the recompute instead of returning
+# the old series; a failed refresh leaves the cache untouched, so the
+# old series is still the fallback. 30s, not minutes: the frontend polls
+# every ~60s, and a 60s-old series was observed live to sit 0.43pp away
+# from the card on a fast-moving fund — the wait only triggers past the
+# 20s TTL, so rapid re-renders still hit the fast path.
+_SERIES_STALE_MAX = 30
 
 
 def _preopen_no_us(now_cn, holdings: list) -> bool:
@@ -4307,8 +4317,15 @@ async def _compute_series(uid):
             series[code] = []
             continue
         raw_cov = sum(h["weight"] for h in holdings)
+        # Holdings-based curve: the only source whose buckets are raw
+        # (uncalibrated) weighted changes. Feeder/bond curves and the
+        # est_history fallback already carry their own anchor, so only
+        # this path gets the card's beta calibration below.
+        holdings_curve = True
         pts = _fund_curve(holdings, trends_by_code, start_ts,
                           _residual_pct(raw_cov, stock_position))
+        if not pts:
+            holdings_curve = False
         feeder_tr = None
         if not pts and _is_feeder(fund_name, holdings):
             # ETF feeder fund: curve from its tracking index (weight 100%).
@@ -4366,6 +4383,14 @@ async def _compute_series(uid):
                 pts.append([now_ts, val])
             else:
                 pts[-1] = [pts[-1][0], val]
+            # Same beta calibration on every bucket, not just the final
+            # point: otherwise the mid-curve sits systematically below
+            # the card (raw 2.44% vs calibrated 4.11% in the reported
+            # case) even when the series is fresh. The last point is
+            # the live estimate, already calibrated above, so
+            # _calibrate_curve leaves it alone.
+            if holdings_curve and coverage > 0:
+                pts = _calibrate_curve(pts, _beta_row(code))
         series[code] = pts
       except Exception as e:
         print(f"[history] curve failed for {code}: {e!r}")
@@ -4395,8 +4420,19 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
         hit = _series_cache.get(uid)
     if hit is not None:
         computed_at, series = hit
-        if time.time() - computed_at > _SERIES_TTL and uid not in _series_tasks:
+        age = time.time() - computed_at
+        if age > _SERIES_TTL and uid not in _series_tasks:
             _series_tasks[uid] = asyncio.create_task(_refresh_series(uid))
+        if age > _SERIES_STALE_MAX:
+            # Too stale to show: wait for the recompute (started above,
+            # or already in flight) instead of returning minutes-old
+            # points while the card shows the live estimate. A failed
+            # refresh leaves the cache untouched, so the old series is
+            # still the fallback below.
+            await _await_refresh(_series_tasks, uid)
+            fresh = _series_cache.get(uid)
+            if fresh is not None:
+                _, series = fresh
         return {"series": series}
     gen = _series_gen.get(uid, 0)
     series = await _compute_series(uid)
@@ -4859,6 +4895,18 @@ def _credibility(row: Optional[dict]) -> Optional[str]:
     if mae is None:
         return None
     return "高" if mae <= 0.3 else ("中" if mae <= 0.6 else "低")
+
+
+def _calibrate_curve(pts: list, row: Optional[dict]) -> list:
+    """Apply the card's beta calibration to every curve bucket except
+    the last: the last point is the live estimate, already calibrated by
+    the caller. No usable beta row (or fewer than 2 points) -> the
+    series is returned unchanged."""
+    if not pts or len(pts) < 2 or not row:
+        return pts
+    if row.get("beta") is None or row.get("alpha") is None:
+        return pts
+    return [[ts, round(_apply_beta(v, row), 2)] for ts, v in pts[:-1]] + [pts[-1]]
 
 
 def _apply_beta(est_pct: float, row: Optional[dict]) -> float:
