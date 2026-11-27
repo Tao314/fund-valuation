@@ -663,11 +663,15 @@
           <div class="ev-sub"><b>③ 报告期衰减</b>：持仓越旧权重越低，过期持仓混行业指数代理。</div>
           <div class="ev-sub"><b>④ 覆盖率动态权重</b>：前十覆盖越低，越依赖代理估值。</div>
           <div class="ev-sub">2026-11-26 已放弃：四步做完回测 MAE 0.658%→0.657%，目标 &lt;0.60% 未达成；残差近白噪声，残差 EMA 起反作用，混合权重 0.3–0.6 间 plateau 在约 0.65%，3 轮调参后按要求停手，未合 main。</div></div>
-        <div class="evo-ver"><div class="ev-top"><span class="ev-name">TrueNAV 1.4</span><span class="ev-todo">进行中</span></div>
+        <div class="evo-ver"><div class="ev-top"><span class="ev-name">TrueNAV 1.4</span><span class="ev-todo">已完成</span></div>
           <div class="ev-sub"><b>实验 0 回测基建（已完成，2026-11-26）</b>：point-in-time 持仓、基金等权 MAE 为主指标、500 日窗口；新基线 1.2 为 0.760%。</div>
-          <div class="ev-sub"><b>实验 1 未披露仓位代理（待做）</b>：前十大补齐改单指数/行业代理，先单代理后 Ridge。</div>
-          <div class="ev-sub"><b>实验 2 停牌/涨跌停/价格陈旧（待做）</b>：停牌公允价值代理、涨跌停区分处理；另做持仓漂移监测，只触发降级。</div>
-          <div class="ev-sub"><b>实验 3 港股/QDII（待做）</b>：港股独立时钟+汇率，QDII 按市场状态分三种；<b>实验 4 模型集成（待做）</b>：先测误差相关性。</div></div>
+          <div class="ev-sub"><b>实验 1 未披露仓位代理（已放弃，2026-11-27）</b>：单宽基 0.780%（反升）、行业 0.754%（仅降 0.006pp）、Ridge 融合 β 校准后 0.755%（仅 3/6 只改善），均未达标。</div>
+          <div class="ev-sub"><b>实验 2 停牌/涨跌停/价格陈旧（已放弃，2026-11-27）</b>：0.759%，仅降 0.001pp，未达标。</div>
+          <div class="ev-sub"><b>实验 3 港股/QDII（已放弃，2026-11-27）</b>：可比口径 0.760%（±0），未达标；状态处理单独采用（恢复 49 个休市测试日）；汇率同日/滞后一日均拖累 QDII。</div>
+          <div class="ev-sub"><b>实验 4 模型集成（已放弃，2026-11-27）</b>：0.825%，反升 0.065pp，未达标。</div>
+          <div class="ev-sub"><b>实验 5 FX 中间价（已放弃，2026-11-27）</b>：CFETS 9:15 中间价 0.761%（+0.001pp），未达标，QDII 仍留 1.2；16:00 参考汇率不单独做。</div>
+          <div class="ev-sub"><b>持仓漂移监测（待办）</b>：只触发降级，未做。</div>
+          <div class="ev-sub">实验 1–5 均未达标，留 1.2。</div></div>
         <div class="evo-ver"><div class="ev-top"><span class="ev-name">TrueNAV 1.5</span><span class="ev-todo">待开发</span></div>
           <div class="ev-sub"><b>⑨ 残差 EMA 修正</b>：连续高估或低估就反向微调。</div>
           <div class="ev-sub"><b>⑩ 动态 β</b>：20/40/60/120 日多窗口，近期权重更高。</div>
