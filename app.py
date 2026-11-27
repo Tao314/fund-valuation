@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v1.6.9"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v2.0.0"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -98,6 +98,14 @@ FUND_TYPE_TTL = 30 * 86400  # seconds, DB cache (fund type rarely changes)
 HOLDER_TTL = 7 * 86400       # seconds, DB cache for fund holder counts (v1.5.0)
 NAV_HISTORY_TTL = 86400     # seconds, DB cache for detail-page NAV history (v1.5.0)
 SECTOR_FLOW_TTL = 60        # seconds, Eastmoney sector fund-flow board cache (v1.5.0)
+# Perf tier 1 (2026-11-27): shared HTTP pool / breaker / memos.
+_UPSTREAM_MAX_CONC = 20   # global cap on concurrent upstream HTTP calls
+_UPSTREAM_BREAKER_FAILS = 3  # consecutive failures before a source is suppressed
+_UPSTREAM_BREAKER_SECS = 60  # suppression window per source (seconds)
+_UPSTREAM_RETRY_BACKOFF = 0.5  # one retry (connect errors only), seconds
+_HOLDINGS_MEMO_TTL = 600     # in-memory holdings memo (DB cache behind it: 24h)
+_INDUSTRY_MEMO_TTL = 3600    # in-memory industry memo (DB cache behind it: 30d)
+_FTYPE_MEMO_TTL = 3600       # in-memory fund-type memo (DB cache behind it: 30d)
 HS300_SECID = "1.000300"    # 沪深300 index secid for the detail-page benchmark curve
 SESSION_DAYS = 30
 
@@ -117,6 +125,7 @@ async def lifespan(_app):
     finally:
         for t in tasks:
             t.cancel()
+        await _close_http_client()
 
 
 app = FastAPI(title="Fund Valuation MVP", lifespan=lifespan)
@@ -1743,6 +1752,84 @@ def _data_flow_ok() -> bool:
 
 
 # Customer-facing service status (v1.4.9): the three business names a
+# ---------------------------------------------------------------- shared HTTP client (perf tier 1)
+# One global AsyncClient: TLS/TCP connections are reused across the many
+# small upstream calls a cold compute makes (previously one client per
+# call). Limits bound total/keepalive connections; per-request timeouts
+# still apply per call below.
+_shared_http_client: Optional[httpx.AsyncClient] = None
+_upstream_sem = asyncio.Semaphore(_UPSTREAM_MAX_CONC)
+_upstream_breaker: dict = {}  # source key -> {"fails": int, "open_until": float}
+
+
+def _http_client() -> httpx.AsyncClient:
+    """Lazily-created shared client (also the seam tests patch)."""
+    global _shared_http_client
+    if _shared_http_client is None:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0), follow_redirects=True,
+            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20))
+    return _shared_http_client
+
+
+async def _close_http_client() -> None:
+    global _shared_http_client
+    if _shared_http_client is not None:
+        try:
+            await _shared_http_client.aclose()
+        except Exception:
+            pass
+        _shared_http_client = None
+
+
+# Per-source timeout caps (seconds): the caller's timeout is honoured up
+# to the cap, so a slow source can't stall a whole valuation.
+_UPSTREAM_TIMEOUT_CAPS = {
+    "sina": 10, "em_trends": 15, "em_ulist": 15, "em_nav": 15,
+    "em_holdings": 15, "em_pingzhong": 30, "em_f10": 10, "em_kline": 15,
+    "em_rank": 30, "em_sector_flow": 15, "em_search": 10, "em_suggest": 10,
+    "em_jbgk": 15, "yahoo_nav": 15, "yahoo_trends": 15, "tencent": 10,
+    "fuyao_nav": 15, "fuyao_holdings": 15, "fuyao_asset": 15,
+    "fuyao_kline": 15, "fuyao_snapshot": 15, "fuyao_industry": 15,
+    "ipapi": 5,
+}
+
+
+def _breaker_open(key: str) -> bool:
+    br = _upstream_breaker.get(key)
+    return bool(br and time.time() < br["open_until"])
+
+
+def _breaker_note(key: str, ok: bool) -> None:
+    """Success resets the failure count; N consecutive failures open the
+    breaker for _UPSTREAM_BREAKER_SECS (suppressed calls are never
+    recorded, so the breaker can't extend itself)."""
+    if ok:
+        _upstream_breaker.pop(key, None)
+        return
+    br = _upstream_breaker.setdefault(key, {"fails": 0, "open_until": 0.0})
+    br["fails"] += 1
+    if br["fails"] >= _UPSTREAM_BREAKER_FAILS:
+        br["open_until"] = time.time() + _UPSTREAM_BREAKER_SECS
+
+
+# ---------------------------------------------------------------- singleflight (perf tier 1)
+# One in-flight compute per key; concurrent waiters share the result.
+# A failed compute releases the key immediately (never a permanent block).
+_flight_tasks: dict = {}
+
+
+async def _singleflight(key: str, factory):
+    t = _flight_tasks.get(key)
+    if t is None or t.done():
+        t = asyncio.create_task(factory())
+        _flight_tasks[key] = t
+        t.add_done_callback(
+            lambda _: _flight_tasks.pop(key, None)
+            if _flight_tasks.get(key) is t else None)
+    return await asyncio.shield(t)
+
+
 async def upstream_get(url: str, referer: Optional[str] = None, timeout: float = 10,
                        headers: Optional[dict] = None) -> httpx.Response:
     hdrs = {"User-Agent": UA}
@@ -1750,17 +1837,37 @@ async def upstream_get(url: str, referer: Optional[str] = None, timeout: float =
         hdrs["Referer"] = referer
     if headers:
         hdrs.update(headers)
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers=hdrs)
-            resp.raise_for_status()
-    except Exception as e:
-        _record_source(url, False, f"{type(e).__name__}: {e}")
-        # Single choke point for upstream failures -> admin 系统状态
-        # error log (deduped inside log_error, so expected fallbacks
-        # like trends2 throttling don't flood it).
-        log_error("upstream", f"{url.split('?')[0]} -> {type(e).__name__}: {e}")
-        raise
+    key = _classify_source(url)
+    eff_timeout = min(timeout, _UPSTREAM_TIMEOUT_CAPS.get(key, 15))
+    if _breaker_open(key):
+        # Fail fast without recording: a suppressed call must not extend
+        # the breaker, and callers already fall back on any exception.
+        raise RuntimeError(f"upstream suppressed: {key} circuit open")
+    resp = None
+    for attempt in (0, 1):
+        try:
+            async with _upstream_sem:
+                resp = await _http_client().get(url, headers=hdrs, timeout=eff_timeout)
+                resp.raise_for_status()
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # Transient connect failure only: one retry with backoff,
+            # then record once (a slow/read timeout is never retried).
+            if attempt == 0:
+                await asyncio.sleep(_UPSTREAM_RETRY_BACKOFF)
+                continue
+            _record_source(url, False, f"{type(e).__name__}: {e}")
+            log_error("upstream", f"{url.split('?')[0]} -> {type(e).__name__}: {e}")
+            _breaker_note(key, False)
+            raise
+        except Exception as e:
+            _record_source(url, False, f"{type(e).__name__}: {e}")
+            # Single choke point for upstream failures -> admin 系统状态
+            # error log (deduped inside log_error, so expected fallbacks
+            # like trends2 throttling don't flood it).
+            log_error("upstream", f"{url.split('?')[0]} -> {type(e).__name__}: {e}")
+            _breaker_note(key, False)
+            raise
     # HTTP succeeded; the payload still has to carry data. A 200 with an
     # empty/throttled payload records as failure for the 数据接口 page and
     # the 数据流异常 judgement, but the response is returned unchanged —
@@ -1769,6 +1876,9 @@ async def upstream_get(url: str, referer: Optional[str] = None, timeout: float =
     _record_source(url, ok, err)
     if not ok:
         log_error("upstream", f"{url.split('?')[0]} -> {err}")
+        _breaker_note(key, False)
+    else:
+        _breaker_note(key, True)
     return resp
 
 
@@ -1855,13 +1965,20 @@ async def search(q: str, session: Optional[str] = Cookie(default=None)):
         return {"results": _match_fundcode(rows, q), "fallback": True}
 
 
+_ftype_memo: dict = {}  # fund code -> (ftype, fetched_at); fresh only, 3600s
+
+
 async def fetch_fund_type(code: str) -> Optional[str]:
     """Fund type string (e.g. "QDII-混合偏股", "混合型-偏股", "债券型-长债")
     from Eastmoney FundSearchAPI FundBaseInfo.FTYPE, DB-cached 30d.
     Returns None when unknown (upstream failure and no cache)."""
+    memo = _ftype_memo.get(code)
+    if memo and time.time() - memo[1] < _FTYPE_MEMO_TTL:
+        return memo[0]
     with db() as conn:
         row = conn.execute("SELECT * FROM fund_type_cache WHERE fund_code=?", (code,)).fetchone()
     if row and time.time() - row["fetched_at"] < FUND_TYPE_TTL:
+        _ftype_memo[code] = (row["ftype"], time.time())
         return row["ftype"]
     try:
         from urllib.parse import quote
@@ -1880,6 +1997,7 @@ async def fetch_fund_type(code: str) -> Optional[str]:
                     "INSERT INTO fund_type_cache(fund_code, ftype, fetched_at) VALUES(?,?,?) "
                     "ON CONFLICT(fund_code) DO UPDATE SET ftype=excluded.ftype, fetched_at=excluded.fetched_at",
                     (code, ftype, time.time()))
+            _ftype_memo[code] = (ftype, time.time())
             return ftype
     except Exception:
         pass
@@ -2419,12 +2537,20 @@ def parse_holdings(text: str) -> dict:
     }
 
 
+_holdings_memo: dict = {}  # fund_code -> (payload, fetched_at); fresh only, 600s
+
+
 async def fetch_holdings(code: str) -> dict:
+    memo = _holdings_memo.get(code)
+    if memo and time.time() - memo[1] < _HOLDINGS_MEMO_TTL and not memo[0].get("stale"):
+        return memo[0]
     with db() as conn:
         row = conn.execute("SELECT * FROM holdings_cache WHERE fund_code=?", (code,)).fetchone()
     if row and time.time() - row["fetched_at"] < HOLDINGS_TTL:
-        return {"holdings": json.loads(row["holdings_json"]), "report_label": row["report_label"],
-                "report_date": row["report_date"], "stale": False}
+        payload = {"holdings": json.loads(row["holdings_json"]), "report_label": row["report_label"],
+                   "report_date": row["report_date"], "stale": False}
+        _holdings_memo[code] = (payload, time.time())
+        return payload
     try:
         resp = await upstream_get(
             f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10&year=&month=&rt=0.1",
@@ -2439,7 +2565,9 @@ async def fetch_holdings(code: str) -> dict:
                 "ON CONFLICT(fund_code) DO UPDATE SET holdings_json=excluded.holdings_json, report_label=excluded.report_label, report_date=excluded.report_date, fetched_at=excluded.fetched_at",
                 (code, json.dumps(parsed["holdings"], ensure_ascii=False), parsed["report_label"], parsed["report_date"], time.time()),
             )
-        return {**parsed, "stale": False}
+        payload = {**parsed, "stale": False}
+        _holdings_memo[code] = (payload, time.time())
+        return payload
     except Exception:
         # Eastmoney jjcc failed/empty -> fuyao fallback (v1.4.7). Only a
         # non-empty result is cached (mirrors the jjcc empty check).
@@ -2452,7 +2580,9 @@ async def fetch_holdings(code: str) -> dict:
                         "ON CONFLICT(fund_code) DO UPDATE SET holdings_json=excluded.holdings_json, report_label=excluded.report_label, report_date=excluded.report_date, fetched_at=excluded.fetched_at",
                         (code, json.dumps(parsed["holdings"], ensure_ascii=False), parsed["report_label"], parsed["report_date"], time.time()),
                     )
-                return {**parsed, "stale": False}
+                payload = {**parsed, "stale": False}
+                _holdings_memo[code] = (payload, time.time())
+                return payload
         if row:
             return {"holdings": json.loads(row["holdings_json"]), "report_label": row["report_label"],
                     "report_date": row["report_date"], "stale": True}
@@ -2599,6 +2729,9 @@ def _short_industry(name: str) -> str:
     return name
 
 
+_industry_memo: dict = {}  # holding code -> (industry, fetched_at); resolved only, 3600s
+
+
 async def fetch_industry(code: str) -> Optional[str]:
     """Sector/industry (shortened display name) for a holding code.
     Overseas codes (US tickers, HK 5-digit) resolve via MANUAL_SECTOR.
@@ -2606,8 +2739,12 @@ async def fetch_industry(code: str) -> Optional[str]:
     DB-cached 30 days (failures cached 10 minutes). Returns None when unknown.
     Verified 2026-11-21: SH600519 -> 制造业-酒、饮料和精制茶制造业."""
     code = (code or "").strip()
+    memo = _industry_memo.get(code)
+    if memo and time.time() - memo[1] < _INDUSTRY_MEMO_TTL:
+        return memo[0]
     manual = MANUAL_SECTOR.get(code.upper()) or MANUAL_SECTOR.get(code)
     if manual:
+        _industry_memo[code] = (manual, time.time())
         return manual
     if not re.fullmatch(r"\d{6}", code):
         return None
@@ -2618,6 +2755,7 @@ async def fetch_industry(code: str) -> Optional[str]:
     if row:
         age = time.time() - row["fetched_at"]
         if row["industry"] and age < INDUSTRY_TTL:
+            _industry_memo[code] = (row["industry"], time.time())
             return row["industry"]
         if not row["industry"] and age < INDUSTRY_FAIL_TTL:
             return None
@@ -2656,10 +2794,12 @@ async def fetch_industry(code: str) -> Optional[str]:
                 "INSERT INTO stock_industry(code, industry, fetched_at) VALUES(?,?,?) "
                 "ON CONFLICT(code) DO UPDATE SET industry=excluded.industry, fetched_at=excluded.fetched_at",
                 (code, industry, time.time()))
+        _industry_memo[code] = (industry, time.time())
         return industry
     # Failure: keep a stale resolved industry if we have one; otherwise
     # cache the failure so we don't hammer the endpoint.
     if row and row["industry"]:
+        _industry_memo[code] = (row["industry"], time.time())
         return row["industry"]
     with db() as conn:
         conn.execute(
@@ -3868,55 +4008,92 @@ def _index_curve(tr: Optional[dict], start_ts: int) -> list:
     return [[ts, pct] for ts, pct in sorted(buckets.items())]
 
 
+def _active_uids(window: int = 600) -> tuple:
+    """(uids with a session heartbeat in the last `window` seconds,
+    total session rows). Zero rows (fresh install) -> ([], 0)."""
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT user_id, last_seen_at FROM sessions").fetchall()
+    except Exception:
+        return [], 0
+    now = datetime.now(timezone.utc)
+    active = []
+    for r in rows:
+        last = _parse_iso(r[1])
+        if last is None:
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if (now - last).total_seconds() <= window:
+            active.append(r[0])
+    return sorted(set(active)), len(rows)
+
+
+async def _quote_warm_once():
+    """One quote-warm cycle (extracted for benchmarking/testing)."""
+    with db() as conn:
+        codes = [r[0] for r in conn.execute(
+            "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
+        uids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT user_id FROM user_funds").fetchall()]
+    syms = set()
+    warm_uids = []
+    if codes:
+        holdings_by_code = {}
+        for code in codes:
+            hold = await fetch_holdings(code)
+            holdings_by_code[code] = hold["holdings"]
+            mmap = await fetch_stock_market_map(code)
+            for h in hold["holdings"]:
+                s = await holding_quote_symbol(h, mmap)
+                if s:
+                    syms.add(s)
+        syms.update(BOND_PROXY_SYMBOLS)  # bond-proxy ETF quotes
+        if syms:
+            async with _quote_refresh_lock:
+                await _refresh_quotes(sorted(syms))
+            _wstat("quote_warm", last_run=time.time(),
+                   last_result=f"refreshed {len(syms)} symbols for {len(codes)} funds")
+            print(f"[quote-warm] refreshed {len(syms)} symbols "
+                  f"for {len(codes)} funds", flush=True)
+        # Precompute per-user estimates payloads (quotes are hot
+        # now) so the first page open after startup is served
+        # from cache instead of computing synchronously. Only users
+        # active in the last 10 min get a recompute; idle users'
+        # funds still get fresh quotes above, and compute on demand
+        # (singleflight-protected) when they return. Fresh installs
+        # (no sessions yet) warm everyone.
+        active, n_sessions = _active_uids()
+        warm_uids = [u for u in uids if u in active] if n_sessions else uids
+        for uid in warm_uids:
+            await _refresh_estimates(uid)
+        if warm_uids:
+            print(f"[quote-warm] estimates cache refreshed for "
+                  f"{len(warm_uids)} users", flush=True)
+    else:
+        _wstat("quote_warm", last_run=time.time(),
+               last_result="no watchlist funds")
+    return {"funds": len(codes), "symbols": len(syms), "users": len(uids),
+            "active_users": len(warm_uids)}
+
+
 async def _quote_warm_loop():
     """Keep the quote cache hot: every 40s refresh quotes for the union of
     holding symbols across all users' watchlists, so page loads never wait
     on Sina. Startup is never blocked; errors are logged and skipped."""
-    await asyncio.sleep(5)
+    await asyncio.sleep(5 + random.uniform(0, 5))
     while True:
         try:
-            with db() as conn:
-                codes = [r[0] for r in conn.execute(
-                    "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
-                uids = [r[0] for r in conn.execute(
-                    "SELECT DISTINCT user_id FROM user_funds").fetchall()]
-            if codes:
-                syms = set()
-                holdings_by_code = {}
-                for code in codes:
-                    hold = await fetch_holdings(code)
-                    holdings_by_code[code] = hold["holdings"]
-                    mmap = await fetch_stock_market_map(code)
-                    for h in hold["holdings"]:
-                        s = await holding_quote_symbol(h, mmap)
-                        if s:
-                            syms.add(s)
-                syms.update(BOND_PROXY_SYMBOLS)  # bond-proxy ETF quotes
-                if syms:
-                    async with _quote_refresh_lock:
-                        await _refresh_quotes(sorted(syms))
-                    _wstat("quote_warm", last_run=time.time(),
-                           last_result=f"refreshed {len(syms)} symbols for {len(codes)} funds")
-                    print(f"[quote-warm] refreshed {len(syms)} symbols "
-                          f"for {len(codes)} funds", flush=True)
-                # Precompute per-user estimates payloads (quotes are hot
-                # now) so the first page open after startup is served
-                # from cache instead of computing synchronously.
-                for uid in uids:
-                    await _refresh_estimates(uid)
-                if uids:
-                    print(f"[quote-warm] estimates cache refreshed for "
-                          f"{len(uids)} users", flush=True)
-            else:
-                _wstat("quote_warm", last_run=time.time(),
-                       last_result="no watchlist funds")
+            await _quote_warm_once()
         except Exception as e:
             log_error("quote-warm", repr(e))
             _wstat("quote_warm", last_run=time.time(),
                    last_result=f"failed: {e!r}")
             print(f"[quote-warm] failed: {e!r}", flush=True)
-        _wstat("quote_warm", next_run=time.time() + 40)
-        await asyncio.sleep(40)
+        interval = 40 if _in_trading_window() else 300
+        _wstat("quote_warm", next_run=time.time() + interval)
+        await asyncio.sleep(interval)
 
 
 async def _jittered(coro):
@@ -3937,6 +4114,61 @@ def _prune_trends_cache():
         return cur.rowcount
 
 
+async def _trends_warm_once():
+    """One trends-warm cycle (extracted for benchmarking/testing)."""
+    _prune_trends_cache()
+    if not _in_trading_window():
+        # Outside any session (weekend/holiday/night gap): minute
+        # trends can't move, so skip the whole upstream refresh; the
+        # 900s off-window cadence still re-checks.
+        _wstat("trends_warm", last_run=time.time(),
+               last_result="outside trading window, skipped")
+        return {"funds": 0, "secids": 0, "skipped": True}
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT fund_code, fund_name FROM user_funds").fetchall()
+    n = 0
+    if rows:
+        date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        uniq = {}          # holding code -> (market map, name)
+        feeder_codes = []
+        for r in rows:
+            hold = await fetch_holdings(r["fund_code"])
+            mmap = await fetch_stock_market_map(r["fund_code"])
+            for h in hold["holdings"]:
+                if h["weight"]:
+                    uniq.setdefault(h["code"], (mmap, h.get("name")))
+            if _is_feeder(r["fund_name"], hold["holdings"]):
+                feeder_codes.append(r["fund_code"])
+        await asyncio.gather(*[
+            _jittered(fetch_holding_trends(c, m, date_str, n))
+            for c, (m, n) in uniq.items()])
+        n = len(uniq)
+        for fc in feeder_codes:
+            idx = await resolve_fund_index(fc)
+            if idx and idx.get("secid"):
+                async with _trends_sem:
+                    await fetch_stock_trends(idx["secid"], date_str)
+                n += 1
+        # Bond-fund curve sources: every bond-proxy ETF's minute trends.
+        proxy_secids = {pr[0] for pr in BOND_PROXIES.values()} | {BOND_PROXY_DEFAULT[0]}
+
+        async def _warm_proxy(secid):
+            async with _trends_sem:
+                await fetch_stock_trends(secid, date_str)
+
+        await asyncio.gather(*[_warm_proxy(s) for s in sorted(proxy_secids)])
+        n += len(proxy_secids)
+        _wstat("trends_warm", last_run=time.time(),
+               last_result=f"refreshed {n} secids for {len(rows)} funds")
+        print(f"[trends-warm] refreshed {n} secids "
+              f"for {len(rows)} funds", flush=True)
+    else:
+        _wstat("trends_warm", last_run=time.time(),
+               last_result="no watchlist funds")
+    return {"funds": len(rows), "secids": n, "skipped": False}
+
+
 async def _trends_warm_loop():
     """Keep stock_trends_cache hot: refresh minute trends for the union of
     holding codes across all users' watchlists (plus feeder funds'
@@ -3944,51 +4176,10 @@ async def _trends_warm_loop():
     waits on Eastmoney. Runs beside the quote warmer; startup is never
     blocked; errors are logged and skipped. Cycle: 240s in trading
     windows, 900s outside (v1.4.0)."""
-    await asyncio.sleep(10)
+    await asyncio.sleep(10 + random.uniform(0, 10))
     while True:
         try:
-            _prune_trends_cache()
-            with db() as conn:
-                rows = conn.execute(
-                    "SELECT DISTINCT fund_code, fund_name FROM user_funds").fetchall()
-            if rows:
-                date_str = datetime.now(CN_TZ).strftime("%Y-%m-%d")
-                uniq = {}          # holding code -> (market map, name)
-                feeder_codes = []
-                for r in rows:
-                    hold = await fetch_holdings(r["fund_code"])
-                    mmap = await fetch_stock_market_map(r["fund_code"])
-                    for h in hold["holdings"]:
-                        if h["weight"]:
-                            uniq.setdefault(h["code"], (mmap, h.get("name")))
-                    if _is_feeder(r["fund_name"], hold["holdings"]):
-                        feeder_codes.append(r["fund_code"])
-                await asyncio.gather(*[
-                    _jittered(fetch_holding_trends(c, m, date_str, n))
-                    for c, (m, n) in uniq.items()])
-                n = len(uniq)
-                for fc in feeder_codes:
-                    idx = await resolve_fund_index(fc)
-                    if idx and idx.get("secid"):
-                        async with _trends_sem:
-                            await fetch_stock_trends(idx["secid"], date_str)
-                        n += 1
-                # Bond-fund curve sources: every bond-proxy ETF's minute trends.
-                proxy_secids = {pr[0] for pr in BOND_PROXIES.values()} | {BOND_PROXY_DEFAULT[0]}
-
-                async def _warm_proxy(secid):
-                    async with _trends_sem:
-                        await fetch_stock_trends(secid, date_str)
-
-                await asyncio.gather(*[_warm_proxy(s) for s in sorted(proxy_secids)])
-                n += len(proxy_secids)
-                _wstat("trends_warm", last_run=time.time(),
-                       last_result=f"refreshed {n} secids for {len(rows)} funds")
-                print(f"[trends-warm] refreshed {n} secids "
-                      f"for {len(rows)} funds", flush=True)
-            else:
-                _wstat("trends_warm", last_run=time.time(),
-                       last_result="no watchlist funds")
+            await _trends_warm_once()
         except Exception as e:
             log_error("trends-warm", repr(e))
             _wstat("trends_warm", last_run=time.time(),
@@ -4280,6 +4471,7 @@ _est_cache = {}   # uid -> (computed_at_epoch, payload dict)
 _est_tasks = {}   # uid -> asyncio.Task running _refresh_estimates
 _est_gen = {}     # uid -> mutation counter; stale computes don't overwrite
 _EST_TTL = 30
+_EST_STALE_MAX = 60  # past this age the request waits for the recompute
 
 
 async def _compute_estimates(uid):
@@ -4298,19 +4490,27 @@ async def _compute_estimates(uid):
         # (e.g. HK MRF 968061 — lsjz returns an empty list) must not 502
         # the whole page; it renders with empty NAV fields instead.
         try:
-            nav = await fetch_nav(r["fund_code"], r["fund_name"])
+            nav = await _singleflight(
+                f"nav:{r['fund_code']}:{r['fund_name']}",
+                lambda r=r: fetch_nav(r["fund_code"], r["fund_name"]))
         except Exception:
             nav = {"nav_date": None, "dwjz": None, "jzzzl": None,
                    "prev_nav_date": None, "prev_dwjz": None, "prev_jzzzl": None,
                    "stale": True}
         try:
-            hold = await fetch_holdings(r["fund_code"])
+            hold = await _singleflight(
+                f"hold:{r['fund_code']}",
+                lambda r=r: fetch_holdings(r["fund_code"]))
         except Exception:
             hold = {"holdings": [], "report_label": None, "report_date": None, "stale": True}
-        mmap = await fetch_stock_market_map(r["fund_code"])
+        mmap = await _singleflight(
+            f"mmap:{r['fund_code']}",
+            lambda r=r: fetch_stock_market_map(r["fund_code"]))
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
         try:
-            stock_position = await fetch_stock_position(r["fund_code"])
+            stock_position = await _singleflight(
+                f"spos:{r['fund_code']}",
+                lambda r=r: fetch_stock_position(r["fund_code"]))
         except Exception:
             stock_position = None
         return (r, nav, hold, syms, stock_position)
@@ -4327,13 +4527,16 @@ async def _compute_estimates(uid):
     ind_codes = sorted({h["code"] for (_, _, hold, _, _) in per_fund
                         for h in hold["holdings"] if h["code"]})
     ind_results = await asyncio.gather(
-        *[fetch_industry(c) for c in ind_codes], return_exceptions=True)
+        *[_singleflight(f"ind:{c}", lambda c=c: fetch_industry(c))
+          for c in ind_codes], return_exceptions=True)
     industries = {c: (v if isinstance(v, str) else None)
                   for c, v in zip(ind_codes, ind_results)}
     # Fund types (QDII detection for NAV publish timing; bond/money funds
     # have no stock holdings to estimate from). DB-cached 30d.
     type_results = await asyncio.gather(
-        *[fetch_fund_type(r["fund_code"]) for r in rows], return_exceptions=True)
+        *[_singleflight(f"ftype:{r['fund_code']}",
+                        lambda r=r: fetch_fund_type(r["fund_code"]))
+          for r in rows], return_exceptions=True)
     fund_types = {r["fund_code"]: (v if isinstance(v, str) else None)
                   for r, v in zip(rows, type_results)}
     out = []
@@ -4565,13 +4768,23 @@ async def estimates(session: Optional[str] = Cookie(default=None)):
         hit = _est_cache.get(uid)
     if hit is not None:
         computed_at, payload = hit
-        if time.time() - computed_at > _EST_TTL and uid not in _est_tasks:
+        age = time.time() - computed_at
+        if age > _EST_TTL and uid not in _est_tasks:
             _est_tasks[uid] = asyncio.create_task(_refresh_estimates(uid))
+        if age > _EST_STALE_MAX:
+            # Too stale to show: wait for the recompute (started above,
+            # or already in flight) instead of serving minutes-old
+            # numbers. A failed refresh leaves the cache untouched, so
+            # the old payload is still the fallback below.
+            await _await_refresh(_est_tasks, uid)
+            fresh = _est_cache.get(uid)
+            if fresh is not None:
+                _, payload = fresh
         # data_flow_ok is attached per response (never baked into the
         # cached payload) so the banner reflects the current judgement.
         return {**payload, "data_flow_ok": _data_flow_ok()}
     gen = _est_gen.get(uid, 0)
-    payload = await _compute_estimates(uid)
+    payload = await _singleflight(f"est:{uid}", lambda: _compute_estimates(uid))
     if _est_gen.get(uid, 0) == gen:
         _est_cache[uid] = (time.time(), payload)
     return {**payload, "data_flow_ok": _data_flow_ok()}
@@ -4591,14 +4804,14 @@ _SERIES_TTL = 60
 # disagree (reported case: card +4.11% while the curve peaked at 2.44%).
 # Past this age the request waits for the recompute instead of returning
 # the old series; a failed refresh leaves the cache untouched, so the
-# old series is still the fallback. 90s, not minutes: the frontend polls
+# old series is still the fallback. 120s, not minutes: the frontend polls
 # every ~60s, and a 60s-old series was observed live to sit 0.43pp away
 # from the card on a fast-moving fund — but the sparkline's last point
 # is overridden with the card value (sparkGeom) and cards now render
 # before curves, so mid-curve staleness is the only cost; the old 20s
 # TTL forced a full recompute (seconds of upstream calls) on nearly
 # every load. The wait only triggers past the 60s TTL.
-_SERIES_STALE_MAX = 90
+_SERIES_STALE_MAX = 120
 
 
 def _preopen_no_us(now_cn, holdings: list) -> bool:
@@ -4650,11 +4863,12 @@ async def _compute_series(uid):
     # prefixes and bare KR local codes from A-share codes.
     async def _inputs(fr):
         code = fr["fund_code"]
-        hold = await fetch_holdings(code)
-        mmap = await fetch_stock_market_map(code)
+        hold = await _singleflight(f"hold:{code}", lambda: fetch_holdings(code))
+        mmap = await _singleflight(f"mmap:{code}", lambda: fetch_stock_market_map(code))
         syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
         try:
-            stock_position = await fetch_stock_position(code)
+            stock_position = await _singleflight(
+                f"spos:{code}", lambda: fetch_stock_position(code))
         except Exception:
             stock_position = None
         return code, fr["fund_name"], hold["holdings"], mmap, syms, stock_position
@@ -4895,7 +5109,7 @@ async def history_today(session: Optional[str] = Cookie(default=None)):
                 _, series = fresh
         return {"series": series}
     gen = _series_gen.get(uid, 0)
-    series = await _compute_series(uid)
+    series = await _singleflight(f"series:{uid}", lambda: _compute_series(uid))
     series = {c: (v if v is not None else []) for c, v in series.items()}
     if _series_gen.get(uid, 0) == gen:
         _series_cache[uid] = (time.time(), series)
@@ -5479,7 +5693,7 @@ def _ensure_beta(code: str):
 async def _beta_loop():
     """Daily β recalibration for all watchlisted funds after the CN
     close (15:35 CST). Lazy _ensure_beta covers funds added intraday."""
-    await asyncio.sleep(30)
+    await asyncio.sleep(30 + random.uniform(0, 60))
     last_run = None
     while True:
         try:
@@ -5491,6 +5705,7 @@ async def _beta_loop():
             _wstat("beta", next_run=nxt.timestamp())
             if now.hour * 60 + now.minute >= 15 * 60 + 35 and last_run != today:
                 last_run = today
+                await asyncio.sleep(random.uniform(0, 300))  # after-close work, no rush
                 with db() as conn:
                     codes = [r[0] for r in conn.execute(
                         "SELECT DISTINCT fund_code FROM user_funds").fetchall()]
@@ -5750,7 +5965,7 @@ async def _rank_warm_loop():
     """Background pre-warm: after a short startup delay, warm each ranking
     cache that is missing/stale, one board at a time, then re-check hourly
     so cache expiry never lands on a user request."""
-    await asyncio.sleep(5)  # let the server start answering requests first
+    await asyncio.sleep(5 + random.uniform(0, 10))  # let the server start answering requests first
     while True:
         for key, ttl, compute in _RANK_BOARDS:
             try:
@@ -5771,10 +5986,15 @@ async def _rank_warm_loop():
             except Exception as e:
                 log_error(f"rank-warm:{key}", repr(e))
                 print(f"[rank-warm] {key}: failed: {e!r}", flush=True)
+        # Next run at :07 past the hour (+0-120s jitter), not on the
+        # hour: ranking boards share the hour boundary with other jobs.
+        now = datetime.now(CN_TZ)
+        nxt = (now + timedelta(hours=1)).replace(minute=7, second=0, microsecond=0)
+        delay = max(60.0, (nxt - now).total_seconds() + random.uniform(0, 120))
         _wstat("rank_warm", last_run=time.time(),
                last_result="hourly board check done",
-               next_run=time.time() + 3600)
-        await asyncio.sleep(3600)
+               next_run=time.time() + delay)
+        await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------- ranking prewarm backfill (v1.4.2)
@@ -5983,7 +6203,7 @@ async def _prewarm_loop():
     if not PREWARM_ENABLED:
         print("[prewarm] disabled (PREWARM_ENABLED=0)", flush=True)
         return
-    await asyncio.sleep(20)
+    await asyncio.sleep(20 + random.uniform(0, 10))
     interval = 60.0 / PREWARM_PER_MIN
     last_sync = 0.0
     queue_empty = True  # until the first pool sync lands, re-check every minute
@@ -6486,18 +6706,19 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
     (same helpers, same β calibration, feeder/bond branches). Used by the
     detail page so it works even for funds outside the viewer's watchlist."""
     try:
-        nav = await fetch_nav(code)
+        nav = await _singleflight(f"nav:{code}:", lambda: fetch_nav(code))
     except Exception:
         nav = {"nav_date": None, "dwjz": None, "jzzzl": None,
                "prev_nav_date": None, "prev_dwjz": None, "prev_jzzzl": None, "stale": True}
     try:
-        hold = await fetch_holdings(code)
+        hold = await _singleflight(f"hold:{code}", lambda: fetch_holdings(code))
     except Exception:
         hold = {"holdings": [], "report_label": None, "report_date": None, "stale": True}
-    mmap = await fetch_stock_market_map(code)
+    mmap = await _singleflight(f"mmap:{code}", lambda: fetch_stock_market_map(code))
     syms = [await holding_quote_symbol(h, mmap) for h in hold["holdings"]]
     try:
-        stock_position = await fetch_stock_position(code)
+        stock_position = await _singleflight(
+            f"spos:{code}", lambda: fetch_stock_position(code))
     except Exception:
         stock_position = None
     quotes = await fetch_quotes([s for s in syms if s] + list(BOND_PROXY_SYMBOLS))
@@ -6588,7 +6809,7 @@ async def fund_detail(code: str, session: Optional[str] = Cookie(default=None)):
         except Exception:
             name = None
     name = name or code
-    est = await _estimate_one(code, name)
+    est = await _singleflight(f"one:{code}", lambda: _estimate_one(code, name))
     # NAV history + 1y return (latest NAV vs the trading day ~365d ago).
     # Cache-first: a cold fund's 3y pull takes 60-80s upstream, so the
     # detail page must NOT block on it — return what is cached now,

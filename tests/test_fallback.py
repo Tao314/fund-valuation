@@ -47,12 +47,12 @@ class _FailingClient:
     async def __aexit__(self, *a):
         return False
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, **kwargs):
         raise httpx.ConnectTimeout("boom")
 
 
 class _EmptyClient(_FailingClient):
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, **kwargs):
         return FakeResp(text="", content=b"")
 
 
@@ -186,7 +186,7 @@ class TestUpstreamGetRecording(unittest.IsolatedAsyncioTestCase):
     async def test_connect_failure_raises_and_is_recorded(self):
         url = "https://hq.sinajs.cn/list=sh600000"
         before = (app._source_stats.get("sina") or {}).get("fail", 0)
-        with patch.object(app.httpx, "AsyncClient", _FailingClient):
+        with patch.object(app, "_http_client", lambda: _FailingClient()):
             with self.assertRaises(httpx.ConnectTimeout):
                 await app.upstream_get(url)
         after = (app._source_stats.get("sina") or {}).get("fail", 0)
@@ -196,7 +196,7 @@ class TestUpstreamGetRecording(unittest.IsolatedAsyncioTestCase):
     async def test_200_empty_is_returned_but_recorded_as_failure(self):
         url = "https://hq.sinajs.cn/list=sh600000"
         before = (app._source_stats.get("sina") or {}).get("fail", 0)
-        with patch.object(app.httpx, "AsyncClient", _EmptyClient):
+        with patch.object(app, "_http_client", lambda: _EmptyClient()):
             resp = await app.upstream_get(url)
         self.assertIsNotNone(resp)
         after = (app._source_stats.get("sina") or {}).get("fail", 0)

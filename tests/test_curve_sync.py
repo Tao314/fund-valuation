@@ -46,9 +46,10 @@ class TestSeriesStaleThreshold(unittest.TestCase):
         # cadence, never on every request.
         self.assertGreater(app._SERIES_STALE_MAX, app._SERIES_TTL)
         self.assertEqual(app._SERIES_TTL, 60)
-        # 90s, not minutes: the sparkline's last point is overridden
-        # with the card value, so only mid-curve staleness is at stake.
-        self.assertEqual(app._SERIES_STALE_MAX, 90)
+        # 120s, not minutes (perf tier 1: curve 60-120s): the sparkline's
+        # last point is overridden with the card value, so only mid-curve
+        # staleness is at stake.
+        self.assertEqual(app._SERIES_STALE_MAX, 120)
 
 
 class TestHistoryTodayStale(unittest.IsolatedAsyncioTestCase):

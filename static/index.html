@@ -689,7 +689,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
-                    <div class="es-row"><div class="es-ver">v1.6.9</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">美股/沪深节假日表：前后端同套 US/CN 节假日表，休市日显示休市、无估值；首屏卡片不再等曲线，曲线随后单独补；自动备份改到每天 1 点；债券按子类型选代理 ETF（可转债/短债/信用/城投/地方债各配其一，长债/混合/未知仍用 511260）；新增 tests/test_holidays.py、tests/test_series_batch.py</div></div></div>
+                    <div class="es-row"><div class="es-ver">v2.0.0</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">性能优化第一档（大升级，主号升 2.x）：SingleFlight 同请求合并、公共数据共享缓存、预热改增量、HTTP 连接池复用、后台任务错峰、上游超时/限流/熔断、分层 TTL；实测（云电脑 14 只基金小库，非生产 123 只）：估值冷算 p50 -35%/p95 -37%，曲线冷算 p50 -78%/p95 -72%；5 并发冷算估值 1.18→0.23 秒、曲线 2.17→0.27 秒；新增 tests/test_perf_tier1.py，全套 198 通过</div></div></div>
+<div class="es-row"><div class="es-ver">v1.6.9</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">美股/沪深节假日表：前后端同套 US/CN 节假日表，休市日显示休市、无估值；首屏卡片不再等曲线，曲线随后单独补；自动备份改到每天 1 点；债券按子类型选代理 ETF（可转债/短债/信用/城投/地方债各配其一，长债/混合/未知仍用 511260）；新增 tests/test_holidays.py、tests/test_series_batch.py</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.8</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">用户名/邮箱登录：新增改用户名接口，仅已绑定邮箱的用户可改（3–32 字符唯一），改名不清除现有会话；登录先按邮箱查再按用户名查，已绑邮箱的用户须用邮箱+密码登录、用户名登录被拒，无邮箱用户仍用用户名+密码；绑邮箱复用现有验证码（6 位、10 分钟有效）；设置页新增改用户名/绑定邮箱入口，登录框改为“用户名或邮箱”，无邮箱用户登录后提示绑定邮箱；新增 tests/test_username_email.py（11 个测试）</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.6</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">通知栏超长自动循环滚动：长消息内容复制一份、@keyframes 横向平移 -50% 循环，仅超宽时滚动，短消息不滚；时间戳放进滚动内容里一起走，不再截断；通知栏加 touch-action: pan-x pan-y，手动横滑也可用</div></div></div>
@@ -720,7 +721,7 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v1.6.9 · 更新于 2026-11-27 00:48</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v2.0.0 · 更新于 2026-11-27 16:03</span></footer>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
