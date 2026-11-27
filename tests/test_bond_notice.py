@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from tests._common import app
+from tests._common import app, cn, frozen_time
 
 # 004103-shaped fixture: 7-digit bond codes (no Sina symbol) + 6-digit
 # bond codes whose only quote is the forced 0.00% (current == prev).
@@ -138,6 +138,11 @@ class TestMarketOfHolding(unittest.TestCase):
 
 class TestEstimateOneBond(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # _estimate_one is time-dependent (CN pre-open sends no estimate):
+        # pin to a trading-hours instant so the proxy assertions hold no
+        # matter when the suite runs.
+        self._time_patch = frozen_time(cn(2026, 11, 26, 14, 0))
+        self._time_patch.start()
         self._saved = {}
         for name in ("fetch_nav", "fetch_holdings", "fetch_stock_market_map",
                      "holding_quote_symbol", "fetch_stock_position",
@@ -179,6 +184,7 @@ class TestEstimateOneBond(unittest.IsolatedAsyncioTestCase):
         app.fetch_fund_type = fake_ftype
 
     async def asyncTearDown(self):
+        self._time_patch.stop()
         for name, fn in self._saved.items():
             setattr(app, name, fn)
 

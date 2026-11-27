@@ -764,7 +764,8 @@ function marketStatusText() {
   const hk = cnStatus(570, 720, 780, 960);  // 港股 09:30-12:00, 13:00-16:00
   // 美股 sessions computed in ET (America/New_York, DST-aware); reuse per-fund session logic
   const usSess = marketSession("us", now);
-  const us = usSess === "trading" ? "盘中" : usSess === "pre" ? "盘前" : (usSess === "post" || usSess === "postext") ? "盘后"
+  const usEarly = usSess === "post" && US_EARLY_CLOSE.has(etDateStr(now));
+  const us = usSess === "trading" ? "盘中" : usSess === "pre" ? "盘前" : usEarly ? "提前收盘" : (usSess === "post" || usSess === "postext") ? "盘后"
     : usSess === "preopen" ? "待开" : "休市";
   return { a: a, hk: hk, us: us };
 }
@@ -806,6 +807,10 @@ function etDateStr(now) { return ET_DATE_FMT.format(now || new Date()); }
 // NYSE full closures 2026-2027 (+2025-12-25 lookback); SSE 2026 weekday
 // closures (上证公告〔2025〕45号). HK keeps weekday-only: its calendar
 // differs (it trades on some CN holidays) and is out of scope.
+// NYSE early closes 13:00 ET (nyse.com): 2026-11-27, 2026-12-24,
+// 2027-11-26 only — 2027-12-24 is Christmas observed (full closure,
+// already in US_HOLIDAYS) and 2027-07-02 is a full session.
+const US_EARLY_CLOSE = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 const US_HOLIDAYS = new Set(["2025-12-25",
   "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
   "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
@@ -844,13 +849,14 @@ function marketSession(market, now) {
     if (mins < 960) return "trading";
     return "closed";
   }
-  if (market === "us") { // ET Mon-Fri: pre 04:00-09:30, trading 09:30-16:00, post 16:00-20:00; 20:00 -> next 04:00 (incl. weekends) is "postext" (last post price reused, not a live session)
+  if (market === "us") { // ET Mon-Fri: pre 04:00-09:30, trading 09:30-16:00 (09:30-13:00 on early-close days), post close-20:00; 20:00 -> next 04:00 (incl. weekends) is "postext" (last post price reused, not a live session)
     if (US_HOLIDAYS.has(etDateStr(now))) return "closed";
     const et = etParts(now);
     if (et.day >= 1 && et.day <= 5) {
+      const close = US_EARLY_CLOSE.has(etDateStr(now)) ? 780 : 960;
       if (et.mins >= 240 && et.mins < 570) return "pre";
-      if (et.mins >= 570 && et.mins < 960) return "trading";
-      if (et.mins >= 960 && et.mins < 1200) return "post";
+      if (et.mins >= 570 && et.mins < close) return "trading";
+      if (et.mins >= close && et.mins < 1200) return "post";
     }
     return "postext";
   }
@@ -873,8 +879,9 @@ function fundMarketStatus(f, now) {
   for (const p of ["trading", "pre", "post", "postext", "lunch", "preopen"]) {
     if (sessions.includes(p)) { s = p; break; }
   }
+  const earlyClose = s === "post" && US_EARLY_CLOSE.has(etDateStr(now));
   const label = markets.has("us")
-    ? (s === "trading" ? "盘中" : s === "pre" ? "盘前" : (s === "post" || s === "postext") ? "盘后" : s === "lunch" ? "午休" : s === "preopen" ? "未开盘" : "已收盘")
+    ? (s === "trading" ? "盘中" : s === "pre" ? "盘前" : earlyClose ? "提前收盘" : (s === "post" || s === "postext") ? "盘后" : s === "lunch" ? "午休" : s === "preopen" ? "未开盘" : "已收盘")
     : (s === "trading" ? "盘中交易" : s === "lunch" ? "午休" : s === "preopen" ? "未开盘" : "已收盘");
   // Est label depends only on whether the official NAV is published:
   // the estimate is always 预估; 已确认 belongs to the published NAV/change row.
@@ -2479,6 +2486,12 @@ function renderFunds(data) {
         ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b>${published ? ` ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span>` : ""}</span></div>
         ${prevRow}
         <div class="fc-row"><span class="fc-label fc-note">${noStockNote(f)}</span></div>`
+        : f.cn_preopen
+        // Pre-open (CN trading morning, no US holdings): the backend sends
+        // no estimate — yesterday's NAV only, never a beta-shifted 0.00%.
+        ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b>${published ? ` ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span>` : ""}</span></div>
+        ${prevRow}
+        <div class="fc-row"><span class="fc-label fc-note">未开盘·暂无估值</span></div>`
         : (published && !live)
         ? `<div class="fc-row fc-row-today"><span class="fc-label">${navLabel}</span><span class="fc-val"><b>${f.dwjz ?? "-"}</b> ${fmtPct(f.jzzzl)}<span class="fc-pub">已确认</span></span></div>
         ${prevRow}

@@ -5,6 +5,8 @@ Regression: 2026-11-26 Thanksgiving was treated as a trading day and
 hard-coded in app.py (NYSE + SSE 2026 notice) and mirrored in
 static/index.html; the last test guards the two copies against drift.
 Sina gb_ field 3 is a Beijing datetime ("YYYY-MM-DD HH:MM:SS").
+US early closes (NYSE official): 2026-11-27, 2026-12-24, 2027-11-26
+only — 2027-12-24 is a full closure and 2027-07-02 a full session.
 """
 import unittest
 from datetime import date
@@ -45,6 +47,58 @@ class TestUsSessionHoliday(unittest.TestCase):
         # Thanksgiving morning itself -> also Wed 11-25 16:00.
         close = app._last_regular_close(et(2026, 11, 26, 10, 0))
         self.assertEqual((close.weekday(), close.day, close.hour), (2, 25, 16))
+
+
+class TestUsEarlyClose(unittest.TestCase):
+    def test_early_close_day_trades_until_1300_et(self):
+        self.assertEqual(app.us_session(et(2026, 11, 27, 10, 0)), "trading")
+        self.assertEqual(app.us_session(et(2026, 11, 27, 12, 59)), "trading")
+        self.assertEqual(app.us_session(et(2026, 11, 27, 13, 0)), "post")
+        self.assertEqual(app.us_session(et(2026, 11, 27, 15, 0)), "post")
+        self.assertEqual(app.us_session(et(2026, 11, 27, 19, 0)), "post")
+        self.assertEqual(app.us_session(et(2026, 12, 24, 15, 0)), "post")
+        self.assertEqual(app.us_session(et(2027, 11, 26, 13, 0)), "post")
+
+    def test_2027_has_no_july_2_or_dec_24_early_close(self):
+        # 2027-07-02 is a full session; 2027-12-24 is Christmas observed
+        # (full closure, already in US_HOLIDAYS) — neither is early-close.
+        self.assertNotIn(date(2027, 7, 2), app.US_EARLY_CLOSE)
+        self.assertNotIn(date(2027, 12, 24), app.US_EARLY_CLOSE)
+        self.assertEqual(app.us_session(et(2027, 7, 2, 15, 0)), "trading")
+        self.assertEqual(app.us_session(et(2027, 12, 24, 10, 0)), "closed")
+
+    def test_last_regular_close_is_1300_on_early_close_day(self):
+        # Fri 2026-11-27 14:00 ET -> Fri 2026-11-27 13:00 ET itself.
+        close = app._last_regular_close(et(2026, 11, 27, 14, 0))
+        self.assertEqual((close.weekday(), close.day, close.hour), (4, 27, 13))
+        # Sat 2026-11-28 10:00 ET -> Fri 2026-11-27 13:00 ET.
+        close = app._last_regular_close(et(2026, 11, 28, 10, 0))
+        self.assertEqual((close.weekday(), close.day, close.hour), (4, 27, 13))
+        # Thu 2026-12-24 14:00 ET -> Thu 2026-12-24 13:00 ET itself.
+        close = app._last_regular_close(et(2026, 12, 24, 14, 0))
+        self.assertEqual((close.weekday(), close.day, close.hour), (3, 24, 13))
+
+    def test_trading_window_ends_0200_beijing_on_early_close(self):
+        # 01:59 Beijing 11-28 = 12:59 ET 11-27: session still running.
+        self.assertTrue(app._in_trading_window(cn(2026, 11, 28, 1, 59)))
+        # 02:00 Beijing 11-28 = 13:00 ET 11-27: closed, no more 02:00-05:00 leg.
+        self.assertFalse(app._in_trading_window(cn(2026, 11, 28, 2, 0)))
+        self.assertFalse(app._in_trading_window(cn(2026, 11, 28, 2, 30)))
+        # Evening leg unchanged: 22:00 Beijing 11-27 is pre-market.
+        self.assertTrue(app._in_trading_window(cn(2026, 11, 27, 22, 0)))
+
+    def test_post_close_quote_keeps_close_and_uses_ext(self):
+        # 14:00 ET on the early-close day: regular fields carry the 13:00
+        # close (-1.39% is the day's move, not a stale replay) and the
+        # 13:30 ext print feeds the post-market estimate. Before the fix
+        # us_session said "trading" here and change_pct_ext was None.
+        q = app.us_quote_with_ext(
+            gb_fields(change="-1.39", quote_time="2026-11-28 02:00:00",
+                      ext_price="135.50", ext_ts="Nov 27 01:30PM EST"),
+            et(2026, 11, 27, 14, 0))
+        self.assertEqual(q["change_pct"], -1.39)
+        self.assertIsNotNone(q["change_pct_ext"])
+        self.assertAlmostEqual(q["change_pct_ext"], -1.09, places=1)
 
 
 class TestCnHolidays(unittest.TestCase):
@@ -131,6 +185,10 @@ class TestFrontendCalendarMirror(unittest.TestCase):
             self.assertIn(str(d), html, f"US holiday {d} missing in frontend")
         for d in app.CN_HOLIDAYS:
             self.assertIn(str(d), html, f"CN holiday {d} missing in frontend")
+        for d in app.US_EARLY_CLOSE:
+            self.assertIn(str(d), html,
+                          f"US early close {d} missing in frontend")
+        self.assertIn("US_EARLY_CLOSE", html)
         self.assertIn("us_holiday", html)
         self.assertIn("今日休市", html)
         self.assertIn("休市无估值", html)

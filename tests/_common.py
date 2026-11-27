@@ -48,6 +48,29 @@ def et(year, month, day, hour=0, minute=0):
     return datetime(year, month, day, hour, minute, tzinfo=ET_TZ)
 
 
+class FrozenDatetime(datetime):
+    """datetime.now() pinned to a class-level instant (any tz arg).
+
+    Patch ``app.datetime`` with this to run time-dependent estimate code
+    at a fixed Beijing time in tests.
+    """
+    _frozen = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if cls._frozen is None:
+            return super().now(tz)
+        return cls._frozen if tz is None else cls._frozen.astimezone(tz)
+
+
+def frozen_time(moment):
+    """Context manager patching app.datetime so datetime.now() returns
+    ``moment`` (converted to the requested tz)."""
+    from unittest.mock import patch
+    FrozenDatetime._frozen = moment
+    return patch.object(app, "datetime", FrozenDatetime)
+
+
 class FakeResp:
     """Minimal httpx.Response stand-in for _validate_upstream_payload."""
 

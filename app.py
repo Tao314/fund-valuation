@@ -2677,10 +2677,13 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
 
 # Trading-holiday calendars (hard-coded: no reliable free calendar API
 # in the current sources — Eastmoney/Sina don't expose one).
-# NYSE: nyse.com holiday calendar, full closures only. Early closes
-# (day after Thanksgiving, Christmas Eve) are still trading days, so
-# they are NOT listed. 2025-12-25 is a lookback anchor for
-# last-trading-day queries in early Jan 2026.
+# NYSE: nyse.com holiday calendar. US_HOLIDAYS = full closures only;
+# US_EARLY_CLOSE = 13:00 ET closes (regular session 09:30-13:00, then
+# post). 2026: Nov 27 (day after Thanksgiving), Dec 24 (Christmas Eve).
+# 2027: ONLY Nov 26 — Dec 24, 2027 is Christmas observed (full closure,
+# already in US_HOLIDAYS) and Jul 2, 2027 is a full session (no early
+# close). 2025-12-25 is a lookback anchor for last-trading-day queries
+# in early Jan 2026.
 # SSE: 2026 notice 上证公告〔2025〕45号, weekday closures only
 # (weekends are already excluded by the weekday check). The 2027 SSE
 # notice is published each December — extend CN_HOLIDAYS when it lands
@@ -2695,6 +2698,10 @@ US_HOLIDAYS = frozenset({
     date(2027, 3, 26), date(2027, 5, 31), date(2027, 6, 18),
     date(2027, 7, 5), date(2027, 9, 6), date(2027, 11, 25),
     date(2027, 12, 24),
+})
+US_EARLY_CLOSE = frozenset({
+    date(2026, 11, 27), date(2026, 12, 24),
+    date(2027, 11, 26),
 })
 CN_HOLIDAYS = frozenset({
     date(2026, 1, 1),
@@ -2711,6 +2718,12 @@ CN_HOLIDAYS = frozenset({
 
 def _is_us_trading_day(d) -> bool:
     return d.weekday() < 5 and d not in US_HOLIDAYS
+
+
+def _us_close_mins(d) -> int:
+    """Regular-session close in ET minutes: 13:00 on early-close days,
+    else 16:00."""
+    return 780 if d in US_EARLY_CLOSE else 960
 
 
 def _is_cn_trading_day(d) -> bool:
@@ -2748,9 +2761,10 @@ def _cn_quote_ref_day(now_cn: datetime):
 
 
 def us_session(now_et: Optional[datetime] = None) -> str:
-    """US market session in ET (Mon-Fri): pre 04:00-09:30, trading 09:30-16:00,
-    post 16:00-20:00, else closed. US holidays (US_HOLIDAYS) are closed
-    all day — no pre/post session either."""
+    """US market session in ET (Mon-Fri): pre 04:00-09:30, trading 09:30-16:00
+    (09:30-13:00 on US_EARLY_CLOSE days), post from the close to 20:00,
+    else closed. US holidays (US_HOLIDAYS) are closed all day — no
+    pre/post session either."""
     if now_et is None:
         now_et = datetime.now(ET_TZ)
     if now_et.date() in US_HOLIDAYS:
@@ -2760,9 +2774,10 @@ def us_session(now_et: Optional[datetime] = None) -> str:
     mins = now_et.hour * 60 + now_et.minute
     if 240 <= mins < 570:
         return "pre"
-    if 570 <= mins < 960:
+    close = _us_close_mins(now_et.date())
+    if 570 <= mins < close:
         return "trading"
-    if 960 <= mins < 1200:
+    if close <= mins < 1200:
         return "post"
     return "closed"
 
@@ -2795,14 +2810,15 @@ def parse_ext_timestamp(s: str, now_et: datetime) -> Optional[datetime]:
 
 
 def _last_regular_close(now_et: datetime) -> datetime:
-    """Most recent trading-day 16:00 ET at or before now_et (weekends
-    and US holidays skipped)."""
-    d = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    """Most recent regular-session close at or before now_et (16:00 ET,
+    13:00 on US_EARLY_CLOSE days; weekends and US holidays skipped)."""
+    close_hour = 13 if now_et.date() in US_EARLY_CLOSE else 16
+    d = now_et.replace(hour=close_hour, minute=0, second=0, microsecond=0)
     if d > now_et:
         d -= timedelta(days=1)
     while d.weekday() >= 5 or d.date() in US_HOLIDAYS:
         d -= timedelta(days=1)
-    return d
+    return d.replace(hour=13 if d.date() in US_EARLY_CLOSE else 16)
 
 
 def us_quote_with_ext(fields: list, now_et: Optional[datetime] = None) -> dict:
@@ -3135,18 +3151,27 @@ def _in_trading_window(now: Optional[datetime] = None) -> bool:
     """True during CN day session (trading days 09:15-16:30
     Asia/Shanghai) or the US session as seen from Beijing (21:00-05:00;
     the after-midnight part belongs to the previous weekday's US
-    session, so Tue-Sat 00:00-05:00 counts). Holiday sessions don't
-    count on either leg: the ET date of the US session in question
-    must be a US trading day. Weekends outside that: False."""
+    session, so Tue-Sat 00:00-05:00 counts). On US early-close days the
+    session ends 13:00 ET, so the after-midnight leg ends 02:00 Beijing.
+    Holiday sessions don't count on either leg: the ET date of the US
+    session in question must be a US trading day. Weekends outside
+    that: False."""
     now = now or datetime.now(CN_TZ)
     mins = now.hour * 60 + now.minute
     wd = now.weekday()  # Mon=0 .. Sun=6
     if _is_cn_trading_day(now.date()) and 9 * 60 + 15 <= mins <= 16 * 60 + 30:
         return True
     et_date = now.astimezone(ET_TZ).date()
-    if _is_us_trading_day(et_date) and (
-            (wd < 5 and mins >= 21 * 60) or (1 <= wd <= 5 and mins <= 5 * 60)):
-        return True
+    if _is_us_trading_day(et_date):
+        if wd < 5 and mins >= 21 * 60:
+            return True
+        if 1 <= wd <= 5 and mins <= 5 * 60:
+            if et_date in US_EARLY_CLOSE:
+                close_cn = datetime(
+                    et_date.year, et_date.month, et_date.day, 13, 0,
+                    tzinfo=ET_TZ).astimezone(CN_TZ)
+                return now < close_cn
+            return True
     return False
 
 
@@ -4346,6 +4371,11 @@ async def _compute_estimates(uid):
         us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
                       and all(market_of_holding(h["code"]) == "US"
                               for h in hold["holdings"]))
+        # CN pre-open: weekday before 09:30 with no US holdings — nothing
+        # in the fund's markets has traded today yet. Same predicate the
+        # curve already uses (_preopen_no_us), so card and curve agree:
+        # no estimate at all, instead of a beta-shifted 0.00%.
+        cn_preopen = _preopen_no_us(datetime.now(CN_TZ), hold["holdings"])
         # ETF feeder funds have no usable stock holdings (est would be a
         # meaningless 0.00%): use the tracking index's latest change.
         feeder_applied = False
@@ -4417,7 +4447,12 @@ async def _compute_estimates(uid):
             # codes) -> fund-level fuyao industry allocation (v1.4.8).
             # Display only: name + disclosed ratio, no live change.
             sector = await fetch_industry_allocation_fuyao(r["fund_code"])
-        est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
+        # Pre-open: drop the estimate entirely — the feeder/bond overrides
+        # above are pre-open quotes too (previous close, 0.00%), and the
+        # beta calibration below would turn that 0.00% into a fake -0.02%.
+        if cn_preopen:
+            est_pct = None
+        est_nav = nav["dwjz"] * (1 + est_pct / 100) if (nav["dwjz"] and est_pct is not None) else None
         # Ext estimate only when the fund holds US stocks with valid ext data
         # (change_pct_ext is None during US regular hours -> null then too).
         show_ext = has_us and has_ext
@@ -4440,7 +4475,7 @@ async def _compute_estimates(uid):
         beta_row = _beta_row(r["fund_code"])
         _ensure_beta(r["fund_code"])
         beta_applied = False
-        if not feeder_applied and not bond_applied and not no_stock_holdings and not is_mrf:
+        if est_pct is not None and not feeder_applied and not bond_applied and not no_stock_holdings and not is_mrf:
             cal = _apply_beta(est_pct, beta_row)
             if cal != est_pct:
                 beta_applied = True
@@ -4452,10 +4487,11 @@ async def _compute_estimates(uid):
             "bond_est": bond_applied, "no_stock_holdings": no_stock_holdings,
             "bond_proxy_name": bond_proxy[2] if bond_applied else None,
             "us_holiday": us_holiday,
+            "cn_preopen": cn_preopen,
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"), "prev_jzzzl": nav.get("prev_jzzzl"),
             "est_nav": round(est_nav, 4) if est_nav else None,
-            "est_change_pct": round(est_pct, 2),
+            "est_change_pct": round(est_pct, 2) if est_pct is not None else None,
             "credibility": _credibility(beta_row) if not (
                 feeder_applied or bond_applied or no_stock_holdings or is_mrf) else None,
             "beta": round(beta_row["beta"], 3) if (
@@ -6460,6 +6496,9 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
     us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
                   and all(market_of_holding(h["code"]) == "US"
                           for h in hold["holdings"]))
+    # CN pre-open (same predicate as the card/curve): no estimate — the
+    # raw 0.00% plus beta alpha would invent a fake move before the open.
+    cn_preopen = _preopen_no_us(datetime.now(CN_TZ), hold["holdings"])
     feeder_applied = bond_applied = False
     if coverage == 0 and _is_feeder(fund_name, hold["holdings"]):
         idx = await resolve_fund_index(code)
@@ -6477,11 +6516,13 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
         _quoted_weight(hold["holdings"], syms, quotes), ftype, quotes)
     if bond_chg is not None and not feeder_applied:
         bond_applied, est_pct = True, bond_chg
+    if cn_preopen:
+        est_pct = None
     no_stock = coverage == 0 and not feeder_applied and not bond_applied
-    if not feeder_applied and not bond_applied and not no_stock and not is_mrf:
+    if est_pct is not None and not feeder_applied and not bond_applied and not no_stock and not is_mrf:
         est_pct = _apply_beta(est_pct, _beta_row(code))
-    est_nav = nav["dwjz"] * (1 + est_pct / 100) if nav["dwjz"] else None
-    return {"est_change_pct": round(est_pct, 2),
+    est_nav = nav["dwjz"] * (1 + est_pct / 100) if (nav["dwjz"] and est_pct is not None) else None
+    return {"est_change_pct": round(est_pct, 2) if est_pct is not None else None,
             "est_nav": round(est_nav, 4) if est_nav else None,
             "nav_date": nav["nav_date"], "dwjz": nav["dwjz"], "jzzzl": nav["jzzzl"],
             "prev_nav_date": nav.get("prev_nav_date"), "prev_dwjz": nav.get("prev_dwjz"),
@@ -6491,6 +6532,7 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
             "bond_est": bond_applied, "no_stock_holdings": no_stock,
             "bond_proxy_name": _bond_proxy_for(ftype)[2] if bond_applied else None,
             "us_holiday": us_holiday,
+            "cn_preopen": cn_preopen,
             "report_label": hold["report_label"], "report_date": hold["report_date"]}
 
 
