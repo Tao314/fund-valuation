@@ -2442,7 +2442,7 @@ function renderFunds(data) {
   let html = "";
   currentGroups.forEach(g => {
     // Precompute per-fund status/published/big-change so the group header can
-    // show count + average of the same big change each card displays.
+    // show count + up/down of the same big change each card displays.
     const metas = sortedItems(g.items).map(f => {
       const st = fundMarketStatus(f);
       // Published once the NAV date reaches the expected date (>= also covers
@@ -2454,10 +2454,14 @@ function renderFunds(data) {
       return { f, st, published, live, big };
     });
     const vals = metas.map(m => m.big).filter(v => v != null && isFinite(v));
-    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-    const stats = avg != null
-      ? `<span class="gt-count">${g.items.length}只</span> · 均 ${fmtPct(avg)}`
-      : `<span class="gt-count">${g.items.length}只</span>`;
+    const up = vals.filter(v => v > 0).length;
+    const down = vals.filter(v => v < 0).length;
+    const flat = vals.filter(v => v === 0).length;
+    const parts = [];
+    if (up) parts.push(`<span class="up">${up}涨</span>`);
+    if (down) parts.push(`<span class="down">${down}跌</span>`);
+    if (flat) parts.push(`<span class="flat">${flat}平</span>`);
+    const stats = `<span class="gt-count">${g.items.length}只</span>` + (parts.length ? ` · ${parts.join("")}` : "");
     html += `<div class="group-title"><span class="gt-bar${g.category ? "" : " gt-bar-gray"}"></span><span class="gt-name">${esc(g.category || "未分类")}</span><span class="gt-stats">${stats}</span></div>`;
     metas.forEach(({ f, st, published, live, big }) => {
       const ch = changed.has(f.fund_code);
