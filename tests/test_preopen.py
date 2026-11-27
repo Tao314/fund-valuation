@@ -157,12 +157,29 @@ class TestComputeEstimatesPreopen(unittest.IsolatedAsyncioTestCase):
 
     async def test_us_holdings_still_estimate_preopen(self):
         # US overnight session is real data — the gate must not fire.
-        with _MockUpstream() as m, _freeze(2026, 11, 27, 9, 12):
+        # Frozen on 2026-11-24 09:12 Beijing (= ET 2026-11-23 20:12, a
+        # normal US session day): 2026-11-27 09:12 Beijing is ET
+        # Thanksgiving evening, when an all-US fund is 休市无估值
+        # instead (see test_us_holdings_no_estimate_on_us_holiday).
+        with _MockUpstream() as m, _freeze(2026, 11, 24, 9, 12):
             m.holdings = US_HOLDINGS
             payload = await app._compute_estimates(1)
         (fund,) = payload["funds"]
         self.assertFalse(fund["cn_preopen"])
+        self.assertFalse(fund["us_holiday"])
         self.assertEqual(fund["est_change_pct"], -0.16)
+
+    async def test_us_holdings_no_estimate_on_us_holiday(self):
+        # Beijing 2026-11-27 09:12 is still Thanksgiving in ET: an
+        # all-US fund has no session, so no estimate is computed even
+        # though the (mocked) US quotes carry a move.
+        with _MockUpstream() as m, _freeze(2026, 11, 27, 9, 12):
+            m.holdings = US_HOLDINGS
+            payload = await app._compute_estimates(1)
+        (fund,) = payload["funds"]
+        self.assertTrue(fund["us_holiday"])
+        self.assertIsNone(fund["est_change_pct"])
+        self.assertIsNone(fund["est_nav"])
 
 
 class TestEstimateOnePreopen(unittest.IsolatedAsyncioTestCase):

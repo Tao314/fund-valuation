@@ -2720,6 +2720,18 @@ def _is_us_trading_day(d) -> bool:
     return d.weekday() < 5 and d not in US_HOLIDAYS
 
 
+def _us_holiday_fund(now_et, holdings) -> bool:
+    """True when a fund's holdings are all US stocks and today (ET) is
+    a US holiday: no session today, so there is no estimate to compute
+    (exp3 state handling, adopted for coverage: holiday holdings are
+    frozen at 0.00% and counted as quoted in the backtest; live, the
+    all-US fund shows 休市 / 休市无估值 and no curve point is drawn).
+    Mixed funds are False -- their non-US sleeve still trades."""
+    return (now_et.date() in US_HOLIDAYS and bool(holdings)
+            and all(market_of_holding(h.get("code")) == "US"
+                    for h in holdings))
+
+
 def _us_close_mins(d) -> int:
     """Regular-session close in ET minutes: 13:00 on early-close days,
     else 16:00."""
@@ -4364,13 +4376,14 @@ async def _compute_estimates(uid):
         # final curve point (same quotes, same formula).
         est_pct, _ = _live_est_pct(hold["holdings"], syms, quotes, stock_position)
         # US holiday: a fund whose holdings are all US has no session
-        # today — its estimate stays at the last close (US quotes are
-        # already forced to 0.00% in us_quote_with_ext); the flag lets
-        # the frontend show 休市 / 休市无估值 and hide today's curve.
-        today_et = datetime.now(ET_TZ).date()
-        us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
-                      and all(market_of_holding(h["code"]) == "US"
-                              for h in hold["holdings"]))
+        # today — no estimate is computed at all (same as CN pre-open
+        # below: the raw 0.00% plus beta alpha would invent a fake move,
+        # e.g. -0.02%); the flag lets the frontend show 休市 / 休市无估值
+        # and hide today's curve. US quotes are already forced to 0.00%
+        # in us_quote_with_ext, so mixed funds still estimate normally
+        # from their non-US sleeve.
+        us_holiday = _us_holiday_fund(datetime.now(ET_TZ),
+                                      hold["holdings"])
         # CN pre-open: weekday before 09:30 with no US holdings — nothing
         # in the fund's markets has traded today yet. Same predicate the
         # curve already uses (_preopen_no_us), so card and curve agree:
@@ -4447,10 +4460,11 @@ async def _compute_estimates(uid):
             # codes) -> fund-level fuyao industry allocation (v1.4.8).
             # Display only: name + disclosed ratio, no live change.
             sector = await fetch_industry_allocation_fuyao(r["fund_code"])
-        # Pre-open: drop the estimate entirely — the feeder/bond overrides
-        # above are pre-open quotes too (previous close, 0.00%), and the
-        # beta calibration below would turn that 0.00% into a fake -0.02%.
-        if cn_preopen:
+        # Pre-open / US holiday: drop the estimate entirely — the
+        # feeder/bond overrides above are pre-open quotes too (previous
+        # close, 0.00%), and the beta calibration below would turn that
+        # 0.00% into a fake -0.02%.
+        if cn_preopen or us_holiday:
             est_pct = None
         est_nav = nav["dwjz"] * (1 + est_pct / 100) if (nav["dwjz"] and est_pct is not None) else None
         # Ext estimate only when the fund holds US stocks with valid ext data
@@ -4683,8 +4697,7 @@ async def _compute_series(uid):
               "skip_fallback": False, "failed": False}
         state[code] = st
         try:
-            if us_holiday_today and holdings and all(
-                    market_of_holding(h.get("code")) == "US" for h in holdings):
+            if _us_holiday_fund(now_cn.astimezone(ET_TZ), holdings):
                 # US holiday: no session today — never draw yesterday's
                 # session tail (21:30-05:00 Beijing spans midnight) as
                 # today's curve.
@@ -6493,9 +6506,7 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
     ftype = await fetch_fund_type(code) or ""
     is_mrf = ftype == "香港互认基金" or code[:3] in ("968", "969")
     today_et = datetime.now(ET_TZ).date()
-    us_holiday = (today_et in US_HOLIDAYS and bool(hold["holdings"])
-                  and all(market_of_holding(h["code"]) == "US"
-                          for h in hold["holdings"]))
+    us_holiday = _us_holiday_fund(datetime.now(ET_TZ), hold["holdings"])
     # CN pre-open (same predicate as the card/curve): no estimate — the
     # raw 0.00% plus beta alpha would invent a fake move before the open.
     cn_preopen = _preopen_no_us(datetime.now(CN_TZ), hold["holdings"])
@@ -6516,7 +6527,7 @@ async def _estimate_one(code: str, fund_name: str = "") -> dict:
         _quoted_weight(hold["holdings"], syms, quotes), ftype, quotes)
     if bond_chg is not None and not feeder_applied:
         bond_applied, est_pct = True, bond_chg
-    if cn_preopen:
+    if cn_preopen or us_holiday:
         est_pct = None
     no_stock = coverage == 0 and not feeder_applied and not bond_applied
     if est_pct is not None and not feeder_applied and not bond_applied and not no_stock and not is_mrf:

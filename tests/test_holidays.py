@@ -178,6 +178,29 @@ class TestUsQuoteHoliday(unittest.TestCase):
                          date(2026, 10, 8))
 
 
+class TestUsHolidayFund(unittest.TestCase):
+    """exp3 state handling, live (adopted for coverage only): an
+    all-US fund has no session on a US holiday, so no estimate is
+    computed (card + single-fund endpoints drop est_pct to None, same
+    as CN pre-open) and no curve point is drawn; mixed funds are
+    unaffected -- their non-US sleeve still trades."""
+
+    def test_all_us_on_thanksgiving(self):
+        hold = [{"code": "NVDA"}, {"code": "AAPL"}]
+        self.assertTrue(app._us_holiday_fund(et(2026, 11, 26, 10, 0), hold))
+
+    def test_all_us_on_trading_day(self):
+        hold = [{"code": "NVDA"}, {"code": "AAPL"}]
+        self.assertFalse(app._us_holiday_fund(et(2026, 11, 25, 10, 0), hold))
+
+    def test_mixed_fund_on_thanksgiving(self):
+        hold = [{"code": "NVDA"}, {"code": "00700"}]
+        self.assertFalse(app._us_holiday_fund(et(2026, 11, 26, 10, 0), hold))
+
+    def test_empty_holdings_is_not_a_holiday_fund(self):
+        self.assertFalse(app._us_holiday_fund(et(2026, 11, 26, 10, 0), []))
+
+
 class TestFrontendCalendarMirror(unittest.TestCase):
     def test_frontend_tables_match_backend(self):
         html = (REPO_ROOT / "static" / "index.html").read_text()

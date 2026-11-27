@@ -188,9 +188,10 @@ def _est_for_day(holdings, changes_by_code, residual, date_str):
     coverage = sum(h["weight"] for h in holdings)
     if coverage <= 0 or quoted_w < 0.5 * coverage:
         return None
+    top10avg = num / quoted_w if quoted_w else 0.0
     est_old = num / 100
-    est_new = est_old + (residual * (num / quoted_w) / 100 if quoted_w else 0.0)
-    return est_old, est_new
+    est_new = est_old + (residual * top10avg / 100 if quoted_w else 0.0)
+    return est_old, est_new, residual, top10avg
 
 
 async def dated_triples_pit(code: str, days: int):
@@ -231,7 +232,8 @@ async def dated_triples_pit(code: str, days: int):
             continue
         triples.append({"date": date_str, "est_old": est[0], "est_new": est[1],
                         "official": official, "vintage": snap["report_date"],
-                        "stale_pos": stale})
+                        "stale_pos": stale, "residual": est[2],
+                        "top10avg": est[3]})
     triples.sort(key=lambda t: t["date"])
     info = {"skipped_no_disclosure": skipped_nodisc,
             "stale_pos_days": stale_pos_days,
@@ -262,7 +264,8 @@ async def dated_triples_legacy(code: str, days: int):
             continue
         triples.append({"date": date_str, "est_old": est[0], "est_new": est[1],
                         "official": official, "vintage": "current",
-                        "stale_pos": False})
+                        "stale_pos": False, "residual": est[2],
+                        "top10avg": est[3]})
     triples.sort(key=lambda t: t["date"])
     return triples, {"skipped_no_disclosure": 0, "stale_pos_days": 0,
                      "snapshots": [(hold.get("report_label"), hold.get("report_date"))],
