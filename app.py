@@ -1346,6 +1346,31 @@ def admin_download_backup(name: str, session: Optional[str] = Cookie(default=Non
     return FileResponse(path, filename=name, media_type="application/octet-stream")
 
 
+@app.get("/api/backup/download")
+def backup_download_latest(latest: int = 1, session: Optional[str] = Cookie(default=None)):
+    """Download the newest backup (.db.gz), so a prod backup can be pulled
+    to a test DB. Admin session cookie only (require_admin: 401 when not
+    logged in, 403 when not admin). No path/filename parameter is accepted
+    — the file served is always the newest .db.gz inside BACKUP_DIR, picked
+    via _list_backups (names already constrained by BACKUP_NAME_RE), so
+    there is nothing to traverse. latest must be 1: only the newest
+    backup is downloadable through this endpoint; no file list is
+    exposed."""
+    require_admin(session)
+    if latest != 1:
+        raise HTTPException(400, "仅支持 latest=1（只下载最新备份）")
+    gz = [e for e in _list_backups() if e["name"].endswith(".gz")]
+    if not gz:
+        raise HTTPException(404, "暂无备份")
+    name = gz[0]["name"]
+    if not BACKUP_NAME_RE.fullmatch(name):
+        raise HTTPException(404, "备份不存在")
+    path = BACKUP_DIR / name
+    if not path.is_file():
+        raise HTTPException(404, "备份不存在")
+    return FileResponse(path, filename=name, media_type="application/gzip")
+
+
 @app.post("/api/admin/backups/{name}/restore")
 async def admin_restore_backup(name: str, session: Optional[str] = Cookie(default=None)):
     require_admin(session)
