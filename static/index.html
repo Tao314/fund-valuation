@@ -107,8 +107,6 @@
   .ft-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .ft-size { color: #98A2B3; white-space: nowrap; font-variant-numeric: tabular-nums; flex: none; }
   .ft-children { padding-left: 14px; }
-  .cat-item { display: flex; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid #EAECF0; flex-wrap: wrap; }
-  .cat-item .cat-name { flex: 1; font-weight: 600; font-size: 14px; min-width: 80px; }
   footer { text-align: center; color: #98A2B3; font-size: 11px; padding: 16px; }
   /* main view: compact two-line fund cards */
   .group-title { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid #EAECF0; }
@@ -312,9 +310,8 @@
   .cat-draft-row input.cat-draft-name { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 8px; padding: 6px 8px; font-size: 14px; font-weight: 600; color: #202939; }
   .cat-draft-row input.cat-draft-name:focus { border-color: #07845B; outline: none; }
   .cat-fixed-name { font-size: 14px; font-weight: 600; color: #202939; }
-  /* per-category quick add: deep-green primary, same language as the pills */
-  .cat-add-btn { width: 100%; margin-top: 10px; background: #07845B; border-radius: 12px; font-size: 14px; font-weight: 600; }
-  .cat-add-btn:active { background: #066B4A; }
+  /* per-category quick add: layout only, inherits the site primary button */
+  .cat-add-btn { width: 100%; margin-top: 10px; }
   .cat-add-card { margin-top: 10px; border: 1px solid #D9E4DC; border-radius: 12px; padding: 12px; background: #FBFDFC; }
   .cat-add-card .row input { margin: 0; }
   .cat-add-card .search-results { margin-top: 4px; }
@@ -587,15 +584,7 @@
         </div>
       </div>
       <div class="card">
-        <h3>自选与分类管理</h3>
-        <h4>分类</h4>
-        <div id="cat-list"></div>
-        <div class="row" style="margin-top:10px">
-          <input id="new-cat-name" placeholder="新分类名（最多 20 字）">
-          <button id="add-cat-btn">添加分类</button>
-        </div>
-        <div class="muted">删除分类后，该分类下的基金变为未分类（基金不会被删除）。</div>
-        <h4>自选基金</h4>
+        <h3>自选基金</h3>
         <div class="row">
           <input id="search-q" placeholder="搜索基金代码或名称，如 005827">
           <button id="search-btn">搜索</button>
@@ -2458,7 +2447,6 @@ function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;
 function catOptions(current, allCats) {
   const opts = ['<option value=""' + (current ? "" : " selected") + ">未分类</option>"];
   allCats.forEach(c => opts.push(`<option value="${esc(c)}"${c === current ? " selected" : ""}>${esc(c)}</option>`));
-  opts.push('<option value="__new__">＋新分类</option>');
   return opts.join("");
 }
 function buildGroups(data) {
@@ -2790,16 +2778,6 @@ function renderSettings(data) {
   // refresh-seconds input: don't clobber while user is editing it
   const inp = $("refresh-seconds");
   if (document.activeElement !== inp) inp.value = refreshSeconds;
-  // category list
-  $("cat-list").innerHTML = cats.length ? cats.map((c, i) =>
-    `<div class="cat-item"><span class="cat-name">${esc(c)}</span>
-     <button class="mini" onclick="moveCategoryTo(${i}, 'top')" ${i === 0 ? "disabled" : ""}>置顶</button>
-     <button class="mini" onclick="moveCategory(${i}, -1)" ${i === 0 ? "disabled" : ""}>↑</button>
-     <button class="mini" onclick="moveCategory(${i}, 1)" ${i === cats.length - 1 ? "disabled" : ""}>↓</button>
-     <button class="mini" onclick="moveCategoryTo(${i}, 'bottom')" ${i === cats.length - 1 ? "disabled" : ""}>置底</button>
-     <button class="mini" onclick="renameCategory('${esc(c)}')">重命名</button>
-     <button class="danger" onclick="deleteCategory('${esc(c)}')">删除</button></div>`).join("")
-    : '<div class="muted">暂无分类，在下方添加。</div>';
   // watchlist grouped, with management controls (flex rows, no table overflow)
   let html = "";
   currentGroups.forEach((g, gi) => {
@@ -2833,49 +2811,9 @@ async function moveFundTo(category, indexInGroup, pos) {
   try { await api("/api/watchlist/reorder", { method: "POST", body: JSON.stringify({ category, ids }) }); await loadEstimates(); }
   catch (e) { setErr(e.message); }
 }
-async function moveCategory(idx, dir) {
-  const names = [...((window.estimateData || {}).categories || [])];
-  const j = idx + dir;
-  if (j < 0 || j >= names.length) return;
-  [names[idx], names[j]] = [names[j], names[idx]];
-  try { await api("/api/categories/reorder", { method: "POST", body: JSON.stringify({ names }) }); await loadEstimates(); }
-  catch (e) { setErr(e.message); }
-}
-async function moveCategoryTo(idx, pos) {
-  const names = [...((window.estimateData || {}).categories || [])];
-  if (idx < 0 || idx >= names.length) return;
-  const [name] = names.splice(idx, 1);
-  if (pos === "top") names.unshift(name); else names.push(name);
-  try { await api("/api/categories/reorder", { method: "POST", body: JSON.stringify({ names }) }); await loadEstimates(); }
-  catch (e) { setErr(e.message); }
-}
 async function setCategory(id, sel) {
-  let cat = sel.value;
-  if (cat === "__new__") {
-    cat = (prompt("输入新分类名（最多 20 字）") || "").trim();
-    if (!cat) { await loadEstimates(); return; }
-  }
+  const cat = sel.value;
   try { await api("/api/watchlist/" + id + "/category", { method: "POST", body: JSON.stringify({ category: cat }) }); await loadEstimates(); }
-  catch (e) { setErr(e.message); }
-}
-$("add-cat-btn").onclick = async () => {
-  const name = $("new-cat-name").value.trim();
-  if (!name) { setErr("分类名不能为空"); return; }
-  try {
-    await api("/api/categories", { method: "POST", body: JSON.stringify({ name }) });
-    $("new-cat-name").value = "";
-    await loadEstimates();
-  } catch (e) { setErr(e.message); }
-};
-async function renameCategory(oldName) {
-  const newName = (prompt("输入新分类名（最多 20 字）", oldName) || "").trim();
-  if (!newName || newName === oldName) return;
-  try { await api("/api/categories/rename", { method: "POST", body: JSON.stringify({ old: oldName, new: newName }) }); await loadEstimates(); }
-  catch (e) { setErr(e.message); }
-}
-async function deleteCategory(name) {
-  if (!confirm("删除分类「" + name + "」？该分类下的基金将变为未分类，基金不会被删除。")) return;
-  try { await api("/api/categories/delete", { method: "POST", body: JSON.stringify({ name }) }); await loadEstimates(); }
   catch (e) { setErr(e.message); }
 }
 $("save-refresh-btn").onclick = async () => {
