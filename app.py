@@ -45,7 +45,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "fund.db"
 STATIC_DIR = BASE_DIR / "static"
-APP_VERSION = "v2.0.0"  # keep in sync with the footer in static/index.html
+APP_VERSION = "v2.1.0"  # keep in sync with the footer in static/index.html
 
 # --- Email verification codes (v1.4.0, feature-flagged in v1.4.0) ---
 # EMAIL_AUTH=1 enables email-code registration / reset / bind. Default OFF:
@@ -4215,6 +4215,10 @@ async def _trends_warm_loop():
 
 
 # ---------------------------------------------------------------- watchlist
+# Pseudo-categories shown by the valuation-page submenu; never real rows.
+RESERVED_CATEGORIES = ("全部", "未分组")
+
+
 def category_order(conn, uid) -> list:
     return [r["name"] for r in conn.execute(
         "SELECT name FROM user_categories WHERE user_id=? ORDER BY sort_order, name", (uid,)
@@ -4243,7 +4247,7 @@ def get_watchlist(session: Optional[str] = Cookie(default=None)):
             "SELECT id, fund_code, fund_name, sort_order, category FROM user_funds WHERE user_id=? ORDER BY sort_order, id", (uid,)
         ).fetchall()
         cats = category_order(conn, uid)
-    return {"funds": [dict(r) for r in sort_funds(rows, cats)]}
+    return {"funds": [dict(r) for r in sort_funds(rows, cats)], "categories": cats}
 
 
 async def _resolve_fund_name(item_id: int, code: str):
@@ -4308,6 +4312,8 @@ async def add_watchlist(body: AddFundBody, session: Optional[str] = Cookie(defau
     category = (body.category or "").strip()
     if len(category) > 20:
         raise HTTPException(400, "分类名最多 20 个字符")
+    if category in RESERVED_CATEGORIES:
+        raise HTTPException(400, "该分类名已被系统占用")
     # Fast path: the frontend sends the name from its search result, so no
     # upstream call blocks the mutation. Without a name we insert the code
     # as a placeholder and resolve the real name in the background.
@@ -4398,6 +4404,10 @@ def reorder_categories(body: CategoryReorderBody, session: Optional[str] = Cooki
     if len(names) != len(set(names)):
         raise HTTPException(400, "分类名不能重复")
     with db() as conn:
+        existing = {r["name"] for r in conn.execute(
+            "SELECT name FROM user_categories WHERE user_id=?", (uid,)).fetchall()}
+        if set(names) != existing:
+            raise HTTPException(400, "分类列表不匹配，请刷新后重试")
         updated = 0
         for pos, name in enumerate(names):
             cur = conn.execute(
@@ -4414,6 +4424,8 @@ def create_category(body: CategoryCreateBody, session: Optional[str] = Cookie(de
     name = (body.name or "").strip()
     if not name or len(name) > 20:
         raise HTTPException(400, "分类名需 1-20 个字符")
+    if name in RESERVED_CATEGORIES:
+        raise HTTPException(400, "该分类名已被系统占用")
     with db() as conn:
         if conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, name)).fetchone():
             raise HTTPException(400, "分类已存在")
@@ -4433,6 +4445,8 @@ def rename_category(body: CategoryRenameBody, session: Optional[str] = Cookie(de
     new = (body.new or "").strip()
     if not new or len(new) > 20:
         raise HTTPException(400, "分类名需 1-20 个字符")
+    if new in RESERVED_CATEGORIES:
+        raise HTTPException(400, "该分类名已被系统占用")
     with db() as conn:
         if not conn.execute("SELECT 1 FROM user_categories WHERE user_id=? AND name=?", (uid, old)).fetchone():
             raise HTTPException(404, "分类不存在")
@@ -4463,6 +4477,8 @@ def set_category(item_id: int, body: CategoryBody, session: Optional[str] = Cook
     category = (body.category or "").strip()
     if len(category) > 20:
         raise HTTPException(400, "分类名最多 20 个字符")
+    if category in RESERVED_CATEGORIES:
+        raise HTTPException(400, "该分类名已被系统占用")
     with db() as conn:
         cur = conn.execute(
             "UPDATE user_funds SET category=? WHERE id=? AND user_id=?", (category, item_id, uid)

@@ -293,6 +293,31 @@
   .evo-soft .es-main { flex: 1; min-width: 0; }
   .evo-soft .es-date { font-size: 11px; color: #98A2B3; }
   .evo-soft .es-desc { font-size: 12.5px; color: #475467; line-height: 1.55; margin-top: 2px; }
+  /* valuation-page category submenu: capsule pills + edit button */
+  .cat-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .cat-pills { display: flex; gap: 8px; align-items: center; overflow-x: auto; scrollbar-width: none; flex: 1; min-width: 0; padding: 2px; }
+  .cat-pills::-webkit-scrollbar { display: none; }
+  .cat-pill { flex: none; min-height: 32px; height: 32px; padding: 0 14px; border-radius: 999px; border: 0; background: #E9F2EB; color: #14663F; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .cat-pill .n { font-weight: 500; opacity: .75; }
+  .cat-pill.active { background: #07845B; color: #fff; }
+  .cat-pill.active .n { opacity: .85; }
+  .cat-edit-btn { flex: none; width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 50%; background: #fff; color: #14663F; border: 1px solid #D9E4DC; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(16,24,40,.06); }
+  /* category editor drawer */
+  .cat-overlay { position: fixed; inset: 0; background: rgba(16,24,40,.45); z-index: 60; display: flex; align-items: flex-end; justify-content: center; }
+  .cat-drawer { background: #fff; width: 100%; max-width: 560px; max-height: 85vh; overflow: auto; border-radius: 16px 16px 0 0; padding: 16px; }
+  @media (min-width: 720px) { .cat-overlay { align-items: center; padding: 20px; } .cat-drawer { border-radius: 16px; } }
+  .cat-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .cat-draft-row { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
+  .cat-drag { cursor: grab; color: #98A2B3; flex: none; touch-action: none; letter-spacing: 1px; }
+  .cat-draft-row input.cat-draft-name { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 8px; padding: 6px 8px; font-size: 14px; font-weight: 600; color: #202939; }
+  .cat-draft-row input.cat-draft-name:focus { border-color: #07845B; outline: none; }
+  .cat-fixed-name { font-size: 14px; font-weight: 600; color: #202939; }
+  /* per-category quick add: deep-green primary, same language as the pills */
+  .cat-add-btn { width: 100%; margin-top: 10px; background: #07845B; border-radius: 12px; font-size: 14px; font-weight: 600; }
+  .cat-add-btn:active { background: #066B4A; }
+  .cat-add-card { margin-top: 10px; border: 1px solid #D9E4DC; border-radius: 12px; padding: 12px; background: #FBFDFC; }
+  .cat-add-card .row input { margin: 0; }
+  .cat-add-card .search-results { margin-top: 4px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
   /* Gemini mobile breakpoints: <=359 超窄 / 360-389 紧凑 / 390-429 标准 / >=430 大屏 (main max-width 1100px already caps desktop) */
   /* toolbar row1 (5 tabs + username + logout) must fit one line at
@@ -380,7 +405,14 @@
         <div class="err" id="bind-err"></div>
       </div>
       <div class="card">
+        <div class="cat-bar"><div class="cat-pills" id="cat-pills"></div><button class="cat-edit-btn" id="cat-edit-btn" title="编辑分类" aria-label="编辑分类"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="#fff"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="#fff"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="7" cy="18" r="2" fill="#fff"/></svg></button></div>
         <div id="fund-cards"></div>
+        <button class="cat-add-btn" id="cat-quick-add-btn">＋ 添加自选到「未分组」</button>
+        <div class="cat-add-card" id="cat-quick-add-card" style="display:none">
+          <div class="row"><input id="cat-quick-search-q" placeholder="搜索基金代码或名称，如 005827"><button class="secondary" id="cat-quick-search-btn" style="flex:none">搜索</button><button class="secondary" id="cat-quick-close" style="flex:none">收起</button></div>
+          <div class="search-results" id="cat-quick-results"><span class="muted">输入基金代码或名称搜索</span></div>
+          <div class="err" id="cat-quick-err"></div>
+        </div>
         <div class="muted" id="empty-tip">加载中…</div>
         <div class="err" id="dash-err"></div>
       </div>
@@ -689,7 +721,8 @@
       <div class="card">
         <h3>软件版本演变</h3>
         <div class="evo-soft">
-                    <div class="es-row"><div class="es-ver">v2.0.0</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">性能优化第一档（大升级，主号升 2.x）：SingleFlight 同请求合并、公共数据共享缓存、预热改增量、HTTP 连接池复用、后台任务错峰、上游超时/限流/熔断、分层 TTL；实测（云电脑 14 只基金小库，非生产 123 只）：估值冷算 p50 -35%/p95 -37%，曲线冷算 p50 -78%/p95 -72%；5 并发冷算估值 1.18→0.23 秒、曲线 2.17→0.27 秒；新增 tests/test_perf_tier1.py，全套 198 通过</div></div></div>
+                    <div class="es-row"><div class="es-ver">v2.1.0</div><div class="es-main"><div class="es-date">2026-11-28</div><div class="es-desc">估值页分类子菜单：胶囊分类栏（全部/未分组/各分类，带只数）+编辑抽屉（新增/重命名/删除/排序；系统名“全部”“未分组”禁用，重命名移动基金，删除后基金回未分组，排序须全量）；每个分类列表底部加“添加自选”按钮，点开加基金卡片、加进当前分类（“全部”时进未分组）；新增 tests/test_category_submenu.py、tests/test_category_quick_add.py，全套 217 通过</div></div></div>
+<div class="es-row"><div class="es-ver">v2.0.0</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">性能优化第一档（大升级，主号升 2.x）：SingleFlight 同请求合并、公共数据共享缓存、预热改增量、HTTP 连接池复用、后台任务错峰、上游超时/限流/熔断、分层 TTL；实测（云电脑 14 只基金小库，非生产 123 只）：估值冷算 p50 -35%/p95 -37%，曲线冷算 p50 -78%/p95 -72%；5 并发冷算估值 1.18→0.23 秒、曲线 2.17→0.27 秒；新增 tests/test_perf_tier1.py，全套 198 通过</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.9</div><div class="es-main"><div class="es-date">2026-11-27</div><div class="es-desc">美股/沪深节假日表：前后端同套 US/CN 节假日表，休市日显示休市、无估值；首屏卡片不再等曲线，曲线随后单独补；自动备份改到每天 1 点；债券按子类型选代理 ETF（可转债/短债/信用/城投/地方债各配其一，长债/混合/未知仍用 511260）；新增 tests/test_holidays.py、tests/test_series_batch.py</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.8</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">用户名/邮箱登录：新增改用户名接口，仅已绑定邮箱的用户可改（3–32 字符唯一），改名不清除现有会话；登录先按邮箱查再按用户名查，已绑邮箱的用户须用邮箱+密码登录、用户名登录被拒，无邮箱用户仍用用户名+密码；绑邮箱复用现有验证码（6 位、10 分钟有效）；设置页新增改用户名/绑定邮箱入口，登录框改为“用户名或邮箱”，无邮箱用户登录后提示绑定邮箱；新增 tests/test_username_email.py（11 个测试）</div></div></div>
 <div class="es-row"><div class="es-ver">v1.6.7</div><div class="es-main"><div class="es-date">2026-11-26</div><div class="es-desc">修复通知栏滚动跳变：滚动副本改 cloneNode(true) 深拷贝，逐字相同，-50% 处无缝接上；时长按单份宽度算；消息没变时 30 秒轮询不再重填、不打断动画；新增 tests/test_notice_scroll.py</div></div></div>
@@ -721,7 +754,19 @@
     </div>
   </div>
 </main>
-<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v2.0.0 · 更新于 2026-11-27 16:03</span></footer>
+<footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v2.1.0 · 更新于 2026-11-28 13:51</span></footer>
+<div class="cat-overlay" id="cat-overlay" style="display:none">
+  <div class="cat-drawer" role="dialog" aria-label="编辑分类">
+    <div class="cat-drawer-head"><h3 style="margin:0">编辑分类</h3><button class="mini" id="cat-drawer-close" aria-label="关闭">✕</button></div>
+    <div class="muted" style="margin:6px 0 4px">拖动 ⋮⋮ 或点 ↑ ↓ 调整顺序，点名字改名；「全部」固定在最前，不可编辑。</div>
+    <div class="cat-draft-row"><span class="cat-drag" aria-hidden="true">⋮⋮</span><span class="cat-fixed-name">全部</span><span class="muted" id="cat-all-count"></span><span class="muted" style="margin-left:auto">固定</span></div>
+    <div id="cat-draft-list"></div>
+    <div class="row" style="margin-top:10px"><input id="cat-new-name" placeholder="新分类名（最多 20 字）" maxlength="20"><button class="secondary" id="cat-add-btn" style="flex:none">＋ 新增分类</button></div>
+    <div class="muted" id="cat-uncat-note" style="margin-top:8px"></div>
+    <div class="err" id="cat-drawer-err"></div>
+    <div class="row" style="margin-top:12px"><button id="cat-save-btn">保存</button><button class="secondary" id="cat-cancel-btn">取消</button></div>
+  </div>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 let mode = "login", timer = null, refreshSeconds = 60;
@@ -2430,6 +2475,192 @@ function buildGroups(data) {
   if (uncat.length) currentGroups.push({ category: "", items: uncat });
   return cats;
 }
+
+/* ---- valuation-page category submenu (reuses data.categories + funds) ---- */
+const RESERVED_CATS = ["全部", "未分组"];
+let activeCat = null;  // null = 全部, "" = 未分组, else category name
+let _catRestored = false;
+function catStoreKey() { let u = ""; try { u = (typeof myUsername !== "undefined" && myUsername) ? myUsername : ""; } catch (e) {} return "fv-active-cat:" + u; }
+function restoreActiveCat() {
+  if (_catRestored) return; _catRestored = true;
+  try { const v = localStorage.getItem(catStoreKey()); if (v !== null) activeCat = v === "__ALL__" ? null : v; } catch (e) {}
+}
+function saveActiveCat() { try { localStorage.setItem(catStoreKey(), activeCat === null ? "__ALL__" : activeCat); } catch (e) {} }
+function catCounts(data) {
+  const counts = {}; let total = 0, uncat = 0;
+  (data.funds || []).forEach(f => { total++; const c = f.category || ""; if (c) counts[c] = (counts[c] || 0) + 1; else uncat++; });
+  return { counts, total, uncat };
+}
+function renderCatBar(data) {
+  restoreActiveCat();
+  const cats = data.categories || [...new Set((data.funds || []).map(f => f.category || "").filter(Boolean))];
+  const { counts, total, uncat } = catCounts(data);
+  if (activeCat !== null && activeCat !== "" && !cats.includes(activeCat)) { activeCat = null; saveActiveCat(); }
+  if (activeCat === "" && !uncat) { activeCat = null; saveActiveCat(); }
+  const pill = (key, label, n) => `<button class="cat-pill${activeCat === key ? " active" : ""}" data-cat="${esc(key === null ? "__ALL__" : key)}">${esc(label)} <span class="n">${n}</span></button>`;
+  let h = pill(null, "全部", total);
+  cats.forEach(c => { h += pill(c, c, counts[c] || 0); });
+  if (uncat) h += pill("", "未分组", uncat);
+  $("cat-pills").innerHTML = h;
+  syncCatQuickAddBtn();
+}
+$("cat-pills").addEventListener("click", e => {
+  const b = e.target.closest(".cat-pill"); if (!b) return;
+  const k = b.dataset.cat;
+  activeCat = k === "__ALL__" ? null : k;
+  saveActiveCat();
+  if (window.estimateData) renderFunds(window.estimateData);  // local re-render only, no refetch
+});
+
+/* ---- per-category quick add (reuses /api/search + POST /api/watchlist) ---- */
+function catTargetCategory() { return activeCat === null ? "" : activeCat; }  // 全部 -> 未分组("")
+function catTargetLabel() { const t = catTargetCategory(); return t || "未分组"; }
+function syncCatQuickAddBtn() {
+  const b = $("cat-quick-add-btn"); if (!b) return;
+  b.textContent = "＋ 添加自选到「" + catTargetLabel() + "」";
+}
+function setCatQuickCard(open) {
+  $("cat-quick-add-card").style.display = open ? "" : "none";
+  if (open) { const q = $("cat-quick-search-q"); if (q) q.focus(); }
+}
+async function runCatQuickSearch() {
+  const q = $("cat-quick-search-q").value.trim();
+  const box = $("cat-quick-results"), err = $("cat-quick-err");
+  err.textContent = "";
+  if (!q) { box.innerHTML = '<span class="muted">输入基金代码或名称搜索</span>'; return; }
+  box.innerHTML = '<span class="muted">搜索中…</span>';
+  try {
+    const { results } = await api("/api/search?q=" + encodeURIComponent(q));
+    box.innerHTML = (results || []).map(r => addedCodes.has(r.code)
+      ? `<button disabled>${r.code} ${esc(r.name)} 已添加</button>`
+      : `<button data-name="${esc(r.name)}" onclick="catQuickAdd('${r.code}', this)">${r.code} ${esc(r.name)} ＋</button>`).join("") || '<span class="muted">无结果</span>';
+  } catch (e) { box.innerHTML = ""; err.textContent = e.message; }
+}
+async function catQuickAdd(code, btn) {
+  if (addedCodes.has(code)) return;
+  const name = btn ? (btn.dataset.name || "") : "";
+  const target = catTargetCategory();
+  const err = $("cat-quick-err"); err.textContent = "";
+  const placeholder = optimisticAdd(code, name, target);
+  if (btn) { btn.disabled = true; btn.textContent = "添加中…"; }
+  try {
+    const r = await api("/api/watchlist", { method: "POST", body: JSON.stringify({ fund_code: code, fund_name: name, category: target }) });
+    if (placeholder) placeholder.id = r.id;
+    // Optimistic card already appended at the end of the target category
+    // (group count +1 via renderFunds). No full valuation refresh,
+    // no page jump — the next auto-refresh picks up
+    // the real estimate. Refresh search so this fund now shows 已添加.
+    runCatQuickSearch();
+  } catch (e) {
+    if (placeholder) optimisticRemove(placeholder.id);
+    if (String(e.message || "").includes("已在")) { addedCodes.add(code); runCatQuickSearch(); }
+    else if (btn) { btn.disabled = false; btn.textContent = code + " " + name + " ＋"; }
+    err.textContent = e.message;
+  }
+}
+$("cat-quick-add-btn").onclick = () => { const card = $("cat-quick-add-card"); setCatQuickCard(card.style.display === "none"); syncCatQuickAddBtn(); };
+$("cat-quick-search-btn").onclick = runCatQuickSearch;
+$("cat-quick-search-q").addEventListener("keydown", e => { if (e.key === "Enter") runCatQuickSearch(); });
+$("cat-quick-close").onclick = () => setCatQuickCard(false);
+
+/* ---- category editor drawer (draft + save; same /api/categories APIs) ---- */
+let catDraft = [], catDraftOrig = [];
+function validateCatName(name, others) {
+  if (!name) return "分类名不能为空";
+  if (name.length > 20) return "分类名最多 20 个字符";
+  if (RESERVED_CATS.includes(name)) return "「" + name + "」为系统保留名，换个名字";
+  if (others.includes(name)) return "分类「" + name + "」已存在";
+  return "";
+}
+function openCatDrawer() {
+  const d = window.estimateData || { funds: [], categories: [] };
+  const cats = d.categories || [];
+  catDraftOrig = cats.map((name, i) => ({ key: "c" + i, name }));
+  catDraft = catDraftOrig.map(o => ({ ...o }));
+  const { total, uncat } = catCounts(d);
+  $("cat-all-count").textContent = total + "只";
+  $("cat-uncat-note").textContent = (uncat ? "未分组 " + uncat + "只；" : "") + "删除分类后，该分类下的基金会回到「未分组」，基金不会被删除。";
+  $("cat-new-name").value = "";
+  $("cat-drawer-err").textContent = "";
+  renderCatDraft();
+  $("cat-overlay").style.display = "";
+}
+function closeCatDrawer() { $("cat-overlay").style.display = "none"; }
+function renderCatDraft() {
+  $("cat-draft-list").innerHTML = catDraft.length ? catDraft.map((it, i) =>
+    `<div class="cat-draft-row" draggable="true" data-idx="${i}">
+       <span class="cat-drag" title="拖动排序">⋮⋮</span>
+       <input class="cat-draft-name" data-idx="${i}" value="${esc(it.name)}" maxlength="20" title="点击改名">
+       <button class="mini" data-act="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+       <button class="mini" data-act="down" data-idx="${i}" ${i === catDraft.length - 1 ? "disabled" : ""}>↓</button>
+       <button class="mini danger" data-act="del" data-idx="${i}">删除</button>
+     </div>`).join("") : '<div class="muted" style="padding:8px 0">暂无分类，在下方添加。</div>';
+}
+$("cat-draft-list").addEventListener("input", e => {
+  const inp = e.target.closest(".cat-draft-name"); if (!inp) return;
+  catDraft[+inp.dataset.idx].name = inp.value;
+});
+$("cat-draft-list").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const i = +b.dataset.idx, act = b.dataset.act;
+  if (act === "up" && i > 0) [catDraft[i - 1], catDraft[i]] = [catDraft[i], catDraft[i - 1]];
+  if (act === "down" && i < catDraft.length - 1) [catDraft[i + 1], catDraft[i]] = [catDraft[i], catDraft[i + 1]];
+  if (act === "del") catDraft.splice(i, 1);
+  renderCatDraft();
+});
+let _dragIdx = null;
+$("cat-draft-list").addEventListener("dragstart", e => { const r = e.target.closest(".cat-draft-row"); if (!r) return; _dragIdx = +r.dataset.idx; e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", String(_dragIdx)); } catch (err) {} });
+$("cat-draft-list").addEventListener("dragover", e => { if (_dragIdx === null) return; e.preventDefault(); });
+$("cat-draft-list").addEventListener("drop", e => { const r = e.target.closest(".cat-draft-row"); if (!r || _dragIdx === null) return; e.preventDefault(); const to = +r.dataset.idx; if (to !== _dragIdx) { const [it] = catDraft.splice(_dragIdx, 1); catDraft.splice(to, 0, it); } _dragIdx = null; renderCatDraft(); });
+$("cat-draft-list").addEventListener("dragend", () => { _dragIdx = null; });
+$("cat-add-btn").onclick = () => {
+  const inp = $("cat-new-name"), err = $("cat-drawer-err");
+  const name = inp.value.trim();
+  const bad = validateCatName(name, catDraft.map(d => d.name));
+  if (bad) { err.textContent = bad; return; }
+  err.textContent = "";
+  catDraft.push({ key: "n" + Date.now() + Math.floor(Math.random() * 1000), name });
+  inp.value = ""; renderCatDraft();
+  const rows = document.querySelectorAll("#cat-draft-list .cat-draft-name");
+  if (rows.length) rows[rows.length - 1].focus();
+};
+$("cat-new-name").addEventListener("keydown", e => { if (e.key === "Enter") $("cat-add-btn").click(); });
+$("cat-edit-btn").onclick = openCatDrawer;
+$("cat-cancel-btn").onclick = closeCatDrawer;
+$("cat-drawer-close").onclick = closeCatDrawer;
+$("cat-overlay").addEventListener("click", e => { if (e.target === $("cat-overlay")) closeCatDrawer(); });
+$("cat-save-btn").onclick = async () => {
+  const err = $("cat-drawer-err"); err.textContent = "";
+  const btn = $("cat-save-btn"); btn.disabled = true;
+  try {
+    const names = catDraft.map(d => d.name.trim());
+    for (let i = 0; i < names.length; i++) {
+      const bad = validateCatName(names[i], names.filter((_, j) => j !== i));
+      if (bad) { err.textContent = bad; return; }
+      catDraft[i].name = names[i];
+    }
+    // deletes first (frees names for renames), then renames, creates, reorder
+    for (const o of catDraftOrig) if (!catDraft.find(d => d.key === o.key))
+      await api("/api/categories/delete", { method: "POST", body: JSON.stringify({ name: o.name }) });
+    for (const d of catDraft) { const o = catDraftOrig.find(x => x.key === d.key); if (o && o.name !== d.name)
+      await api("/api/categories/rename", { method: "POST", body: JSON.stringify({ old: o.name, new: d.name }) }); }
+    for (const d of catDraft) if (!catDraftOrig.find(x => x.key === d.key))
+      await api("/api/categories", { method: "POST", body: JSON.stringify({ name: d.name }) });
+    if (names.length) await api("/api/categories/reorder", { method: "POST", body: JSON.stringify({ names }) });
+    if (activeCat !== null && activeCat !== "") {
+      const kept = catDraft.find(d => { const o = catDraftOrig.find(x => x.key === d.key); return o && o.name === activeCat; });
+      activeCat = kept ? kept.name : null;
+      saveActiveCat();
+    }
+    closeCatDrawer();
+    await loadEstimates();
+  } catch (e) {
+    try { await loadEstimates(); } catch (_) {}
+    openCatDrawer();  // rebuild draft from server truth
+    err.textContent = "保存失败：" + e.message + "，已按服务器最新状态恢复，请重试";
+  } finally { btn.disabled = false; }
+};
+
 function sortedItems(items) {
   if (sortMode !== "change") return items;
   return [...items].sort((a, b) => (b.est_change_pct ?? -Infinity) - (a.est_change_pct ?? -Infinity));
@@ -2437,6 +2668,9 @@ function sortedItems(items) {
 function renderFunds(data) {
   const funds = data.funds || [];
   buildGroups(data);
+  renderCatBar(data);
+  const visibleGroups = activeCat === null ? currentGroups
+    : currentGroups.filter(g => (g.category || "") === activeCat);
   const changed = new Set();
   if (prevSnapshot) {
     funds.forEach(f => {
@@ -2445,7 +2679,7 @@ function renderFunds(data) {
     });
   }
   let html = "";
-  currentGroups.forEach(g => {
+  visibleGroups.forEach(g => {
     // Precompute per-fund status/published/big-change so the group header can
     // show count + up/down of the same big change each card displays.
     const metas = sortedItems(g.items).map(f => {
@@ -2533,6 +2767,7 @@ function renderFunds(data) {
       </div>`;
     });
   });
+  if (!visibleGroups.length && funds.length) html = '<div class="muted" style="padding:12px 2px">该分类下暂无基金。</div>';
   $("fund-cards").innerHTML = html;
   bindSparkTips();
   prevSnapshot = {};
