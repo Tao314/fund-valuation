@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>基金自算估值</title>
 <style>
   * { box-sizing: border-box; }
@@ -42,10 +42,25 @@
   /* 16px input font: below 16px iOS Safari auto-zooms on focus and the
      zoomed page can then be panned sideways */
   input { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #EAECF0; border-radius: 8px; font-size: 16px; min-height: 42px; }
-  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #2563EB; color: #fff; font-size: 14px; cursor: pointer; min-height: 42px; }
-  button:active { background: #1D4ED8; }
-  button.secondary { background: #F2F3F5; color: #202939; }
-  button.danger { background: #FFFFFF; color: #C9362B; border: 1px solid #C9362B; padding: 5px 10px; font-size: 13px; min-height: 40px; }
+  /* login password visibility toggle: eye button inside the password field */
+  .pwd-wrap { position: relative; }
+  .pwd-wrap input { padding-right: 42px; }
+  .pwd-toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 30px; height: 30px; min-height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #667085; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .pwd-toggle:hover { background: #F2F3F5; }
+  .pwd-toggle:active { background: #F2F3F5; }
+  .pwd-toggle:focus-visible { outline: 2px solid #2563EB; outline-offset: 1px; }
+  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #2563EB; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; min-height: 44px; }
+  button:hover { background: #1D4ED8; }
+  button:active { background: #1E40AF; }
+  button:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
+  button.secondary { background: #F3F4F6; color: #374151; font-weight: 500; }
+  button.secondary:hover { background: #E5E7EB; }
+  button.secondary:active { background: #D1D5DB; }
+  button.tertiary { background: transparent; color: #6B7280; font-size: 13px; font-weight: 500; min-height: 32px; padding: 4px 8px; }
+  button.tertiary:hover { background: #F2F3F5; color: #374151; }
+  button.tertiary:active { background: #E5E7EB; }
+  button.tertiary.link { color: #2563EB; }
+  button.tertiary.link:hover { color: #1D4ED8; }
   button:disabled { opacity: .45; cursor: default; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row input { flex: 1; min-width: 160px; }
@@ -56,12 +71,18 @@
   .muted { color: #98A2B3; font-size: 12px; }
   .sub { color: #667085; font-size: 12px; }
   .err { color: #C9362B; font-size: 13px; min-height: 18px; }
-  .search-results button { margin: 4px 4px 0 0; background: #F2F3F5; color: #202939; border: 1px solid #EAECF0; max-width: 100%; }
-  .search-results button:disabled { background: #E8F3FF; color: #2563EB; border-color: #E8F3FF; }
+  .search-results button { margin: 4px 4px 0 0; background: #F3F4F6; color: #374151; border: 0; max-width: 100%; }
+  .search-results button:hover { background: #E5E7EB; }
+  .search-results button:disabled { background: #F2F3F5; color: #98A2B3; }
   .badge { display: inline-block; background: #FEF3C7; color: #B45309; font-size: 10px; border-radius: 6px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; transition: opacity 1s; }
   tr.group-row td { background: #F5F6F8; color: #202939; font-weight: 600; text-align: left; font-size: 14px; }
-  button.mini { padding: 4px 8px; font-size: 13px; background: #F2F3F5; color: #202939; margin-right: 4px; min-height: 40px; }
+  button.mini { padding: 0 8px; font-size: 12px; font-weight: 500; background: #F3F4F6; color: #374151; margin-right: 4px; min-height: 28px; height: 28px; }
+  button.mini:hover { background: #E5E7EB; }
   button.mini:disabled { opacity: .35; cursor: default; }
+  button.danger { background: #DC2626; color: #fff; border: 0; padding: 4px 12px; font-size: 13px; font-weight: 600; min-height: 32px; }
+  button.danger:hover { background: #B91C1C; }
+  button.danger:active { background: #991B1B; }
+  button.mini.danger { background: #DC2626; color: #fff; }
   #countdown { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; }
   .ms-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 7px; background: #ECEFF4; border-radius: 999px; font-size: 10.5px; font-weight: 500; color: #374151; flex: none; width: fit-content; max-width: 100%; }
   .ms-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
@@ -138,6 +159,8 @@
   .fund-card .fc-row-today .fc-val b { font-size: 16px; font-weight: 700; }
   .fund-card .fc-row-diff .fc-diff { font-size: 12px; font-weight: 500; color: #344054; }
   .fund-card .fc-status { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 6px; white-space: nowrap; }
+  .fund-card .fc-remove { font-size: 11px; color: #6B7280; background: none; border: none; padding: 2px 4px; margin-left: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; min-height: 24px; }
+  .fund-card .fc-remove:hover { color: #374151; text-decoration: underline; }
   .fund-card .fc-code { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 6px; white-space: nowrap; }
   .fund-card .fc-code-status { white-space: nowrap; }
   .fund-card .fc-state { font-size: 11px; color: #98A2B3; font-weight: 400; margin-left: 4px; white-space: nowrap; }
@@ -190,10 +213,10 @@
   .fund-card .fc-spark .sp-times .sp-t-first { left: 0; transform: none; }
   .fund-card .fc-spark .sp-times .sp-t-last { right: 0; left: auto; transform: none; }
   .fund-card .fc-spark .sp-dot { position: absolute; width: 5px; height: 5px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
-  .sort-toggle button { min-height: 26px; height: 26px; padding: 0 7px; font-size: 11px; background: #F3F4F6; color: #667085; border-radius: 6px; }
-  .sort-toggle button.active { background: #2563EB; color: #fff; font-weight: 600; }
-  .sort-toggle button:active { background: #E5E7EB; }
-  .sort-toggle button.active:active { background: #1D4ED8; }
+  .sort-toggle button { min-height: 32px; height: 32px; padding: 0 12px; font-size: 13px; font-weight: 500; background: #F3F4F6; color: #4B5563; border-radius: 8px; }
+  .sort-toggle button.active { background: #DBEAFE; color: #1D4ED8; font-weight: 500; }
+  .sort-toggle button:hover { background: #E5E7EB; }
+  .sort-toggle button.active:hover { background: #BFDBFE; }
   /* compact top toolbar (v1.2.0): two slim rows instead of big buttons */
   .toolbar-row1 { display: flex; align-items: center; gap: 8px; min-height: 34px; flex-wrap: wrap; }
   /* row1 items keep natural size and wrap to the next line instead of
@@ -201,22 +224,22 @@
   .toolbar-row1 > * { flex: none; }
   .toolbar-row2 { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
   .toolbar-row2 .sort-toggle { display: flex; gap: 4px; flex: none; }
-  .tab-btn { height: 28px; min-height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #ECEEF2; color: #667085; }
-  .tab-btn.active { background: #EBF1FF; color: #2563EB; font-weight: 600; }
-  .tab-btn:active { background: #EBF1FF; }
-  #refresh-btn { width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 8px; background: #EBF1FF; color: #2563EB; display: inline-flex; align-items: center; justify-content: center; flex: none; }
-  #refresh-btn:active { background: #DBEAFE; }
+  .tab-btn { height: 32px; min-height: 32px; padding: 0 12px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #F3F4F6; color: #4B5563; }
+  .tab-btn.active { background: #DBEAFE; color: #1D4ED8; font-weight: 500; }
+  .tab-btn:hover { background: #E5E7EB; }
+  .tab-btn.active:hover { background: #BFDBFE; }
+  #refresh-btn { width: 40px; height: 40px; min-height: 40px; padding: 0; border-radius: 8px; background: #F3F4F6; color: #374151; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  #refresh-btn:hover { background: #E5E7EB; }
+  #refresh-btn:active { background: #D1D5DB; }
   #refresh-btn.spinning svg { animation: fv-spin .8s linear infinite; }
   @keyframes fv-spin { to { transform: rotate(360deg); } }
-  .logout-btn { background: transparent; color: #667085; font-size: 12px; padding: 4px 6px; min-height: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
-  .logout-btn:active { background: transparent; color: #374151; }
-  /* ranking view (v1.2.0) */
+   /* ranking view (v1.2.0) */
   .chip-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 6px; scrollbar-width: none; }
   .chip-row::-webkit-scrollbar { display: none; }
-  .chip { min-height: 28px; height: 28px; padding: 0 10px; font-size: 12px; border-radius: 999px; background: #F2F3F5; color: #667085; white-space: nowrap; flex: none; }
-  .chip.active { background: #2563EB; color: #fff; font-weight: 600; }
-  .chip:active { background: #E5E7EB; }
-  .chip.active:active { background: #1D4ED8; }
+  .chip { min-height: 32px; height: 32px; padding: 0 12px; font-size: 13px; font-weight: 500; border-radius: 8px; background: #F3F4F6; color: #4B5563; white-space: nowrap; flex: none; }
+  .chip.active { background: #DBEAFE; color: #1D4ED8; font-weight: 500; }
+  .chip:hover { background: #E5E7EB; }
+  .chip.active:hover { background: #BFDBFE; }
   .rank-row { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid #F0F2F5; }
   .rank-row:last-child { border-bottom: 0; }
   .rk-num { width: 28px; flex: none; text-align: center; font-size: 14px; font-weight: 600; color: #98A2B3; }
@@ -225,7 +248,9 @@
   .rk-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: break-word; }
   .rk-sub { font-size: 11px; color: #98A2B3; margin-top: 2px; }
   .rk-val { font-size: 17px; font-weight: 700; white-space: nowrap; flex: none; }
-  .rk-add { flex: none; min-height: 26px; padding: 0 8px; font-size: 11px; border-radius: 999px; background: #EBF1FF; color: #2563EB; font-weight: 600; white-space: nowrap; }
+  .rk-add { flex: none; min-height: 28px; height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; background: #2563EB; color: #fff; font-weight: 600; white-space: nowrap; }
+  .rk-add:hover { background: #1D4ED8; }
+  .rk-add:active { background: #1E40AF; }
   .rk-add:disabled { background: #F2F3F5; color: #98A2B3; font-weight: 400; }
   .rk-val .up, .rk-val .down, .rk-val .flat { font-weight: 700; }
   .rk-updated { font-size: 11px; color: #98A2B3; text-align: center; margin-top: 10px; }
@@ -283,11 +308,15 @@
   .cat-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .cat-pills { display: flex; gap: 8px; align-items: center; overflow-x: auto; scrollbar-width: none; flex: 1; min-width: 0; padding: 2px; }
   .cat-pills::-webkit-scrollbar { display: none; }
-  .cat-pill { flex: none; min-height: 28px; height: 28px; padding: 0 10px; border-radius: 8px; border: 0; background: #ECEEF2; color: #667085; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .cat-pill { flex: none; min-height: 32px; height: 32px; padding: 0 12px; border-radius: 8px; border: 0; background: #F3F4F6; color: #4B5563; font-size: 13px; font-weight: 500; white-space: nowrap; }
   .cat-pill .n { font-weight: 500; opacity: .75; }
-  .cat-pill.active { background: #2563EB; color: #fff; }
+  .cat-pill.active { background: #DBEAFE; color: #1D4ED8; }
   .cat-pill.active .n { opacity: .85; }
-  .cat-edit-btn { flex: none; width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 50%; background: #fff; color: #667085; border: 1px solid #EAECF0; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(16,24,40,.06); }
+  .cat-pill:hover { background: #E5E7EB; }
+  .cat-pill.active:hover { background: #BFDBFE; }
+  .cat-edit-btn { flex: none; width: 40px; height: 40px; min-height: 40px; padding: 0; border-radius: 8px; background: #F3F4F6; color: #374151; border: 0; display: inline-flex; align-items: center; justify-content: center; }
+  .cat-edit-btn:hover { background: #E5E7EB; }
+  .cat-edit-btn:active { background: #D1D5DB; }
   /* category editor drawer */
   .cat-overlay { position: fixed; inset: 0; background: rgba(16,24,40,.45); z-index: 60; display: flex; align-items: flex-end; justify-content: center; }
   .cat-drawer { background: #fff; width: 100%; max-width: 560px; max-height: 85vh; overflow: auto; border-radius: 16px 16px 0 0; padding: 16px; }
@@ -296,11 +325,11 @@
   .cat-draft-row { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-bottom: 1px solid #F0F2F5; }
   .cat-drag { cursor: grab; color: #98A2B3; flex: none; touch-action: none; letter-spacing: 1px; }
   .cat-draft-row input.cat-draft-name { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 8px; padding: 6px 8px; font-size: 14px; font-weight: 600; color: #202939; }
-  .cat-draft-row input.cat-draft-name:focus { border-color: #07845B; outline: none; }
+  .cat-draft-row input.cat-draft-name:focus { border-color: #2563EB; outline: none; }
   .cat-fixed-name { font-size: 14px; font-weight: 600; color: #202939; }
   /* per-category quick add: layout only, inherits the site primary button */
   .cat-add-btn { width: 100%; margin-top: 10px; }
-  .cat-add-card { margin-top: 10px; border: 1px solid #D9E4DC; border-radius: 12px; padding: 12px; background: #FBFDFC; }
+  .cat-add-card { margin-top: 10px; border: 1px solid #DBEAFE; border-radius: 12px; padding: 12px; background: #EFF6FF; }
   .cat-add-card .row input { margin: 0; }
   .cat-add-card .search-results { margin-top: 4px; }
   @media (max-width: 720px) { th.hide-m, td.hide-m { display: none; } table { font-size: 13px; } }
@@ -315,7 +344,7 @@
 </head>
 <body>
 <header>
-  <div class="header-row1"><div class="title-wrap"><h1>基金自算估值</h1><span class="refresh-group"><button id="refresh-btn" title="刷新" aria-label="刷新" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button><span id="countdown" title="下次自动刷新" style="display:none">60s</span></span></div></div>
+  <div class="header-row1"><div class="title-wrap"><h1>基金自算估值</h1><span class="refresh-group"><button id="refresh-btn" title="刷新" aria-label="刷新" style="display:none"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button><span id="countdown" title="下次自动刷新" style="display:none">60s</span></span></div></div>
   <div id="notice-bar"><span class="nt-track" id="notice-track"><span id="notice-text"></span><span class="nt-time" id="notice-time"></span></span></div>
 </header>
 <main>
@@ -323,8 +352,11 @@
     <h3 id="auth-title">登录</h3>
     <div id="auth-login-fields">
       <input id="username" placeholder="用户名或邮箱" autocomplete="username">
-      <input id="password" type="password" placeholder="密码" autocomplete="current-password">
-      <div class="row" id="auth-forgot-row"><button class="secondary" id="auth-forgot">忘记密码？</button></div>
+      <div class="pwd-wrap">
+        <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+        <button type="button" class="pwd-toggle" id="pwd-toggle" title="显示密码" aria-label="显示密码" aria-pressed="false"><svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg><svg class="eye-open" style="display:none" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
+      <div class="row" id="auth-forgot-row"><button class="tertiary link" id="auth-forgot">忘记密码？</button></div>
     </div>
     <div id="auth-register-fields" style="display:none">
       <div id="reg-email-fields">
@@ -349,7 +381,7 @@
     <div class="muted" id="auth-ok"></div>
     <div class="row">
       <button id="auth-btn">登录</button>
-      <button class="secondary" id="auth-switch">没有账号？去注册</button>
+      <button class="tertiary link" id="auth-switch">没有账号？去注册</button>
     </div>
   </div>
 
@@ -362,13 +394,13 @@
         <button class="tab-btn" id="nav-evo">演变</button>
         <button class="tab-btn" id="nav-admin" style="display:none">管理</button>
         <span style="flex:1"></span>
-        <span class="user-wrap"><span id="userbox"></span><button class="logout-btn" id="logout-btn" style="display:none">退出</button></span>
+        <span class="user-wrap"><span id="userbox"></span><button class="tertiary" id="logout-btn" style="display:none">退出</button></span>
       </div>
       <div class="toolbar-row2" id="toolbar-row2">
         <span id="market-status" class="ms-pill"><span class="ms-item"><span class="ms-dot" id="ms-dot-a"></span><span id="ms-text-a"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-hk"></span><span id="ms-text-hk"></span></span><span class="ms-item"><span class="ms-dot" id="ms-dot-us"></span><span id="ms-text-us"></span></span></span>
         <div class="sort-toggle">
-          <button class="secondary active" id="sort-default">默认顺序</button>
-          <button class="secondary" id="sort-change">按涨跌幅</button>
+          <button class="active" id="sort-default">默认顺序</button>
+          <button id="sort-change">按涨跌幅</button>
         </div>
       </div>
     </div>
@@ -390,7 +422,7 @@
         <div class="err" id="bind-err"></div>
       </div>
       <div class="card">
-        <div class="cat-bar"><div class="cat-pills" id="cat-pills"></div><button class="cat-edit-btn" id="cat-edit-btn" title="编辑分类" aria-label="编辑分类"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="#fff"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="#fff"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="7" cy="18" r="2" fill="#fff"/></svg></button></div>
+        <div class="cat-bar"><div class="cat-pills" id="cat-pills"></div><button class="cat-edit-btn" id="cat-edit-btn" title="编辑分类" aria-label="编辑分类"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2" fill="#F3F4F6"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2" fill="#F3F4F6"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="7" cy="18" r="2" fill="#F3F4F6"/></svg></button></div>
         <div id="fund-cards"></div>
         <button class="cat-add-btn" id="cat-quick-add-btn">＋ 添加自选到「未分组」</button>
         <div class="cat-add-card" id="cat-quick-add-card" style="display:none">
@@ -552,7 +584,7 @@
           <div class="row">
             <input id="notice-input" placeholder="通知内容（最多 500 字）" autocomplete="off" style="flex:1">
             <button id="notice-publish-btn">发布</button>
-            <button class="secondary" id="notice-clear-btn">清除</button>
+            <button class="tertiary" id="notice-clear-btn">清除</button>
           </div>
           <div class="muted" id="notice-current" style="margin-top:6px">当前通知：无</div>
           <div class="muted" id="notice-status" style="margin-top:4px"></div>
@@ -589,7 +621,7 @@
         </div>
         <div class="row">
           <input id="new-username" placeholder="新用户名（3-32 个字符）" autocomplete="username">
-          <button id="change-username-btn">改用户名</button>
+          <button class="secondary" id="change-username-btn">改用户名</button>
           <span class="muted" id="username-saved"></span>
         </div>
         <div class="err" id="username-err"></div>
@@ -598,7 +630,7 @@
         <input id="new-password" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password">
         <input id="confirm-password" type="password" placeholder="确认新密码" autocomplete="new-password">
         <div class="row">
-          <button id="change-password-btn">修改密码</button>
+          <button class="secondary" id="change-password-btn">修改密码</button>
           <span class="muted" id="password-saved"></span>
         </div>
         <div class="muted">修改后其他设备上的登录会失效，当前设备保持登录。</div>
@@ -719,7 +751,7 @@
 <footer><div class="dataflow-banner" id="dataflow-banner" style="display:none">数据流异常，修复中</div><div class="footer-note">自算估值（前十大持仓+未披露仓位补齐），仅供参考，以基金公司公布净值为准</div><span id="app-version">版本 v2.1.0 · 更新于 2026-11-28 13:51</span></footer>
 <div class="cat-overlay" id="cat-overlay" style="display:none">
   <div class="cat-drawer" role="dialog" aria-label="编辑分类">
-    <div class="cat-drawer-head"><h3 style="margin:0">编辑分类</h3><button class="mini" id="cat-drawer-close" aria-label="关闭">✕</button></div>
+    <div class="cat-drawer-head"><h3 style="margin:0">编辑分类</h3><button class="tertiary" id="cat-drawer-close" aria-label="关闭">✕</button></div>
     <div class="muted" style="margin:6px 0 4px">拖动 ⋮⋮ 或点 ↑ ↓ 调整顺序，点名字改名；「全部」固定在最前，不可编辑。</div>
     <div class="cat-draft-row"><span class="cat-drag" aria-hidden="true">⋮⋮</span><span class="cat-fixed-name">全部</span><span class="muted" id="cat-all-count"></span><span class="muted" style="margin-left:auto">固定</span></div>
     <div id="cat-draft-list"></div>
@@ -1623,6 +1655,19 @@ function setAuthMode(m) {
 }
 $("auth-switch").onclick = () => setAuthMode(mode === "login" ? "register" : "login");
 $("auth-forgot").onclick = () => setAuthMode("reset");
+// Login password visibility toggle: only flips the input type (password/text),
+// never touches the value; mousedown is swallowed so the field keeps focus.
+$("pwd-toggle").addEventListener("mousedown", e => e.preventDefault());
+$("pwd-toggle").onclick = () => {
+  const pw = $("password"), show = pw.type === "password";
+  pw.type = show ? "text" : "password";
+  document.querySelector("#pwd-toggle .eye-open").style.display = show ? "" : "none";
+  document.querySelector("#pwd-toggle .eye-closed").style.display = show ? "none" : "";
+  const t = $("pwd-toggle");
+  t.setAttribute("aria-pressed", String(show));
+  t.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+  t.title = show ? "隐藏密码" : "显示密码";
+};
 function startCodeCountdown(btn) {
   let left = 60; btn.disabled = true; btn.textContent = left + " 秒后重发";
   const t = setInterval(() => {
@@ -1734,6 +1779,25 @@ function optimisticRemove(id) {
   window.estimateData.funds = (window.estimateData.funds || []).filter(f => f.id !== id);
   addedCodes = new Set(window.estimateData.funds.map(f => f.fund_code));
   renderFunds(window.estimateData);
+}
+// Remove a fund from the watchlist, from its valuation card (v2.1.0):
+// confirm naming the fund, DELETE /api/watchlist/{id} (existing API),
+// card disappears + category counts -1 via renderFunds, no full refresh.
+// No holdings guard: the system has no user holdings data yet (no
+// user_holdings table, holdings page not built), so there is nothing to
+// block on; the guard belongs in delete_watchlist when holdings land.
+async function removeFund(id, code) {
+  const f = (window.estimateData.funds || []).find(x => x.id === id);
+  const label = (f ? f.fund_name : code) + "\uFF08" + code + "\uFF09";
+  if (!confirm("移除自选基金\u300C" + label + "\u300D？\n移除后将不再显示在自选列表中。")) return;
+  setErr("");
+  if (id < 0) { optimisticRemove(id); return; }  // not yet synced placeholder
+  try {
+    await api("/api/watchlist/" + id, { method: "DELETE" });
+    optimisticRemove(id);
+  } catch (e) {
+    setErr("移除失败：" + e.message);
+  }
 }
 function fmtPct(v) { if (v == null) return "-"; const s = (v > 0 ? "+" : "") + v.toFixed(2) + "%"; return `<span class="${v > 0 ? "up" : v < 0 ? "down" : "flat"}">${s}</span>`; }
 // Estimate accuracy vs published change (percentage points, neutral color)
@@ -2426,6 +2490,7 @@ async function runCatQuickSearch() {
       ? `<button disabled>${r.code} ${esc(r.name)} 已添加</button>`
       : `<button data-name="${esc(r.name)}" onclick="catQuickAdd('${r.code}', this)">${r.code} ${esc(r.name)} ＋</button>`).join("") || '<span class="muted">无结果</span>';
   } catch (e) { box.innerHTML = ""; err.textContent = e.message; }
+  keepInputVisible(q);  // results grew below the input; keep it uncovered
 }
 async function catQuickAdd(code, btn) {
   if (addedCodes.has(code)) return;
@@ -2453,6 +2518,36 @@ $("cat-quick-add-btn").onclick = () => { const card = $("cat-quick-add-card"); s
 $("cat-quick-search-btn").onclick = runCatQuickSearch;
 $("cat-quick-search-q").addEventListener("keydown", e => { if (e.key === "Enter") runCatQuickSearch(); });
 $("cat-quick-close").onclick = () => setCatQuickCard(false);
+
+/* ---- iOS keyboard: keep the focused input above the keyboard ----
+   The quick-add card sits at the bottom of the list, so on iOS the
+   keyboard slides up over its input. scrollIntoView(center) on focus,
+   again 300ms later (keyboard animation done), and on every
+   visualViewport resize while an input stays focused. One delegated
+   focusin listener covers every input: quick-add, login, drawer. */
+let kbScrollTimer = null;
+function keepInputVisible(input) {
+  if (!input || document.activeElement !== input) return;
+  const r = input.getBoundingClientRect();
+  const visibleBottom = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  if (r.bottom > visibleBottom - 8 || r.top < 0) {
+    input.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+document.addEventListener("focusin", e => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
+    keepInputVisible(t);
+    clearTimeout(kbScrollTimer);
+    kbScrollTimer = setTimeout(() => keepInputVisible(t), 300);
+  }
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    const a = document.activeElement;
+    if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) keepInputVisible(a);
+  });
+}
 
 /* ---- category editor drawer (draft + save; same /api/categories APIs) ---- */
 let catDraft = [], catDraftOrig = [];
@@ -2484,7 +2579,7 @@ function renderCatDraft() {
        <input class="cat-draft-name" data-idx="${i}" value="${esc(it.name)}" maxlength="20" title="点击改名">
        <button class="mini" data-act="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
        <button class="mini" data-act="down" data-idx="${i}" ${i === catDraft.length - 1 ? "disabled" : ""}>↓</button>
-       <button class="mini danger" data-act="del" data-idx="${i}">删除</button>
+       <button class="danger" data-act="del" data-idx="${i}">删除</button>
      </div>`).join("") : '<div class="muted" style="padding:8px 0">暂无分类，在下方添加。</div>';
 }
 $("cat-draft-list").addEventListener("input", e => {
@@ -2651,6 +2746,7 @@ function renderFunds(data) {
       <div class="fc-head">
         <div class="fc-name">${esc(f.fund_name)}<span class="fc-code-status"><span class="fc-code">${f.fund_code}</span><span class="fc-status" data-code="${f.fund_code}">${st.label}</span></span></div>
         ${published || big == null ? "" : `<div class="fc-chg">${fmtPct(big)}</div>`}
+        <button class="fc-remove" type="button" onclick="event.stopPropagation(); removeFund(${f.id}, '${f.fund_code}')">移除</button>
       </div>
       <div class="fc-meta">${ch ? '<span class="badge">已更新</span>' : ""}${metaParts.join(" · ")}</div>
       ${rows}
@@ -2703,8 +2799,8 @@ $("change-password-btn").onclick = async () => {
 };
 function setSortMode(mode) {
   sortMode = mode;
-  $("sort-default").className = "secondary" + (mode === "default" ? " active" : "");
-  $("sort-change").className = "secondary" + (mode === "change" ? " active" : "");
+  $("sort-default").className = mode === "default" ? "active" : "";
+  $("sort-change").className = mode === "change" ? "active" : "";
   if (window.estimateData) renderFunds(window.estimateData);
 }
 $("sort-default").onclick = () => setSortMode("default");
